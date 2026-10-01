@@ -1,0 +1,14 @@
+{
+  "yosys": "yosys",
+  "nextpnr_xilinx": "/opt/arty-tools/nextpnr-xilinx/nextpnr-xilinx",
+  "fasm2frames": [
+    "/opt/arty-tools/venv/bin/python",
+    "/opt/arty-tools/prjxray/utils/fasm2frames.py"
+  ],
+  "xc7frames2bit": "/opt/arty-tools/prjxray/build/tools/xc7frames2bit",
+  "openfpgaloader": "openFPGALoader",
+  "chipdb": "/opt/arty-tools/nextpnr-xilinx/xilinx/xc7a100tcsg324-1.bin",
+  "prjxray_db": "/opt/arty-tools/nextpnr-xilinx/xilinx/external/prjxray-db/artix7",
+  "part": "xc7a100tcsg324-1",
+  "build_dir": "build"
+}

@@ -1,0 +1,201 @@
+"""Protocole UART borné, identique à celui du firmware Arty A7.
+
+Un paquet contient ``A7 7A version op seq len payload crc_lo crc_hi``.
+Le CRC couvre les octets de ``version`` à la fin du payload.
+"""
+
+from __future__ import annotations
+
+import struct
+from dataclasses import dataclass
+from enum import IntEnum
+
+from .model import FrameConfig
+
+SYNC = b"\xa7\x7a"
+VERSION = 1
+MAX_PAYLOAD = 32
+SEND_FORMAT = struct.Struct("<IBHHHHB")
+RESPONSE_FORMAT = struct.Struct("<BBH")
+
+
+class Opcode(IntEnum):
+    PING = 1
+    SEND = 2
+    STOP = 3
+    STATUS = 4
+
+
+class StatusCode(IntEnum):
+    OK = 0
+    UNKNOWN_OPCODE = 1
+    INVALID_PAYLOAD = 2
+    BUSY = 3
+    BAD_CRC = 4
+    BAD_VERSION = 5
+
+    @property
+    def message(self) -> str:
+        return {
+            self.OK: "Commande acceptée",
+            self.UNKNOWN_OPCODE: "Commande inconnue",
+            self.INVALID_PAYLOAD: "Paramètres de trame invalides",
+            self.BUSY: "Une émission est déjà en cours",
+            self.BAD_CRC: "CRC invalide",
+            self.BAD_VERSION: "Version du protocole incompatible",
+        }[self]
+
+
+class ProtocolError(ValueError):
+    """Un paquet reçu ne respecte pas le contrat du protocole."""
+
+
+@dataclass(frozen=True)
+class Packet:
+    version: int
+    opcode: int
+    sequence: int
+    payload: bytes
+
+    @property
+    def op(self) -> int:
+        return self.opcode
+
+    @property
+    def seq(self) -> int:
+        return self.sequence
+
+
+@dataclass(frozen=True)
+class DeviceStatus:
+    status: StatusCode
+    busy: bool
+    completed: int
+
+    @property
+    def ok(self) -> bool:
+        return self.status == StatusCode.OK
+
+
+def crc16(data: bytes | bytearray | memoryview) -> int:
+    """CRC16 CCITT-FALSE (polynôme 0x1021, valeur initiale 0xFFFF)."""
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ (0x1021 if crc & 0x8000 else 0)) & 0xFFFF
+    return crc
+
+
+def encode_request(op: Opcode, seq: int, config: FrameConfig | None = None) -> bytes:
+    try:
+        opcode = Opcode(op)
+    except (ValueError, TypeError) as exc:
+        raise ProtocolError("Commande UART inconnue.") from exc
+    if type(seq) is not int or not 0 <= seq <= 255:
+        raise ProtocolError("Le numéro de séquence doit être compris entre 0 et 255.")
+    if opcode == Opcode.SEND:
+        if not isinstance(config, FrameConfig):
+            raise ProtocolError("La commande SEND exige une configuration de trame.")
+        flags = int(config.lsb_first) | (int(config.latch_active_low) << 1)
+        payload = SEND_FORMAT.pack(
+            config.word,
+            config.bit_count,
+            config.divider,
+            config.latch_ticks,
+            config.gap_ticks,
+            config.repeat_count,
+            flags,
+        )
+    else:
+        if config is not None:
+            raise ProtocolError("Seule la commande SEND accepte une configuration.")
+        payload = b""
+    body = bytes((VERSION, opcode, seq, len(payload))) + payload
+    return SYNC + body + struct.pack("<H", crc16(body))
+
+
+class PacketDecoder:
+    """Décodage incrémental et resynchronisation après bruit ou CRC invalide.
+
+    Le tampon résiduel est borné à un paquet (40 octets). Les paquets corrompus
+    sont ignorés ; les compteurs permettent au transport de préciser un timeout.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = bytearray()
+        self.crc_errors = 0
+        self.length_errors = 0
+
+    def feed(self, data: bytes) -> list[Packet]:
+        self._buffer.extend(data)
+        packets: list[Packet] = []
+        while self._buffer:
+            start = self._buffer.find(SYNC)
+            if start < 0:
+                # Conserver le premier octet de synchro s'il est fragmenté.
+                self._buffer[:] = b"\xa7" if self._buffer[-1] == SYNC[0] else b""
+                break
+            if start:
+                del self._buffer[:start]
+            if len(self._buffer) < 6:
+                break
+            size = self._buffer[5]
+            if size > MAX_PAYLOAD:
+                self.length_errors += 1
+                del self._buffer[0]
+                continue
+            total = 8 + size
+            if len(self._buffer) < total:
+                # Une longueur corrompue peut masquer une réponse complète qui
+                # suit. Ne resynchroniser que sur un candidat au CRC vérifié.
+                candidate = self._buffer.find(SYNC, 2)
+                recovered = False
+                while candidate >= 0 and len(self._buffer) - candidate >= 6:
+                    candidate_size = self._buffer[candidate + 5]
+                    candidate_end = candidate + 8 + candidate_size
+                    if candidate_size <= MAX_PAYLOAD and candidate_end <= len(self._buffer):
+                        candidate_crc = struct.unpack_from("<H", self._buffer, candidate_end - 2)[0]
+                        if (
+                            crc16(memoryview(self._buffer)[candidate + 2 : candidate_end - 2])
+                            == candidate_crc
+                        ):
+                            del self._buffer[:candidate]
+                            recovered = True
+                            break
+                    candidate = self._buffer.find(SYNC, candidate + 2)
+                if recovered:
+                    continue
+                break
+            expected = struct.unpack_from("<H", self._buffer, total - 2)[0]
+            if crc16(memoryview(self._buffer)[2 : total - 2]) != expected:
+                self.crc_errors += 1
+                del self._buffer[0]
+                continue
+            packets.append(
+                Packet(
+                    self._buffer[2],
+                    self._buffer[3],
+                    self._buffer[4],
+                    bytes(self._buffer[6 : total - 2]),
+                )
+            )
+            del self._buffer[:total]
+        return packets
+
+
+def decode_response(packet: Packet) -> DeviceStatus:
+    if packet.version != VERSION:
+        raise ProtocolError("La carte utilise une version de protocole incompatible.")
+    if packet.opcode not in tuple(0x80 | op for op in Opcode):
+        raise ProtocolError("Le paquet reçu n'est pas une réponse UART reconnue.")
+    if len(packet.payload) != RESPONSE_FORMAT.size:
+        raise ProtocolError("La réponse UART a une longueur invalide.")
+    status, busy, completed = RESPONSE_FORMAT.unpack(packet.payload)
+    if busy not in (0, 1):
+        raise ProtocolError("Le champ d'activité de la réponse UART est invalide.")
+    try:
+        status_code = StatusCode(status)
+    except ValueError as exc:
+        raise ProtocolError("Le code d'état de la réponse UART est inconnu.") from exc
+    return DeviceStatus(status_code, bool(busy), completed)

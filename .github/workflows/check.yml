@@ -1,0 +1,14 @@
+name: Python and RTL checks
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -e '.[dev]'
+      - run: make check format-check tests
+      - run: sudo apt-get update && sudo apt-get install -y iverilog
+      - run: make rtl

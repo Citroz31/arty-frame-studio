@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "frame": {
+    "word": 44739242,
+    "bit_count": 26,
+    "divider": 20,
+    "latch_ticks": 8,
+    "gap_ticks": 40,
+    "repeat_count": 1,
+    "lsb_first": false,
+    "latch_active_low": false
+  }
+}
