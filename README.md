@@ -37,6 +37,11 @@ fonctionnent sous Windows/macOS/Linux ; la chaîne FPGA décrite est destinée �
 Linux. Un environnement de bureau est nécessaire pour Flet. Aucun compilateur
 FPGA n’est requis pour utiliser la simulation et le mode démonstration.
 
+**Sous Windows, COM7 visible ne signifie pas que le FPGA est programmé.**
+Le pilote USB série permet d’ouvrir le port ; le firmware UART du projet doit
+être chargé séparément par JTAG. Voir le [guide Windows](docs/windows.md)
+si le port est détecté mais ne répond pas.
+
 Avec `uv`, le fichier `uv.lock` permet une installation figée :
 `uv sync --extra dev --frozen`, puis `uv run arty-frame-studio`.
 Conserver le dossier du projet pour la compilation FPGA. Depuis une installation
@@ -75,7 +80,7 @@ mypy src/arty_frame_studio
 python firmware/sim/run_tests.py
 ```
 
-La dernière commande nécessite Icarus Verilog. **146 tests Python et cinq bancs
+La dernière commande nécessite Icarus Verilog. **153 tests Python et cinq bancs
 RTL passent**, avec vérification des types et du formatage. Le projet contient des tests du
 protocole et du transport, des chronogrammes et du moteur RTL. Ces tests numériques
 ne remplacent pas une mesure à l’oscilloscope sur la carte.
@@ -90,6 +95,7 @@ et `docs/` le protocole et la procédure de compilation.
 arty-frame simulate --profile examples/frame_26bits.json --output exports/trame
 arty-frame send --profile examples/frame_26bits.json --demo --wait
 arty-frame ports
+arty-frame diagnose --port COM7 --timeout 2
 arty-frame send --profile examples/frame_26bits.json --port /dev/ttyUSB1 --wait
 arty-frame status --port /dev/ttyUSB1
 arty-frame stop --port /dev/ttyUSB1

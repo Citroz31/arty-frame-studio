@@ -80,6 +80,9 @@ def test_connection_verifies_ping_and_full_serial_settings():
     assert endpoint.settings["bytesize"] == 8
     assert endpoint.settings["parity"] == "N"
     assert endpoint.settings["stopbits"] == 1
+    assert not endpoint.settings["xonxoff"]
+    assert not endpoint.settings["rtscts"]
+    assert not endpoint.settings["dsrdtr"]
     assert endpoint.resets == 1
     device.close()
     assert not device.connected and not endpoint.is_open
@@ -89,9 +92,39 @@ def test_connection_verifies_ping_and_full_serial_settings():
 
 def test_connection_does_not_accept_an_unresponsive_port():
     device, endpoint = make_serial(lambda packet: b"")
-    with pytest.raises(CommandTimeout, match="PING"):
+    with pytest.raises(CommandTimeout, match="PING") as error:
         device.connect()
+    assert error.value.received_bytes == 0
+    assert "Le port USB/UART a été ouvert" in str(error.value)
+    assert "bitstream" in str(error.value)
     assert not device.connected and not endpoint.is_open
+
+
+def test_unrelated_uart_text_is_reported_as_data_without_a_valid_ping():
+    text = b"Arty factory demo\r\n"
+    device, endpoint = make_serial(lambda packet: text)
+    with pytest.raises(CommandTimeout) as error:
+        device.connect()
+    assert error.value.received_bytes == len(text)
+    assert "Aucun octet reçu" not in str(error.value)
+    assert [p.opcode for p in endpoint.requests] == [Opcode.PING]
+    assert not endpoint.is_open
+
+
+def test_windows_port_name_is_trimmed_before_opening():
+    endpoint = FakeSerial()
+
+    def factory(**settings):
+        endpoint.settings = settings
+        return endpoint
+
+    device = SerialDevice(" COM7 ", serial_factory=factory)
+    try:
+        assert device.connect().ok
+        assert device.port == "COM7"
+        assert endpoint.settings["port"] == "COM7"
+    finally:
+        device.close()
 
 
 def test_connection_open_error_is_french_and_keeps_disconnected():

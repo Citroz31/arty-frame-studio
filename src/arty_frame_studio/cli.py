@@ -19,6 +19,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Arty A7-100T : trames et FPGA sans Vivado")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("ports", help="Lister les ports USB/UART")
+    diagnose = commands.add_parser("diagnose", help="Vérifier le port et le PING du firmware UART")
+    diagnose.add_argument("--port", required=True, help="COM7, /dev/ttyUSB1, etc.")
+    diagnose.add_argument(
+        "--timeout", type=float, default=2, help="Délai PING en secondes (défaut : 2)"
+    )
     profile = commands.add_parser("profile", help="Créer un profil JSON d’exemple")
     profile.add_argument("path", type=Path)
     simulation = commands.add_parser("simulate", help="Exporter le chronogramme idéal")
@@ -48,7 +53,34 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "ports":
             for port in list_ports():
-                print(f"{port.device}\t{port.description}")
+                print(f"{port.device}\t{port.description}\t{port.hwid}")
+        elif args.command == "diagnose":
+            probe = SerialDevice(args.port, timeout=args.timeout)
+            print(f"Diagnostic {probe.port} : 115200 bauds, 8N1, aucun contrôle de flux.")
+            print("Test PING uniquement : aucune commande SEND ou STOP n'est envoyée.")
+            try:
+                ports = list_ports()
+                matching = [p for p in ports if p.device == probe.port]
+                if not matching and probe.port.upper().startswith("COM"):
+                    matching = [p for p in ports if p.device.upper() == probe.port.upper()]
+                if matching:
+                    for port in matching:
+                        print(
+                            f"Port USB : {port.description}\nIdentifiant : {port.hwid or 'inconnu'}"
+                        )
+                else:
+                    print(
+                        "Port absent de la liste USB/UART ; "
+                        "tentative sur le port demandé uniquement."
+                    )
+            except TransportError as exc:
+                print(f"Liste des ports indisponible : {exc}", file=sys.stderr)
+            try:
+                status = probe.connect()
+                print("Firmware Arty Frame Studio : réponse PING valide.")
+                print(json.dumps(asdict(status), ensure_ascii=False))
+            finally:
+                probe.close()
         elif args.command == "profile":
             save_profile(FrameConfig(), args.path)
             print(f"Profil créé : {args.path.resolve()}")

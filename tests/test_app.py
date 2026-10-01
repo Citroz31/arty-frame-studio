@@ -5,9 +5,12 @@ from pathlib import Path
 
 import pytest
 
+from arty_frame_studio import app
 from arty_frame_studio.app import Studio, waveform_signal_points
 from arty_frame_studio.model import FrameConfig
+from arty_frame_studio.protocol import Opcode
 from arty_frame_studio.simulation import simulate
+from arty_frame_studio.transport import CommandTimeout
 
 
 class PageStub:
@@ -134,6 +137,38 @@ def test_program_none_return_is_success(tmp_path, monkeypatch):
         assert "Programmation SRAM : opération terminée" in studio.tool_message.value
         assert any("Le FPGA est configuré" in line for line in studio.log_lines)
         assert not studio.page.messages
+
+    run_async(exercise())
+
+
+def test_windows_ping_timeout_stays_visible_and_never_enables_send(tmp_path, monkeypatch):
+    calls = []
+
+    class UnresponsiveDevice:
+        connected = False
+
+        def __init__(self, port, **kwargs):
+            assert port == "COM7"
+
+        def connect(self):
+            calls.append("ping")
+            raise CommandTimeout(Opcode.PING, 0)
+
+        def close(self):
+            calls.append("close")
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.mode.value = "uart"
+        studio.port.value = "COM7"
+        monkeypatch.setattr(app, "SerialDevice", UnresponsiveDevice)
+        await studio._toggle_connection()
+        assert studio.device is None
+        assert "COM7 ouvert" in studio.connection_status.value
+        assert "aucune réponse PING compatible" in studio.connection_status.value
+        assert "bitstream" in studio.hardware_status.value
+        assert studio.send_button.disabled
+        assert calls == ["ping", "close"]
 
     run_async(exercise())
 

@@ -31,12 +31,22 @@ class DeviceError(TransportError):
 
 
 class CommandTimeout(TransportError):
-    def __init__(self, opcode: Opcode, sequence: int, details: str = "") -> None:
+    def __init__(
+        self, opcode: Opcode, sequence: int, details: str = "", *, received_bytes: int = 0
+    ) -> None:
         self.opcode = opcode
         self.sequence = sequence
+        self.received_bytes = received_bytes
         message = f"Délai de réponse dépassé pour {opcode.name} (séquence {sequence})."
         if details:
             message += f" {details}"
+        if opcode == Opcode.PING:
+            message += (
+                " Le port USB/UART a été ouvert, mais aucune confirmation compatible"
+                " n'a été reçue. Un port COM détecté ne suffit pas : le bitstream"
+                " UART du projet doit être chargé dans le FPGA. Vérifiez aussi le"
+                " port choisi, le reset et le verrouillage de l'horloge."
+            )
         if opcode == Opcode.SEND:
             message += (
                 " La commande peut avoir été exécutée ; consultez l'état de la carte"
@@ -90,7 +100,7 @@ class SerialDevice:
             raise ValueError("La vitesse UART doit être un entier positif.")
         if not 0 < timeout <= 60:
             raise ValueError("Le délai UART doit être compris entre 0 et 60 secondes.")
-        self.port = port
+        self.port = port.strip()
         self.baudrate = baudrate
         self.timeout = timeout
         self._serial_factory = serial_factory
@@ -126,6 +136,9 @@ class SerialDevice:
                     stopbits=1,
                     timeout=min(0.02, self.timeout),
                     write_timeout=self.timeout,
+                    xonxoff=False,
+                    rtscts=False,
+                    dsrdtr=False,
                 )
                 self._decoder = PacketDecoder()
                 if hasattr(self._serial, "reset_input_buffer"):
@@ -135,7 +148,11 @@ class SerialDevice:
                 self.close()
                 if isinstance(exc, TransportError):
                     raise
-                raise TransportError(f"Impossible d'ouvrir le port {self.port} : {exc}") from exc
+                raise TransportError(
+                    f"Impossible d'ouvrir le port {self.port} : {exc}."
+                    " Fermez les autres logiciels utilisant ce port, puis vérifiez"
+                    " son nom et le pilote USB série dans le Gestionnaire de périphériques."
+                ) from exc
 
     def ping(self) -> DeviceStatus:
         return self._exchange(Opcode.PING)
@@ -168,6 +185,7 @@ class SerialDevice:
             self._sequence = (sequence + 1) & 0xFF
             crc_errors_before = self._decoder.crc_errors
             unmatched = 0
+            received_bytes = 0
             try:
                 written = self._serial.write(request)
                 if written != len(request):
@@ -179,6 +197,7 @@ class SerialDevice:
                 while time.monotonic() < deadline:
                     available = int(getattr(self._serial, "in_waiting", 0))
                     data = self._serial.read(max(1, min(available, 256)))
+                    received_bytes += len(data)
                     for packet in self._decoder.feed(data):
                         if packet.sequence != sequence or packet.opcode != (0x80 | opcode):
                             unmatched += 1
@@ -196,12 +215,16 @@ class SerialDevice:
                 raise TransportError(
                     f"Erreur de liaison UART pendant {opcode.name} : {exc}"
                 ) from exc
-            details = ""
+            details = (
+                f"{received_bytes} octet(s) reçus sans réponse compatible."
+                if received_bytes
+                else "Aucun octet reçu pendant le délai."
+            )
             if self._decoder.crc_errors > crc_errors_before:
-                details = "Des réponses avec un CRC invalide ont été ignorées."
+                details += " Des réponses avec un CRC invalide ont été ignorées."
             elif unmatched:
-                details = "Des réponses ne correspondant pas à la commande ont été ignorées."
-            raise CommandTimeout(opcode, sequence, details)
+                details += " Des réponses ne correspondant pas à la commande ont été ignorées."
+            raise CommandTimeout(opcode, sequence, details, received_bytes=received_bytes)
 
 
 class DemoDevice:

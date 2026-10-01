@@ -27,7 +27,7 @@ from .model import (
 from .protocol import DeviceStatus
 from .simulation import Waveform, export_csv, export_vcd, simulate, waveform_svg
 from .toolchain import Toolchain, ToolchainConfig
-from .transport import DemoDevice, SerialDevice, list_ports
+from .transport import CommandTimeout, DemoDevice, SerialDevice, list_ports
 
 BG = "#0C1423"
 PANEL = "#142136"
@@ -394,6 +394,12 @@ class Studio:
             ),
             ft.Row([self.mode, self.port, self.refresh_button, self.connect_button], wrap=True),
             ft.Row([self.connection_status, self.hardware_status], wrap=True, spacing=24),
+            ft.Text(
+                "Mode carte : chargez d'abord le bitstream UART du projet par JTAG. "
+                "La détection d'un port COM ne confirme pas la présence du firmware.",
+                size=12,
+                color=MUTED,
+            ),
         )
         frame = self._card(
             self._heading(
@@ -773,7 +779,7 @@ class Studio:
             self.port.value = (
                 current if current in available else (ports[0].device if ports else None)
             )
-            self._log(f"Ports série détectés : {len(ports)}.")
+            self._log(f"Ports USB/UART détectés : {len(ports)} (firmware non vérifié).")
             self._update()
         except Exception as exc:
             self._error("Détection des ports", exc)
@@ -822,6 +828,16 @@ class Studio:
                     self.connection_status.color = GREEN
                     self._log(f"Connecté : {label}.", GREEN)
         except Exception as exc:
+            if self.mode.value == "uart":
+                self.connection_status.color = RED
+                if isinstance(exc, CommandTimeout):
+                    self.connection_status.value = (
+                        f"{self.port.value} ouvert · aucune réponse PING compatible"
+                    )
+                    self.hardware_status.value = "Vérifier bitstream UART, reset et horloge"
+                else:
+                    self.connection_status.value = f"Connexion impossible · {self.port.value}"
+                    self.hardware_status.value = "Consulter le journal"
             self._error("Connexion", exc)
         finally:
             self.serial_pending = False
