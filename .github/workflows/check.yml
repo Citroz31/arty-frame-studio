@@ -12,3 +12,22 @@ jobs:
       - run: make check format-check tests
       - run: sudo apt-get update && sudo apt-get install -y iverilog
       - run: make rtl
+  windows-native:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: start-windows.cmd --setup-only
+        shell: cmd
+      - run: .venv\Scripts\python.exe -m pip install -e ".[dev]"
+        shell: cmd
+      - run: .venv\Scripts\python.exe -m ruff check src tests firmware/sim
+        shell: cmd
+      - run: .venv\Scripts\python.exe -m ruff format --check src tests firmware/sim
+        shell: cmd
+      - run: .venv\Scripts\python.exe -m mypy src/arty_frame_studio
+        shell: cmd
+      - run: .venv\Scripts\python.exe -m pytest
+        shell: cmd

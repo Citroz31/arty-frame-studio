@@ -3,8 +3,9 @@
 Application de bureau **Python / Flet**, en français, pour une **Digilent Arty
 A7-100T**, avec pilotage USB/UART, trames série jusqu’à **26 bits**, sorties
 **DATA / CLK / LATCH**, simulation et exports de chronogrammes. La compilation
-FPGA utilise Yosys, nextpnr-xilinx et Project X-Ray ; la programmation SRAM utilise
-openFPGALoader. Vivado n’est pas utilisé par le projet.
+FPGA utilise Yosys, nextpnr-xilinx et Project X-Ray. La programmation SRAM peut
+utiliser openFPGALoader ou le backend Windows FTDI D2XX du projet.
+Vivado n’est pas utilisé par le projet.
 
 Le PC envoie les paramètres par UART ; le FPGA produit les fronts. La fréquence
 réalisable est **200 MHz / N**, N entier de 1 à 65535, soit environ 3,052 kHz à
@@ -23,7 +24,19 @@ Le dépôt contient le RTL et les commandes de compilation ; aucun bitstream
 
 ## Démarrage
 
-Python 3.11 ou plus récent. Depuis ce dossier :
+**Sous Windows :** installer Python 3.11 ou plus récent pour votre compte,
+télécharger et extraire le dépôt, puis double-cliquer sur
+[`start-windows.cmd`](start-windows.cmd). Le lanceur installe les dépendances
+dans le dossier du projet. Aucun PowerShell administrateur, WSL, ni changement
+de pilote USB n'est demandé. Voir le [guide Windows natif](docs/windows.md).
+
+Depuis un terminal ordinaire Windows, on peut également lancer :
+
+```bat
+start-windows.cmd
+```
+
+**Sur les autres systèmes :** avec Python 3.11 ou plus récent, depuis ce dossier :
 
 ```bash
 python -m venv .venv
@@ -32,9 +45,8 @@ python -m pip install -e '.[dev]'
 arty-frame-studio
 ```
 
-Sous Windows, activer avec `.venv\Scripts\activate`. L’interface et le port série
-fonctionnent sous Windows/macOS/Linux ; la chaîne FPGA décrite est destinée à
-Linux. Un environnement de bureau est nécessaire pour Flet. Aucun compilateur
+L’interface et le port série fonctionnent sous Windows/macOS/Linux.
+Un environnement de bureau est nécessaire pour Flet. Aucun compilateur
 FPGA n’est requis pour utiliser la simulation et le mode démonstration.
 
 **Sous Windows, COM7 visible ne signifie pas que le FPGA est programmé.**
@@ -59,9 +71,14 @@ ou `--project-root` pour les commandes FPGA de la CLI.
 3. Afficher le chronogramme idéal et exporter en SVG, CSV ou VCD (GTKWave). Le
    nombre de répétitions affichées est limité ; cette limite est indiquée sur
    le graphique et s’applique aussi aux exports.
-4. Pour la carte réelle, installer les outils et la base de données FPGA en
-   suivant [docs/toolchain.md](docs/toolchain.md), puis renseigner `toolchain.json`.
-   Compiler et charger le bitstream depuis l’onglet FPGA.
+4. Pour la carte réelle sous Windows, l'onglet FPGA permet de détecter le 100T
+   par JTAG avec le pilote FTDI existant, puis de charger un `.bit` existant
+   sans outil externe. **Le chargeur est expérimental, testé avec FTDI simulé ;
+   aucun `.bit` précompilé n'est encore fourni.** La détection JTAG ne programme
+   pas le FPGA. Pour construire le firmware, consulter
+   [docs/toolchain.md](docs/toolchain.md) : le modèle de configuration accepte
+   des exécutables Windows natifs, mais une chaîne 100T Windows complète n'a
+   pas encore été validée.
 5. Brancher le port USB de l’Arty, choisir son port série, connecter, puis envoyer
    une trame. La connexion vérifie la réponse du firmware fourni : un bitstream
    UART compatible doit déjà être chargé dans la carte.
@@ -80,8 +97,10 @@ mypy src/arty_frame_studio
 python firmware/sim/run_tests.py
 ```
 
-La dernière commande nécessite Icarus Verilog. **153 tests Python et cinq bancs
-RTL passent**, avec vérification des types et du formatage. Le projet contient des tests du
+La dernière commande nécessite Icarus Verilog. Les tests Python et cinq bancs
+RTL couvrent le projet, avec vérification des types et du formatage. Une tâche
+GitHub Actions teste aussi le lanceur et le Python sur Windows.
+Le projet contient des tests du
 protocole et du transport, des chronogrammes et du moteur RTL. Ces tests numériques
 ne remplacent pas une mesure à l’oscilloscope sur la carte.
 
@@ -96,6 +115,9 @@ arty-frame simulate --profile examples/frame_26bits.json --output exports/trame
 arty-frame send --profile examples/frame_26bits.json --demo --wait
 arty-frame ports
 arty-frame diagnose --port COM7 --timeout 2
+arty-frame jtag-devices
+arty-frame jtag-diagnose
+arty-frame jtag-program --bitstream C:\Arty\arty_frame.bit
 arty-frame send --profile examples/frame_26bits.json --port /dev/ttyUSB1 --wait
 arty-frame status --port /dev/ttyUSB1
 arty-frame stop --port /dev/ttyUSB1
@@ -111,3 +133,4 @@ pas la fréquence de ses fronts. La cadence de nouvelles commandes reste
 limitée par la liaison UART.
 
 Licence MIT.
+Le pilote et la DLL FTDI D2XX restent des dépendances externes sous licence FTDI.

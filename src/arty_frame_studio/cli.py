@@ -9,10 +9,12 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from .bitstream import read_bitstream
 from .model import FrameConfig, load_profile, save_profile
 from .simulation import export_csv, export_vcd, simulate, waveform_svg
 from .toolchain import Toolchain, ToolchainConfig
 from .transport import DemoDevice, SerialDevice, TransportError, list_ports
+from .windows_jtag import list_ftdi_devices, probe_arty, program_arty
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -24,6 +26,22 @@ def _parser() -> argparse.ArgumentParser:
     diagnose.add_argument(
         "--timeout", type=float, default=2, help="Délai PING en secondes (défaut : 2)"
     )
+    for name in ("jtag-devices", "jtag-diagnose", "jtag-program"):
+        item = commands.add_parser(
+            name, help="Windows : FTDI D2XX natif, sans changement de pilote"
+        )
+        item.add_argument("--ftdi-dll", type=Path, help="DLL D2XX FTDI ; défaut : pilote installé")
+        if name != "jtag-devices":
+            item.add_argument(
+                "--serial", help="Numéro de série du canal JTAG A, si plusieurs cartes"
+            )
+        if name == "jtag-program":
+            item.add_argument(
+                "--bitstream",
+                required=True,
+                type=Path,
+                help="Fichier .bit existant pour xc7a100tcsg324 ; SRAM, backend expérimental",
+            )
     profile = commands.add_parser("profile", help="Créer un profil JSON d’exemple")
     profile.add_argument("path", type=Path)
     simulation = commands.add_parser("simulate", help="Exporter le chronogramme idéal")
@@ -81,6 +99,23 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(asdict(status), ensure_ascii=False))
             finally:
                 probe.close()
+        elif args.command == "jtag-devices":
+            for ftdi_device in list_ftdi_devices(dll_path=args.ftdi_dll):
+                print(json.dumps(asdict(ftdi_device), ensure_ascii=False))
+        elif args.command == "jtag-diagnose":
+            jtag_probe = probe_arty(serial=args.serial, dll_path=args.ftdi_dll)
+            print(json.dumps(asdict(jtag_probe), ensure_ascii=False))
+            print("Artix-7 100T détecté par JTAG. Le firmware UART reste à vérifier par PING.")
+        elif args.command == "jtag-program":
+            image = read_bitstream(args.bitstream)
+            print(f"Bitstream : {image.path}\nPart : {image.part}\nSHA256 : {image.sha256}")
+            print("Chargement SRAM par FTDI D2XX Windows ; backend expérimental.")
+            jtag_program = program_arty(image.payload, serial=args.serial, dll_path=args.ftdi_dll)
+            print(json.dumps(asdict(jtag_program), ensure_ascii=False))
+            print(
+                "Configuration SRAM terminée. Vérifiez le firmware UART avec "
+                "diagnose --port COM7 avant d'envoyer une trame."
+            )
         elif args.command == "profile":
             save_profile(FrameConfig(), args.path)
             print(f"Profil créé : {args.path.resolve()}")

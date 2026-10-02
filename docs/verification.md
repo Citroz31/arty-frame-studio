@@ -2,11 +2,20 @@
 
 Validation logicielle dans l’environnement de développement, sans carte branchée :
 
-- 153 tests Python passent : paramètres et profils, chronogrammes et exports,
+- 271 tests Python passent : paramètres et profils, chronogrammes et exports,
   CRC/paquets et resynchronisation, transport avec UART simulée, commandes démo,
   interface, CLI et chaîne de compilation avec exécutables de test.
   Le diagnostic série distingue l’ouverture du port du PING compatible,
   indique les octets reçus et ne transmet aucune commande SEND ou STOP.
+- Le backend Windows FTDI D2XX est testé avec une DLL simulée et un modèle
+  indépendant TAP/MPSSE : cible vérifiée avant JPROGRAM, ordre des bits,
+  continuité des blocs USB, contrôle DONE/STAT et fermeture après erreur.
+  Le parser `.bit` contrôle les métadonnées, les limites du fichier et l'IDCODE
+  déclaré sans interpréter les données FDRI comme des commandes.
+- Le workflow comprend un travail Windows natif : lanceur CMD, tests Python,
+  Ruff et mypy. Les fixtures de processus à shebang Unix y sont ignorées ;
+  un test de processus Python natif vérifie les chemins et arguments littéraux.
+  Aucun test matériel FTDI ni accès à une Arty réelle n'est effectué par ce workflow.
 - Ruff, formatage et mypy passent sur les modules Python.
 - Cinq bancs Icarus Verilog passent, avec 467 832 demi-ticks contrôlés pour le
   moteur, 24 cas protocole et vérification des sorties ODDR, de l’UART et de la

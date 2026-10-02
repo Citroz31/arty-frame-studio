@@ -46,6 +46,8 @@ else:
 
 @pytest.fixture
 def toolchain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Toolchain:
+    if os.name == "nt":
+        pytest.skip("Ces exécutables de test utilisent des shebangs Unix ; voir les tests natifs.")
     root = tmp_path / "project with spaces"
     (root / "firmware/rtl").mkdir(parents=True)
     (root / "firmware/constraints").mkdir(parents=True)
@@ -223,12 +225,13 @@ def test_program_error_is_visible_and_logged(
 
 def test_json_paths_and_interpreter_arguments(tmp_path: Path) -> None:
     path = tmp_path / "toolchain.json"
+    script = tmp_path / "xray" / "fasm2frames.py"
     path.write_text(
         json.dumps(
             {
                 "chipdb": "db/chip.bin",
                 "prjxray_db": "db/artix7",
-                "fasm2frames": ["python3", "/opt/xray/fasm2frames.py"],
+                "fasm2frames": ["python3", str(script)],
                 "build_dir": "build",
             }
         )
@@ -237,7 +240,44 @@ def test_json_paths_and_interpreter_arguments(tmp_path: Path) -> None:
     assert config.chipdb == tmp_path / "db/chip.bin"
     assert config.prjxray_db == tmp_path / "db/artix7"
     assert config.build_dir == tmp_path / "build"
-    assert config.fasm2frames == ("python3", "/opt/xray/fasm2frames.py")
+    assert config.fasm2frames == ("python3", str(script))
+
+
+def test_portable_tool_paths_resolve_from_json_directory(tmp_path: Path) -> None:
+    folder = tmp_path / "native tools with spaces"
+    folder.mkdir()
+    path = folder / "toolchain.json"
+    path.write_text(
+        json.dumps(
+            {
+                "yosys": "tools/bin/yosys.exe",
+                "nextpnr_xilinx": "tools/bin/nextpnr-xilinx.exe",
+                "fasm2frames": [".venv/Scripts/python.exe", "tools/prjxray/utils/fasm2frames.py"],
+                "xc7frames2bit": "tools/bin/xc7frames2bit.exe",
+                "openfpgaloader": "tools/bin/openFPGALoader.exe",
+            }
+        )
+    )
+    config = ToolchainConfig.from_json(path)
+    assert config.yosys == str(folder / "tools/bin/yosys.exe")
+    assert config.fasm2frames == (
+        str(folder / ".venv/Scripts/python.exe"),
+        str(folder / "tools/prjxray/utils/fasm2frames.py"),
+    )
+    assert config.nextpnr_xilinx == str(folder / "tools/bin/nextpnr-xilinx.exe")
+    assert config.openfpgaloader == str(folder / "tools/bin/openFPGALoader.exe")
+
+
+def test_native_process_keeps_paths_and_metacharacters_literal(tmp_path: Path) -> None:
+    candidate = Toolchain(ToolchainConfig(), tmp_path)
+    arguments = ["with spaces", "literal;value", r"C:\Arty tools\frame.bit"]
+    with (tmp_path / "native-process.log").open("w", encoding="utf-8") as journal:
+        output = candidate._run(
+            [sys.executable, "-c", "import json,sys; print(json.dumps(sys.argv[1:]))", *arguments],
+            None,
+            journal,
+        )
+    assert json.loads(output) == arguments
 
 
 @pytest.mark.parametrize(

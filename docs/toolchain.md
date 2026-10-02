@@ -3,7 +3,9 @@
 La cible est exclusivement l'**Arty A7-100T, xc7a100tcsg324-1**. Yosys réalise la
 synthèse, le fork `gatecat/nextpnr-xilinx` le placement/routage et la production
 FASM, Project X-Ray la conversion FASM → frames → `.bit`, et openFPGALoader le
-chargement JTAG en SRAM. Le chemin xc7 de ce fork est décrit par son auteur comme
+chargement JTAG en SRAM pour le flux d'outils externes. Un backend FTDI D2XX
+natif permet aussi le chargement SRAM sous Windows d'un `.bit` existant,
+séparément de sa compilation. Le chemin xc7 de ce fork est décrit par son auteur comme
 ne nécessitant pas Vivado. Le `nextpnr` générique des distributions, une chipdb
 35T, et le chemin UltraScale/RapidWright ne sont pas des substituts.
 
@@ -14,10 +16,72 @@ versions, la couverture des primitives et les données de timing doivent être
 vérifiées sur votre installation. Aucune fréquence physique de 200 MHz n'est
 certifiée par l'application.
 
-## Préparation sous Linux
+Pour démarrer, diagnostiquer et charger un fichier existant **sous Windows
+natif**, suivre [windows.md](windows.md). Le diagnostic JTAG intégré lit
+l'IDCODE avec le pilote FTDI D2XX existant ; la programmation est une opération
+distincte. Aucun `.bit` précompilé et validé sur carte n'est fourni actuellement.
+Le backend Windows de programmation est expérimental : ses tests sont simulés,
+sans essai matériel ici.
+
+## Configuration d'outils Windows natifs
+
+La couche Python lance des exécutables et scripts locaux sans shell ; elle
+peut utiliser des outils Windows placés dans un dossier accessible à votre
+compte, sans installation système. Le template portable se prépare depuis
+PowerShell, dans le dossier du dépôt :
+
+```powershell
+Copy-Item .\examples\toolchain.windows.example.json .\toolchain.json
+```
+
+Placer vos outils dans les dossiers indiqués ou modifier leurs chemins dans
+`toolchain.json`. Ce template **n'installe et ne fournit aucun outil**.
+Il faut disposer de tous les éléments suivants pour construire ce firmware :
+
+- Yosys avec `synth_xilinx` pour la famille xc7 ;
+- un backend nextpnr xc7 acceptant notre JSON/XDC et produisant du FASM,
+  avec une chipdb correspondant exactement au `xc7a100tcsg324-1` et à sa version ;
+- Project X-Ray, sa base `artix7`, le script `fasm2frames.py` et ses dépendances
+  Python, puis un `xc7frames2bit.exe` compatible.
+
+L'existence d'une chaîne complète 100T Windows prête à l'emploi et la
+compatibilité de ses versions **n'ont pas été vérifiées**. Nous ne promettons
+pas qu'OSS CAD Suite Windows contienne ce backend xc7, ni qu'un nextpnr
+générique ou un backend himbaechel convienne à ce flux sans adaptation.
+Le template décrit les outils attendus ; il ne constitue pas une distribution
+de compilation validée.
+
+Si les outils nécessaires sont déjà disponibles et configurés :
+
+```powershell
+.\.venv\Scripts\arty-frame.exe doctor --toolchain toolchain.json
+.\.venv\Scripts\arty-frame.exe build --toolchain toolchain.json
+```
+
+Le diagnostic `doctor` vérifie la présence des exécutables et des fichiers,
+dont openFPGALoader pour le flux externe historique. Il ne certifie pas leur
+compatibilité. La compilation doit réussir, notamment son contrôle de timing,
+avant de considérer son résultat utilisable. Le chargement SRAM Windows
+natif D2XX d'un fichier existant se fait séparément :
+
+```powershell
+.\.venv\Scripts\arty-frame.exe jtag-program --bitstream .\build\arty_frame.bit
+```
+
+Ce backend n'utilise pas openFPGALoader. Il vérifie la cible Artix-7 100T,
+l'IDCODE embarqué dans le fichier et le statut de configuration, mais reste
+expérimental et ne remplace pas une validation du firmware sur carte. Les
+options `--serial` et `--ftdi-dll` permettent de choisir le canal A et sa DLL.
+Les pilotes FTDI existants sont conservés ; aucune substitution WinUSB/Zadig
+n'est demandée.
+
+## Préparation Linux, option pour les développeurs
 
 Les installations suivantes sont distinctes de l'environnement Python/Flet de
-l'application. La base xc7 peut occuper plusieurs Go : elle n'est pas distribuée
+l'application. Elles documentent un environnement de développement Linux
+séparé, facultatif, et ne sont nécessaires ni au démarrage ni au diagnostic
+ni au chargement natif Windows d'un fichier existant.
+La base xc7 peut occuper plusieurs Go : elle n'est pas distribuée
 avec le projet. Prévoir suffisamment de RAM et d'espace pour sa génération.
 
 ```bash
@@ -110,8 +174,13 @@ arty-frame program --toolchain toolchain.json --bitstream build/arty_frame.bit
 
 Ces opérations sont aussi disponibles dans l'onglet FPGA de l'interface Flet.
 Les chemins `chipdb`, `prjxray_db`, `build_dir` sont résolus relativement au
-fichier JSON. Les exécutables et arguments de commandes sont transmis
-littéralement : utilisez des chemins absolus pour les scripts et interpréteurs.
+fichier JSON. Les chemins d'exécutables contenant `/` ou `\`, ainsi que les
+chemins de scripts `.py` contenant l'un de ces séparateurs, sont également
+résolus relativement au dossier du JSON. Ainsi, `tools/bin/yosys.exe` et
+`.venv/Scripts/python.exe` du template Windows deviennent des chemins absolus
+locaux après copie du JSON à la racine du projet. Un nom simple, par exemple
+`yosys`, est cherché dans le PATH. Les autres arguments restent littéraux,
+sans interprétation de commandes shell ou de variables d'environnement.
 `fasm2frames` peut être un tableau `["/chemin/python", "/chemin/fasm2frames.py"]`.
 `openfpgaloader` contient uniquement l'exécutable, sans options supplémentaires.
 Le diagnostic teste la présence des outils/fichiers, pas leur compatibilité
@@ -171,8 +240,11 @@ Un build réussi crée `successful-build.json` avec les hashes des sources,
 contraintes, configuration et bitstream. Tout nouveau build révoque ce reçu,
 même s'il échoue avant la synthèse. Une sortie vide, une erreur de commande,
 un timing manquant/raté, ou des sources modifiées interdisent la programmation
-depuis l'application. Un ancien `.bit` peut rester pour inspection, sans être
-autorisé. Le verrou `.toolchain.lock` exclut compilation et programmation
+par le flux `arty-frame program` associé à cette configuration. Un ancien
+`.bit` peut rester pour inspection, sans être autorisé par ce flux. Le
+chargement natif `jtag-program` d'un fichier existant est distinct : il valide
+le fichier et la cible matérielle, sans attester sa provenance ou un build
+récent de ces sources. Le verrou `.toolchain.lock` exclut compilation et programmation
 simultanées ; après un arrêt brutal, supprimer le verrou seulement après avoir
 vérifié qu'aucun processus de compilation ou de programmation ne tourne.
 

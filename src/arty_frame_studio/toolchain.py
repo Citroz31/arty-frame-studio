@@ -86,7 +86,25 @@ class ToolchainConfig:
         for name in _TOOLS:
             value = data.get(name)
             if isinstance(value, list):
-                data[name] = tuple(value)
+                args = list(value)
+            elif isinstance(value, str):
+                args = [value]
+            else:
+                continue
+            for index, argument in enumerate(args):
+                # Portable tool folders need absolute executable/script paths:
+                # Windows does not use Popen(cwd=...) to resolve the executable.
+                is_file = index == 0 or (isinstance(argument, str) and argument.endswith(".py"))
+                if (
+                    is_file
+                    and isinstance(argument, str)
+                    and not argument.startswith("-")
+                    and ("/" in argument or "\\" in argument)
+                ):
+                    candidate = Path(argument).expanduser()
+                    if not candidate.is_absolute():
+                        args[index] = str((path.parent / candidate).resolve())
+            data[name] = args[0] if isinstance(value, str) else tuple(args)
         for name in ("chipdb", "prjxray_db", "build_dir"):
             if name in data and data[name] is not None:
                 if not isinstance(data[name], str) or not data[name].strip():

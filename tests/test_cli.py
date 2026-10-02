@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -81,3 +82,72 @@ def test_port_listing_shows_hardware_identity_without_probing(monkeypatch, capsy
     )
     assert main(["ports"]) == 0
     assert "COM7\tUSB Serial Port\tUSB VID:PID=0403:6010" in capsys.readouterr().out
+
+
+def test_native_jtag_probe_does_not_open_a_com_port(monkeypatch, capsys):
+    @dataclass
+    class Result:
+        serial: str = "ARTY001A"
+        idcode: int = 0x03631093
+
+    calls = []
+
+    def probe(*, serial, dll_path):
+        calls.append((serial, dll_path))
+        return Result()
+
+    monkeypatch.setattr(cli, "probe_arty", probe)
+    monkeypatch.setattr(cli, "SerialDevice", lambda *a, **k: pytest.fail("Unexpected UART"))
+    assert main(["jtag-diagnose", "--serial", "ARTY001A", "--ftdi-dll", "ftd2xx.dll"]) == 0
+    assert calls == [("ARTY001A", Path("ftd2xx.dll"))]
+    output = capsys.readouterr().out
+    assert "Artix-7 100T détecté par JTAG" in output
+    assert "firmware UART reste à vérifier" in output
+
+
+def test_native_jtag_missing_driver_is_reported_without_programming(monkeypatch, capsys):
+    def unavailable(**kwargs):
+        raise RuntimeError("DLL FTDI D2XX indisponible")
+
+    monkeypatch.setattr(cli, "probe_arty", unavailable)
+    assert main(["jtag-diagnose"]) == 1
+    assert "DLL FTDI D2XX indisponible" in capsys.readouterr().err
+
+
+def test_native_program_validates_file_before_opening_usb(tmp_path, monkeypatch, capsys):
+    bitstream = tmp_path / "wrong.bit"
+    bitstream.write_bytes(b"not a bitstream")
+    monkeypatch.setattr(cli, "program_arty", lambda *a, **k: pytest.fail("Unexpected USB"))
+    assert main(["jtag-program", "--bitstream", str(bitstream)]) == 1
+    assert "Erreur" in capsys.readouterr().err
+
+
+def test_native_program_uses_existing_bitstream_without_build_or_com(monkeypatch, capsys):
+    @dataclass
+    class Result:
+        serial: str = "ARTY001A"
+        idcode: int = 0x03631093
+        status: int = 0x00004010
+
+    calls = []
+
+    def program(payload, *, serial, dll_path):
+        calls.append((payload, serial, dll_path))
+        return Result()
+
+    @dataclass
+    class Image:
+        path: Path = Path("firmware.bit")
+        part: str = "7a100tcsg324"
+        sha256: str = "checked-file-hash"
+        payload: bytes = b"validated configuration data"
+
+    monkeypatch.setattr(cli, "read_bitstream", lambda path: Image())
+    monkeypatch.setattr(cli, "program_arty", program)
+    monkeypatch.setattr(cli, "Toolchain", lambda *a, **k: pytest.fail("Unexpected build"))
+    monkeypatch.setattr(cli, "SerialDevice", lambda *a, **k: pytest.fail("Unexpected UART"))
+    assert main(["jtag-program", "--bitstream", "firmware.bit", "--serial", "ARTY001A"]) == 0
+    assert calls == [(Image().payload, "ARTY001A", None)]
+    output = capsys.readouterr().out
+    assert "Configuration SRAM terminée" in output
+    assert "Vérifiez le firmware UART" in output

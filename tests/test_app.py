@@ -2,6 +2,7 @@
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -169,6 +170,73 @@ def test_windows_ping_timeout_stays_visible_and_never_enables_send(tmp_path, mon
         assert "bitstream" in studio.hardware_status.value
         assert studio.send_button.disabled
         assert calls == ["ping", "close"]
+
+    run_async(exercise())
+
+
+def test_native_jtag_result_never_claims_uart_firmware_loaded(tmp_path, monkeypatch):
+    calls = []
+
+    def probe(*, serial, dll_path):
+        calls.append((serial, dll_path))
+        return SimpleNamespace(serial="ARTY001A", idcode=0x03631093)
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.ftdi_serial.value = "ARTY001A"
+        monkeypatch.setattr(app, "probe_arty", probe)
+        await studio._jtag_probe(None)
+        assert calls == [("ARTY001A", None)]
+        assert "0x03631093" in studio.tool_message.value
+        assert any("ne confirme pas" in line for line in studio.log_lines)
+        assert studio.device is None
+        assert studio.send_button.disabled
+
+    run_async(exercise())
+
+
+def test_native_program_does_not_need_build_tools_or_enable_uart_send(tmp_path, monkeypatch):
+    calls = []
+
+    def program(payload, *, serial, dll_path):
+        calls.append((payload, serial, dll_path))
+        return SimpleNamespace(serial="ARTY001A", status=0x4010)
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        bitstream = tmp_path / "existing.bit"
+        bitstream.write_bytes(b"checked by parser")
+        studio.windows_bitstream_path.value = str(bitstream)
+        studio.ftdi_serial.value = "ARTY001A"
+        image = SimpleNamespace(part="7a100tcsg324", sha256="checked-hash", payload=b"config")
+        monkeypatch.setattr(app, "read_bitstream", lambda path: image)
+        monkeypatch.setattr(app, "program_arty", program)
+        monkeypatch.setattr(studio, "_toolchain", lambda: pytest.fail("Unexpected build"))
+        await studio._jtag_program(None)
+        assert calls == [(b"config", "ARTY001A", None)]
+        assert "SRAM chargée" in studio.tool_message.value
+        assert any("vérifier PING" in line for line in studio.log_lines)
+        assert studio.device is None
+        assert studio.send_button.disabled
+
+    run_async(exercise())
+
+
+def test_programming_disables_uart_actions(tmp_path):
+    async def exercise():
+        studio = make_studio(tmp_path)
+        await studio._toggle_connection()
+        assert not studio.send_button.disabled
+        studio.tool_pending = True
+        studio._buttons()
+        assert studio.send_button.disabled
+        assert studio.stop_button.disabled
+        assert studio.connect_button.disabled
+        await studio._send(None)
+        await studio._stop(None)
+        await studio._toggle_connection()
+        assert studio.device is not None and studio.device.connected
+        assert studio.last_sent is None
 
     run_async(exercise())
 

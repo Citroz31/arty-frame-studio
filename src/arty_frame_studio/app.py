@@ -17,6 +17,7 @@ from typing import Any
 import flet as ft  # type: ignore[import-untyped]
 import flet.canvas as cv  # type: ignore[import-untyped]
 
+from .bitstream import read_bitstream
 from .model import (
     FrameConfig,
     divider_for_frequency,
@@ -28,6 +29,7 @@ from .protocol import DeviceStatus
 from .simulation import Waveform, export_csv, export_vcd, simulate, waveform_svg
 from .toolchain import Toolchain, ToolchainConfig
 from .transport import CommandTimeout, DemoDevice, SerialDevice, list_ports
+from .windows_jtag import probe_arty, program_arty
 
 BG = "#0C1423"
 PANEL = "#142136"
@@ -374,6 +376,37 @@ class Studio:
             on_click=self._program,
             style=ft.ButtonStyle(bgcolor=AMBER, color=BG),
         )
+        self.ftdi_dll_path = self._field(
+            "DLL FTDI D2XX (facultatif)",
+            "",
+            width=650,
+            on_change=lambda _: None,
+            helper="Vide : utilise la DLL du pilote FTDI installé sous Windows.",
+        )
+        self.ftdi_serial = self._field(
+            "Série JTAG A (facultatif)",
+            "",
+            width=300,
+            on_change=lambda _: None,
+        )
+        self.jtag_probe_button = ft.OutlinedButton(
+            "Détecter le FPGA sous Windows",
+            icon=ft.Icons.USB,
+            on_click=self._jtag_probe,
+        )
+        self.windows_bitstream_path = self._field(
+            "Firmware existant pour l'Arty A7-100T (.bit)",
+            "",
+            width=650,
+            on_change=lambda _: None,
+            helper="Aucun .bit précompilé n'est actuellement fourni avec l'application.",
+        )
+        self.jtag_program_button = ft.ElevatedButton(
+            "Charger le .bit sous Windows",
+            icon=ft.Icons.MEMORY,
+            on_click=self._jtag_program,
+            style=ft.ButtonStyle(bgcolor=AMBER, color=BG),
+        )
         self.tool_progress = ft.ProgressBar(visible=False, color=AMBER)
         self.tool_message = ft.Text(size=12, color=MUTED, selectable=True)
         self.doctor_results = ft.Column(spacing=5)
@@ -490,6 +523,31 @@ class Studio:
         )
         fpga_tab = ft.Column(
             [
+                ft.Container(
+                    self._card(
+                        self._heading(
+                            "JTAG Windows natif", "Accès via le pilote FTDI D2XX existant"
+                        ),
+                        ft.Text(
+                            "Ce test lit l'identifiant du FPGA sur le canal JTAG A. "
+                            "Il ne charge pas de bitstream et ne remplace aucun pilote USB.",
+                            size=12,
+                            color=MUTED,
+                        ),
+                        ft.Row([self.ftdi_dll_path], wrap=True),
+                        ft.Row([self.ftdi_serial, self.jtag_probe_button], wrap=True),
+                        ft.Row([self.windows_bitstream_path], wrap=True),
+                        ft.Row([self.jtag_program_button], wrap=True),
+                        ft.Text(
+                            "Chargement en SRAM d'un .bit existant, sans compiler sur ce PC. "
+                            "Backend expérimental, testé avec une interface FTDI simulée. "
+                            "La configuration disparaît hors tension ; vérifiez ensuite PING.",
+                            size=12,
+                            color=MUTED,
+                        ),
+                    ),
+                    visible=os.name == "nt",
+                ),
                 self._card(
                     self._heading(
                         "Arty A7-100T",
@@ -733,18 +791,32 @@ class Studio:
         connected = bool(self.device is not None and self.device.connected)
         busy = bool(self.device_status is not None and self.device_status.busy)
         self.send_button.disabled = (
-            not connected or self.current_config is None or busy or self.serial_pending
+            not connected
+            or self.current_config is None
+            or busy
+            or self.serial_pending
+            or self.tool_pending
         )
-        self.stop_button.disabled = not connected or self.serial_pending
+        self.stop_button.disabled = not connected or self.serial_pending or self.tool_pending
         self.simulate_button.disabled = self.current_config is None
-        self.connect_button.disabled = self.serial_pending
+        self.connect_button.disabled = self.serial_pending or self.tool_pending
         self.connect_button.text = "Déconnecter" if connected else "Connecter"
-        self.mode.disabled = connected or self.serial_pending
-        self.port.disabled = connected or self.mode.value != "uart" or self.serial_pending
-        self.refresh_button.disabled = self.serial_pending
-        for control in (self.doctor_button, self.build_button, self.program_button):
+        self.mode.disabled = connected or self.serial_pending or self.tool_pending
+        self.port.disabled = (
+            connected or self.mode.value != "uart" or self.serial_pending or self.tool_pending
+        )
+        self.refresh_button.disabled = self.serial_pending or self.tool_pending
+        for control in (
+            self.doctor_button,
+            self.build_button,
+            self.program_button,
+            self.jtag_probe_button,
+            self.jtag_program_button,
+        ):
             control.disabled = self.tool_pending
         self.program_button.disabled = self.tool_pending or self.serial_pending
+        self.jtag_probe_button.disabled = self.tool_pending or self.serial_pending
+        self.jtag_program_button.disabled = self.tool_pending or self.serial_pending
 
     def _log(self, message: str, color: str = MUTED) -> None:
         for line in str(message).splitlines():
@@ -785,7 +857,7 @@ class Studio:
             self._error("Détection des ports", exc)
 
     async def _toggle_connection(self, _: Any = None) -> None:
-        if self.serial_pending:
+        if self.serial_pending or self.tool_pending:
             return
         self.serial_pending = True
         self._buttons()
@@ -853,7 +925,7 @@ class Studio:
         self._buttons()
 
     async def _send(self, _: Any) -> None:
-        if self.serial_pending:
+        if self.serial_pending or self.tool_pending:
             return
         try:
             config = self._config()
@@ -883,7 +955,7 @@ class Studio:
             self._update()
 
     async def _stop(self, _: Any) -> None:
-        if self.serial_pending:
+        if self.serial_pending or self.tool_pending:
             return
         self.serial_pending = True
         self._buttons()
@@ -906,7 +978,12 @@ class Studio:
             await asyncio.sleep(
                 0.2 if self.device_status is not None and self.device_status.busy else 1.0
             )
-            if self.serial_pending or self.device is None or not self.device.connected:
+            if (
+                self.serial_pending
+                or self.tool_pending
+                or self.device is None
+                or not self.device.connected
+            ):
                 continue
             try:
                 async with self.serial_lock:
@@ -1113,6 +1190,25 @@ class Studio:
                 self._log(f"{name} · {'OK' if ok else 'INDISPONIBLE'} · {detail}")
             self._update()
 
+    async def _jtag_probe(self, _: Any) -> None:
+        if self.tool_pending or self.serial_pending:
+            return
+        if isinstance(self.device, SerialDevice) and self.device.connected:
+            await self._toggle_connection()
+        dll = (self.ftdi_dll_path.value or "").strip()
+        serial = (self.ftdi_serial.value or "").strip()
+        result = await self._tool_action(
+            "Détection JTAG Windows",
+            lambda: probe_arty(serial=serial or None, dll_path=Path(dll) if dll else None),
+        )
+        if result is not None:
+            self.tool_message.value = (
+                f"Artix-7 100T détecté · IDCODE 0x{result.idcode:08X} · {result.serial}"
+            )
+            self._log(self.tool_message.value, GREEN)
+            self._log("La détection JTAG ne confirme pas que le firmware UART est chargé.", BLUE)
+            self._update()
+
     async def _build(self, _: Any) -> None:
         if self.tool_pending:
             return
@@ -1123,6 +1219,39 @@ class Studio:
         if result is not None:
             self.bitstream_path.value = str(result)
             self.tool_message.value = f"Bitstream créé : {result}"
+            self._update()
+
+    async def _jtag_program(self, _: Any) -> None:
+        if self.tool_pending or self.serial_pending:
+            return
+        try:
+            bitstream = self._path(self.windows_bitstream_path.value)
+            if not bitstream.is_file():
+                raise ValueError("Indiquez un fichier .bit existant pour l'Arty A7-100T.")
+        except (OSError, ValueError) as exc:
+            self._error("Chargement Windows", exc)
+            return
+        if isinstance(self.device, SerialDevice) and self.device.connected:
+            await self._toggle_connection()
+        dll = (self.ftdi_dll_path.value or "").strip()
+        serial = (self.ftdi_serial.value or "").strip()
+
+        def run() -> Any:
+            image = read_bitstream(bitstream)
+            self._worker_log(f"Bitstream {image.part} · SHA256 {image.sha256}")
+            return program_arty(
+                image.payload, serial=serial or None, dll_path=Path(dll) if dll else None
+            )
+
+        result = await self._tool_action("Chargement SRAM Windows", run)
+        if result is not None:
+            self.tool_message.value = f"SRAM chargée · {result.serial} · STAT 0x{result.status:08X}"
+            self._log(self.tool_message.value, GREEN)
+            self._log(
+                "La configuration FPGA a abouti. Connectez le port UART pour vérifier PING ; "
+                "ce contrôle ne valide ni le timing GPIO, ni le protocole du fichier chargé.",
+                BLUE,
+            )
             self._update()
 
     async def _program(self, _: Any) -> None:
