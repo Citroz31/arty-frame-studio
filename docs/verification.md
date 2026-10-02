@@ -2,14 +2,18 @@
 
 Validation logicielle dans l’environnement de développement, sans carte branchée :
 
-- 271 tests Python passent : paramètres et profils, chronogrammes et exports,
+- 278 tests Python passent : paramètres et profils, chronogrammes et exports,
   CRC/paquets et resynchronisation, transport avec UART simulée, commandes démo,
   interface, CLI et chaîne de compilation avec exécutables de test.
   Le diagnostic série distingue l’ouverture du port du PING compatible,
-  indique les octets reçus et ne transmet aucune commande SEND ou STOP.
+  indique le nombre d'octets et un aperçu RX limité à 32 octets, et ne transmet
+  aucune commande SEND ou STOP.
 - Le backend Windows FTDI D2XX est testé avec une DLL simulée et un modèle
   indépendant TAP/MPSSE : cible vérifiée avant JPROGRAM, ordre des bits,
   continuité des blocs USB, contrôle DONE/STAT et fermeture après erreur.
+  Le modèle Digilent simule également buffers et multiplexeurs : le profil
+  incomplet renvoie TDO constant ; le profil Arty complet permet la lecture IDCODE.
+  Ce modèle suit les réglages amont et ne valide pas le schéma physique de la carte.
   Le parser `.bit` contrôle les métadonnées, les limites du fichier et l'IDCODE
   déclaré sans interpréter les données FDRI comme des commandes.
 - Le workflow comprend un travail Windows natif : lanceur CMD, tests Python,

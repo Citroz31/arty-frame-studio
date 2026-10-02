@@ -20,6 +20,13 @@ _FT2232H = 6
 _DEVICE_ID = 0x04036010
 _ARTY_IDCODE = 0x03631093
 _REVISION_MASK = 0x0FFFFFFF
+# Arty's Digilent interface includes buffer/mux control pins in addition to
+# TCK/TDI/TDO/TMS. Match openFPGALoader's arty_a7_100t -> digilent cable profile:
+# https://github.com/trabucayre/openFPGALoader/blob/master/src/cable.hpp
+_DIGILENT_LOW_VALUE = 0xE8
+_DIGILENT_LOW_DIRECTION = 0xEB
+_DIGILENT_HIGH_VALUE = 0x00
+_DIGILENT_HIGH_DIRECTION = 0x60
 
 
 class WindowsJtagError(RuntimeError):
@@ -238,13 +245,27 @@ class _Mpsse:
         ):
             _checked(self.library, operation, self.handle, *arguments)
         time.sleep(0.02)
-        _checked(self.library, "FT_SetBitMode", self.handle, 0x0B, 2)
+        _checked(self.library, "FT_SetBitMode", self.handle, _DIGILENT_LOW_DIRECTION, 2)
         time.sleep(0.02)
         self.write(b"\xaa\x87")
         if self.read(2) != b"\xfa\xaa":
             raise WindowsJtagError("Le canal FTDI n'a pas confirmé son mode MPSSE.")
-        # 60 MHz / (2 * (29 + 1)) = 1 MHz ; TCK/TDI/TMS sorties, TDO entrée.
-        self.write(b"\x8a\x97\x8d\x85\x80\x08\x0b\x86\x1d\x00")
+        # 60 MHz / (2 * (29 + 1)) = 1 MHz. Configure both GPIO banks: a
+        # four-wire-only setup leaves Digilent buffer/mux controls undriven.
+        self.write(
+            b"\x8a\x97\x8d\x85"
+            + bytes(
+                (
+                    0x80,
+                    _DIGILENT_LOW_VALUE,
+                    _DIGILENT_LOW_DIRECTION,
+                    0x82,
+                    _DIGILENT_HIGH_VALUE,
+                    _DIGILENT_HIGH_DIRECTION,
+                )
+            )
+            + b"\x86\x1d\x00"
+        )
         self.initialized = True
 
     def reset_idle(self) -> None:
@@ -262,9 +283,18 @@ class _Mpsse:
         identifier |= (data[3] >> 1) << 24
         identifier |= (data[4] >> 7) << 31
         if identifier & _REVISION_MASK != _ARTY_IDCODE:
+            hint = ""
+            if identifier in (0, 0xFFFFFFFF):
+                hint = (
+                    " La lecture TDO est constante malgré la réponse FTDI/MPSSE. "
+                    "Vérifiez l'alimentation, le connecteur USB PROG/UART, la série JTAG A "
+                    "choisie et fermez les autres logiciels JTAG (dont Adept). "
+                    "Le profil Digilent Arty est appliqué ; changer le pilote ne suffit "
+                    "pas à expliquer ce résultat."
+                )
             raise WindowsJtagError(
                 f"IDCODE JTAG 0x{identifier:08X} : un XC7A100T était attendu"
-                f" (0x{_ARTY_IDCODE:08X}, révision ignorée)."
+                f" (0x{_ARTY_IDCODE:08X}, révision ignorée).{hint}"
             )
         return identifier
 
@@ -394,6 +424,8 @@ def probe_arty(
         engine.reset_idle()
         failed = False
         return JtagProbeResult(device.serial, device.description, identifier)
+    except WindowsJtagError as exc:
+        raise WindowsJtagError(f"{device.serial} · {device.description} : {exc}") from exc
     finally:
         _cleanup(library, handle, failed, engine)
 
@@ -434,5 +466,7 @@ def program_arty(
         status = engine.program(payload)
         failed = False
         return JtagProgramResult(device.serial, device.description, identifier, status)
+    except WindowsJtagError as exc:
+        raise WindowsJtagError(f"{device.serial} · {device.description} : {exc}") from exc
     finally:
         _cleanup(library, handle, failed, engine)

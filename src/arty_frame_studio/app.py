@@ -381,7 +381,7 @@ class Studio:
             "",
             width=650,
             on_change=lambda _: None,
-            helper="Vide : utilise la DLL du pilote FTDI installé sous Windows.",
+            helper="Vide : utilise le pilote FTDI existant, notamment installé avec Adept.",
         )
         self.ftdi_serial = self._field(
             "Série JTAG A (facultatif)",
@@ -526,7 +526,7 @@ class Studio:
                 ft.Container(
                     self._card(
                         self._heading(
-                            "JTAG Windows natif", "Accès via le pilote FTDI D2XX existant"
+                            "JTAG Windows natif", "FTDI D2XX existant · profil Digilent Arty"
                         ),
                         ft.Text(
                             "Ce test lit l'identifiant du FPGA sur le canal JTAG A. "
@@ -852,6 +852,8 @@ class Studio:
                 current if current in available else (ports[0].device if ports else None)
             )
             self._log(f"Ports USB/UART détectés : {len(ports)} (firmware non vérifié).")
+            for port in ports:
+                self._log(f"{port.device} · {port.description} · {port.hwid or 'ID inconnu'}")
             self._update()
         except Exception as exc:
             self._error("Détection des ports", exc)
@@ -881,6 +883,7 @@ class Studio:
                                 "Sélectionnez un port série ou branchez la carte puis actualisez."
                             )
                         device = SerialDevice(self.port.value, baudrate=115200)
+                        self._log(f"Test du firmware UART sur {self.port.value} · PING uniquement.")
                     else:
                         device = DemoDevice()
                     try:
@@ -1197,6 +1200,7 @@ class Studio:
             await self._toggle_connection()
         dll = (self.ftdi_dll_path.value or "").strip()
         serial = (self.ftdi_serial.value or "").strip()
+        self._log("JTAG : profil Digilent Arty · GPIO E8/EB et 00/60 · horloge 1 MHz.")
         result = await self._tool_action(
             "Détection JTAG Windows",
             lambda: probe_arty(serial=serial or None, dll_path=Path(dll) if dll else None),

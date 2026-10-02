@@ -31,6 +31,43 @@ une trame.
 
 ## Lire l'identifiant du FPGA par JTAG
 
+### Adept Runtime et lecture `0xFFFFFFFF`
+
+Le Runtime Digilent Adept, par exemple **2.30.4**, installe des composants
+USB/JTAG ; son installation ne charge pas le firmware UART de ce projet.
+Le chargeur actuel utilise **FTDI D2XX**, sans appeler directement les DLL
+DMGR/DJTG du SDK Adept. Conserver votre installation existante.
+
+Une erreur `IDCODE JTAG 0xFFFFFFFF` après la synchronisation MPSSE signifie
+que la liaison FTDI a répondu mais que la lecture TDO reste à 1 : ce n'est
+pas un identifiant de FPGA, ni une preuve de panne de la carte ou du pilote.
+Une version précédente du projet configurait seulement les quatre lignes
+JTAG et omettait les GPIO de commande du chemin Digilent. La version corrigée
+configure **les deux groupes GPIO** selon le profil Arty d'openFPGALoader,
+`E8/EB` et `00/60`. Le journal affiche ce profil pour identifier la version
+utilisée. La correction est testée par simulation ; il faut la vérifier sur carte.
+
+Après mise à jour, fermer l'application puis la relancer avec
+`start-windows.cmd`, garder la carte alimentée et branchée sur **USB PROG/UART**,
+et fermer les autres logiciels qui accèdent au JTAG, dont Adept. Relancer
+la détection FPGA. L'identifiant attendu est `0x03631093` (la révision peut
+modifier le premier chiffre). Avec plusieurs interfaces, lister les séries
+avec `jtag-devices` et sélectionner celle de l'Arty, canal A.
+
+Si `FFFFFFFF` persiste, vérifier alimentation, câble et série sélectionnée.
+Ne modifier aucun pilote uniquement sur la base de ce résultat.
+Le programme mentionne alors TDO constant et les vérifications correspondantes.
+
+Le Runtime seul ne garantit pas la présence de l'utilitaire `djtgcfg.exe` ;
+aucune commande Adept externe n'est nécessaire dans ce parcours.
+
+Références du profil utilisé :
+[Arty → Digilent](https://github.com/trabucayre/openFPGALoader/blob/master/src/board.hpp),
+[GPIO du câble Digilent](https://github.com/trabucayre/openFPGALoader/blob/master/src/cable.hpp),
+[activation des buffers et multiplexeurs](https://github.com/openocd-org/openocd/blob/master/tcl/interface/ftdi/digilent-hs2.cfg).
+
+### Lancer la détection
+
 Dans l'onglet **FPGA**, section **« JTAG Windows natif »**, cliquer sur
 **« Détecter le FPGA sous Windows »**. L'application ouvre le canal **A/JTAG**
 du FT2232 avec FTDI D2XX et lit l'IDCODE du FPGA. Le canal **B/UART** reste
@@ -86,11 +123,21 @@ utilise **115200 bauds, 8N1, aucun contrôle de flux**. Si PING répond, ouvrir
 Flet, choisir **« Carte · USB / UART »**, actualiser les ports, sélectionner
 COM7 et cliquer sur **Connecter**.
 
+Si le délai PING expire malgré des octets reçus, la liaison série reçoit des
+données mais aucun paquet compatible. Cela peut provenir d'un autre programme,
+du mauvais port COM ou d'un débit différent ; le nombre d'octets seul ne permet
+pas de choisir la cause. Le journal indique le port testé, les identifiants USB
+des ports recensés et les **32 premiers octets reçus au maximum**, en hexadécimal
+et ASCII lisible. Les caractères de contrôle sont remplacés dans l'aperçu texte.
+Ce diagnostic n'envoie toujours aucune trame GPIO et ne relance pas automatiquement
+une commande. Il faut charger **notre firmware UART** pour utiliser le pilotage.
+
 | Résultat | Signification et vérification suivante |
 | --- | --- |
 | COM7 absent | Vérifier câble, alimentation, numéro COM actuel et pilote FTDI VCP. |
 | Port occupé ou accès refusé | Fermer le logiciel qui utilise COM7. |
 | DLL D2XX introuvable | Indiquer la DLL du pilote installé ; vérifier l'architecture de Python et de la DLL. |
+| IDCODE `FFFFFFFF` ou `00000000` | TDO constant : utiliser la version avec profil Digilent Arty, vérifier alimentation et série JTAG A, puis fermer les autres logiciels JTAG. |
 | JTAG reconnaît le 100T, PING expire | L'accès au FPGA fonctionne ; vérifier le chargement du firmware UART du projet. |
 | PING expire après un chargement | Vérifier le bon firmware, le port choisi et la première LED monochrome `led[0]`, indicateur de verrouillage PLL de ce firmware. |
 | PING répond | Le firmware répond au protocole ; l'envoi de trames devient disponible. |

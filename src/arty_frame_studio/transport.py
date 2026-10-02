@@ -32,15 +32,30 @@ class DeviceError(TransportError):
 
 class CommandTimeout(TransportError):
     def __init__(
-        self, opcode: Opcode, sequence: int, details: str = "", *, received_bytes: int = 0
+        self,
+        opcode: Opcode,
+        sequence: int,
+        details: str = "",
+        *,
+        received_bytes: int = 0,
+        received_sample: bytes = b"",
     ) -> None:
         self.opcode = opcode
         self.sequence = sequence
         self.received_bytes = received_bytes
+        self.received_sample = received_sample[:32]
         message = f"Délai de réponse dépassé pour {opcode.name} (séquence {sequence})."
         if details:
             message += f" {details}"
         if opcode == Opcode.PING:
+            if self.received_sample:
+                readable = "".join(
+                    chr(value) if 32 <= value < 127 else "." for value in self.received_sample
+                )
+                message += (
+                    f"\nDébut RX (32 octets max.) : {self.received_sample.hex(' ')}"
+                    f" · ASCII : {readable}\n"
+                )
             message += (
                 " Le port USB/UART a été ouvert, mais aucune confirmation compatible"
                 " n'a été reçue. Un port COM détecté ne suffit pas : le bitstream"
@@ -186,6 +201,7 @@ class SerialDevice:
             crc_errors_before = self._decoder.crc_errors
             unmatched = 0
             received_bytes = 0
+            received_sample = bytearray()
             try:
                 written = self._serial.write(request)
                 if written != len(request):
@@ -198,6 +214,8 @@ class SerialDevice:
                     available = int(getattr(self._serial, "in_waiting", 0))
                     data = self._serial.read(max(1, min(available, 256)))
                     received_bytes += len(data)
+                    if opcode == Opcode.PING:
+                        received_sample.extend(data[: max(0, 32 - len(received_sample))])
                     for packet in self._decoder.feed(data):
                         if packet.sequence != sequence or packet.opcode != (0x80 | opcode):
                             unmatched += 1
@@ -224,7 +242,13 @@ class SerialDevice:
                 details += " Des réponses avec un CRC invalide ont été ignorées."
             elif unmatched:
                 details += " Des réponses ne correspondant pas à la commande ont été ignorées."
-            raise CommandTimeout(opcode, sequence, details, received_bytes=received_bytes)
+            raise CommandTimeout(
+                opcode,
+                sequence,
+                details,
+                received_bytes=received_bytes,
+                received_sample=bytes(received_sample),
+            )
 
 
 class DemoDevice:

@@ -116,12 +116,21 @@ def test_probe_trace_reads_idcode_only_and_closes():
     assert ("FT_OpenEx", ("ARTY123A", 1)) in driver.calls
     assert driver.commands == [
         b"\xaa\x87",
-        b"\x8a\x97\x8d\x85\x80\x08\x0b\x86\x1d\x00",
+        b"\x8a\x97\x8d\x85\x80\xe8\xeb\x82\x00\x60\x86\x1d\x00",
         b"\x4b\x05\x1f",
         b"\x4b\x02\x01\x28\x02\x00\x2a\x06\x6b\x00\x01\x4b\x01\x01\x87",
         b"\x4b\x05\x1f",
     ]
     assert driver.calls[-2:] == [("FT_SetBitMode", (0, 0)), ("FT_Close", ())]
+
+
+@pytest.mark.parametrize("idcode", [0, 0xFFFFFFFF])
+def test_constant_tdo_is_reported_as_a_jtag_path_problem(idcode):
+    with pytest.raises(jtag.WindowsJtagError, match="lecture TDO est constante") as failure:
+        jtag.probe_arty(dll=FakeD2xx(idcode=idcode))
+    assert "USB PROG/UART" in str(failure.value)
+    assert "profil Digilent Arty" in str(failure.value)
+    assert "ARTY123A" in str(failure.value)
 
 
 def test_revision_is_ignored():

@@ -106,7 +106,24 @@ def test_unrelated_uart_text_is_reported_as_data_without_a_valid_ping():
     with pytest.raises(CommandTimeout) as error:
         device.connect()
     assert error.value.received_bytes == len(text)
+    assert error.value.received_sample == text
+    assert "ASCII : Arty factory demo.." in str(error.value)
     assert "Aucun octet reçu" not in str(error.value)
+    assert [p.opcode for p in endpoint.requests] == [Opcode.PING]
+    assert not endpoint.is_open
+
+
+def test_ping_timeout_preview_is_bounded_and_never_emits_raw_controls():
+    raw = b"\x1b[31m\x00" + b"X" * 458
+    device, endpoint = make_serial(lambda packet: raw, timeout=0.05)
+    with pytest.raises(CommandTimeout) as error:
+        device.connect()
+    assert error.value.received_bytes == 464
+    assert error.value.received_sample == raw[:32]
+    assert "1b 5b 33 31 6d 00" in str(error.value)
+    assert "\x1b" not in str(error.value)
+    assert "\x00" not in str(error.value)
+    assert "ASCII : .[31m." in str(error.value)
     assert [p.opcode for p in endpoint.requests] == [Opcode.PING]
     assert not endpoint.is_open
 

@@ -76,14 +76,37 @@ class Tap:
 
 
 class MpsseWire:
-    """Decode MPSSE opcodes by their flags, rather than matching test traces."""
+    """Decode MPSSE flags, optionally gating JTAG with the upstream Digilent profile.
 
-    def __init__(self, tap=None):
+    The GPIO requirements model openFPGALoader's Arty cable configuration, not
+    a separately verified electrical schematic for every Arty board revision.
+    """
+
+    def __init__(self, tap=None, digilent=False):
         self.tap = tap or Tap()
+        self.digilent = digilent
         self.commands = bytearray()
         self.rx = bytearray()
         self.tms = 1
         self.tdi = 0
+        self.low_value = 0
+        self.low_direction = 0
+        self.high_value = 0
+        self.high_direction = 0
+
+    def _clock(self):
+        # Upstream Digilent setup enables the low-bank buffers and selects
+        # the JTAG paths through the high-bank mux controls. Without it this
+        # model leaves TDO pulled high and does not deliver clocks to the TAP.
+        ready = (
+            self.low_value & 0xA0 == 0xA0
+            and self.low_direction & 0xAB == 0xAB
+            and self.high_value & 0x60 == 0
+            and self.high_direction & 0x60 == 0x60
+        )
+        if self.digilent and not ready:
+            return 1
+        return self.tap.clock(self.tms, self.tdi)
 
     def feed(self, data):
         self.commands.extend(data)
@@ -94,13 +117,16 @@ class MpsseWire:
                 del self.commands[0]
             elif opcode in (0x85, 0x87, 0x8A, 0x8D, 0x97):
                 del self.commands[0]
-            elif opcode in (0x80, 0x86):
+            elif opcode in (0x80, 0x82, 0x86):
                 if len(self.commands) < 3:
                     return
                 if opcode == 0x80:
                     value, direction = self.commands[1:3]
-                    assert direction == 0x0B, "TDO must remain an input"
+                    assert not direction & 0x04, "TDO must remain an input"
+                    self.low_value, self.low_direction = value, direction
                     self.tms, self.tdi = (value >> 3) & 1, (value >> 1) & 1
+                elif opcode == 0x82:
+                    self.high_value, self.high_direction = self.commands[1:3]
                 del self.commands[:3]
             elif opcode in (0x8E, 0x8F):
                 header = 2 if opcode == 0x8E else 3
@@ -108,7 +134,7 @@ class MpsseWire:
                     return
                 count = int.from_bytes(self.commands[1:header], "little") + 1
                 for _ in range(count * (1 if opcode == 0x8E else 8)):
-                    self.tap.clock(self.tms, self.tdi)
+                    self._clock()
                 del self.commands[:header]
             else:
                 if not self._shift(opcode):
@@ -144,7 +170,7 @@ class MpsseWire:
             elif write_tdi:
                 position = index % 8 if lsb else 7 - index % 8
                 self.tdi = (outgoing[index // 8] >> position) & 1
-            value = self.tap.clock(self.tms, self.tdi)
+            value = self._clock()
             # Partial LSB reads occupy high bits; partial MSB reads occupy low bits.
             received = (received >> 1) | (value << 7) if lsb else ((received << 1) | value)
             if read_tdo and ((index + 1) % 8 == 0 or index + 1 == bit_count):
@@ -160,7 +186,7 @@ def put_dword(pointer, value):
 
 class WireDriver:
     def __init__(self, tap=None):
-        self.wire = MpsseWire(tap)
+        self.wire = MpsseWire(tap, digilent=True)
         self.closed = False
 
     def FT_CreateDeviceInfoList(self, count):
@@ -218,6 +244,31 @@ def test_probe_against_tap_model(identifier):
     assert driver.closed
     assert not driver.wire.tap.instructions, "Probe must not shift reconfiguration instructions"
     assert driver.wire.tap.state == "idle"
+
+
+@pytest.mark.parametrize(
+    "old_gpio",
+    [
+        b"\x80\x08\x0b",  # Original generic FTDI profile.
+        b"\x80\xe8\xeb",  # Digilent low bank alone leaves mux pins floating.
+        b"\x80\x08\x0b\x82\x00\x60",  # Mux setup alone leaves buffers disabled.
+        b"\x80\xe8\xeb\x82\x60\x60",  # High mux controls select another path.
+    ],
+)
+def test_digilent_gpio_gate_reproduces_all_ones_and_restores_idcode(old_gpio):
+    wire = MpsseWire(digilent=True)
+    # Reset, enter Shift-DR, read 32 bits LSB first, then return to Idle.
+    scan = b"\x4b\x05\x1f\x4b\x02\x01\x28\x03\x00\x4b\x02\x03\x87"
+    wire.feed(old_gpio + scan)
+    assert wire.rx == b"\xff" * 4
+    assert wire.tap.state == "reset", "Disabled GPIO path must not clock the FPGA"
+    assert not wire.tap.instructions
+
+    wire.rx.clear()
+    wire.feed(b"\x80\xe8\xeb\x82\x00\x60" + scan)
+    assert int.from_bytes(wire.rx, "little") == 0x03631093
+    assert wire.tap.state == "idle"
+    assert not wire.tap.instructions, "Read-only scan must never issue JPROGRAM"
 
 
 def test_mpsse_partial_read_alignment_is_independent_of_backend():
