@@ -1,261 +1,173 @@
-# Chaîne FPGA libre, sans Vivado
+# Chaîne FPGA libre et firmware précompilé
 
-La cible est exclusivement l'**Arty A7-100T, xc7a100tcsg324-1**. Yosys réalise la
-synthèse, le fork `gatecat/nextpnr-xilinx` le placement/routage et la production
-FASM, Project X-Ray la conversion FASM → frames → `.bit`, et openFPGALoader le
-chargement JTAG en SRAM pour le flux d'outils externes. Un backend FTDI D2XX
-natif permet aussi le chargement SRAM sous Windows d'un `.bit` existant,
-séparément de sa compilation. Le chemin xc7 de ce fork est décrit par son auteur comme
-ne nécessitant pas Vivado. Le `nextpnr` générique des distributions, une chipdb
-35T, et le chemin UltraScale/RapidWright ne sont pas des substituts.
+La cible est l'**Arty A7-100T, xc7a100tcsg324-1**. Yosys réalise la synthèse,
+openXC7/nextpnr le placement/routage et la production FASM, puis Project X-Ray
+convertit FASM → frames → `.bit`. Aucun Vivado n'est appelé.
 
-Cette chaîne reste expérimentale. Les tests logiciels du projet vérifient les
-arguments, les erreurs et la protection contre les sorties périmées. Ils ne
-constituent pas une compilation routée sur 100T ni une validation sur carte. Les
-versions, la couverture des primitives et les données de timing doivent être
-vérifiées sur votre installation. Aucune fréquence physique de 200 MHz n'est
-certifiée par l'application.
+Pour utiliser la carte **sous Windows**, un fichier précompilé permet de
+charger le FPGA depuis Flet avec le pilote FTDI existant. Aucun compilateur
+FPGA, WSL ou Linux n'est requis sur ce PC. Voir [le guide Windows](windows.md).
+La compilation décrite ci-dessous concerne les développeurs et GitHub Actions.
 
-Pour démarrer, diagnostiquer et charger un fichier existant **sous Windows
-natif**, suivre [windows.md](windows.md). Le diagnostic JTAG intégré lit
-l'IDCODE avec le pilote FTDI D2XX existant ; la programmation est une opération
-distincte. Aucun `.bit` précompilé et validé sur carte n'est fourni actuellement.
-Le backend Windows de programmation est expérimental : ses tests sont simulés,
-sans essai matériel ici.
+Le [firmware précompilé](../firmware/prebuilt/arty_frame.bit) a été produit
+avec cette chaîne : synthèse, placement/routage et contrôle de timing réussis
+à **200 MHz**, avec une Fmax après routage de **210,44 MHz**. Les sorties
+physiques et le chargement de ce firmware n'ont pas encore été testés sur carte.
 
-## Configuration d'outils Windows natifs
+## Outils épinglés et provenance
 
-La couche Python lance des exécutables et scripts locaux sans shell ; elle
-peut utiliser des outils Windows placés dans un dossier accessible à votre
-compte, sans installation système. Le template portable se prépare depuis
-PowerShell, dans le dossier du dépôt :
+Le script [bootstrap-fpga-tools.sh](../scripts/bootstrap-fpga-tools.sh)
+télécharge des archives précompilées, vérifie leur SHA256, extrait les outils,
+contrôle la chipdb 100T et produit `build/toolchain.ci.json` ainsi que
+`build/tool-versions.json`. Cette préparation a été exécutée dans
+l'environnement de développement.
 
-```powershell
-Copy-Item .\examples\toolchain.windows.example.json .\toolchain.json
-```
+| Archive | Version utilisée | SHA256 |
+| --- | --- | --- |
+| [OSS CAD Suite Linux x64](https://github.com/YosysHQ/oss-cad-suite-build/releases/download/2026-03-24/oss-cad-suite-linux-x64-20260324.tgz) | 2026-03-24 ; Yosys `0.63+173`, commit `66306a8ca` | `69f5b5f306c92ea73322cda570242a7a1e4c49e416288750a56cd0feab49c155` |
+| [openXC7 Linux x86-64](https://github.com/cavearr/toolchain-openxc7-releases/releases/download/2026-09-30/openxc7-toolchain-linux-x86-64-20260930.tgz) | 2026-09-30 ; nextpnr `c68c1358` | `2a4128908d848423005933ec2c5c2960213368f4b4b9a65287a7d898357335da` |
 
-Placer vos outils dans les dossiers indiqués ou modifier leurs chemins dans
-`toolchain.json`. Ce template **n'installe et ne fournit aucun outil**.
-Il faut disposer de tous les éléments suivants pour construire ce firmware :
+Le bundle openXC7 inclut les convertisseurs, la base Project X-Ray Artix-7
+et une chipdb cohérente avec son exécutable :
 
-- Yosys avec `synth_xilinx` pour la famille xc7 ;
-- un backend nextpnr xc7 acceptant notre JSON/XDC et produisant du FASM,
-  avec une chipdb correspondant exactement au `xc7a100tcsg324-1` et à sa version ;
-- Project X-Ray, sa base `artix7`, le script `fasm2frames.py` et ses dépendances
-  Python, puis un `xc7frames2bit.exe` compatible.
+- nextpnr : `c68c13582e972292c86a5025140d52e713384cbc` ;
+- base Project X-Ray : `a90f27c1caefee5276f47440f4c730b50519a86f` ;
+- identifiant chipdb : `66c7425d4ef246f9`.
 
-L'existence d'une chaîne complète 100T Windows prête à l'emploi et la
-compatibilité de ses versions **n'ont pas été vérifiées**. Nous ne promettons
-pas qu'OSS CAD Suite Windows contienne ce backend xc7, ni qu'un nextpnr
-générique ou un backend himbaechel convienne à ce flux sans adaptation.
-Le template décrit les outils attendus ; il ne constitue pas une distribution
-de compilation validée.
+Ces archives sont exécutées par l'environnement de compilation distant ;
+elles ne sont pas des prérequis du PC Windows. Un
+[bundle openXC7 Windows natif](https://github.com/cavearr/toolchain-openxc7-releases/releases/download/2026-09-30/openxc7-toolchain-windows-amd64-20260930.tgz)
+existe également. Sa compilation complète de ce projet sous Windows n'a pas
+été exécutée ici ; il reste un choix de développement facultatif.
 
-Si les outils nécessaires sont déjà disponibles et configurés :
+## Compilation sur GitHub Actions
 
-```powershell
-.\.venv\Scripts\arty-frame.exe doctor --toolchain toolchain.json
-.\.venv\Scripts\arty-frame.exe build --toolchain toolchain.json
-```
+Le workflow [Build Arty A7-100T firmware](../.github/workflows/firmware.yml)
+installe les outils épinglés, exécute les simulations RTL, compile le firmware,
+exige le timing 200 MHz et contrôle le fichier `.bit`. Dans GitHub, ouvrir
+**Actions → Build Arty A7-100T firmware**, puis une exécution réussie.
+L'archive **arty-a7-100t-firmware-…** n'est créée que si tous ces contrôles
+réussissent. Les journaux restent disponibles séparément en cas d'échec.
 
-Le diagnostic `doctor` vérifie la présence des exécutables et des fichiers,
-dont openFPGALoader pour le flux externe historique. Il ne certifie pas leur
-compatibilité. La compilation doit réussir, notamment son contrôle de timing,
-avant de considérer son résultat utilisable. Le chargement SRAM Windows
-natif D2XX d'un fichier existant se fait séparément :
+Le fichier publié dans `firmware/prebuilt/` est accompagné de :
 
-```powershell
-.\.venv\Scripts\arty-frame.exe jtag-program --bitstream .\build\arty_frame.bit
-```
+| Fichier | Contenu |
+| --- | --- |
+| [arty_frame.bit](../firmware/prebuilt/arty_frame.bit) | Configuration SRAM pour le 100T |
+| [firmware-manifest.json](../firmware/prebuilt/firmware-manifest.json) | Sources, cible, versions des outils, hash du fichier et état de validation matérielle |
+| [successful-build.json](../firmware/prebuilt/successful-build.json) | Reçu du build et hashes des entrées |
+| [build.log](../firmware/prebuilt/build.log) | Commandes et résultats, dont le rapport de fréquence après routage |
+| [timing.json](../firmware/prebuilt/timing.json) | Rapport de timing nextpnr |
 
-Ce backend n'utilise pas openFPGALoader. Il vérifie la cible Artix-7 100T,
-l'IDCODE embarqué dans le fichier et le statut de configuration, mais reste
-expérimental et ne remplace pas une validation du firmware sur carte. Les
-options `--serial` et `--ftdi-dll` permettent de choisir le canal A et sa DLL.
-Les pilotes FTDI existants sont conservés ; aucune substitution WinUSB/Zadig
-n'est demandée.
-
-## Préparation Linux, option pour les développeurs
-
-Les installations suivantes sont distinctes de l'environnement Python/Flet de
-l'application. Elles documentent un environnement de développement Linux
-séparé, facultatif, et ne sont nécessaires ni au démarrage ni au diagnostic
-ni au chargement natif Windows d'un fichier existant.
-La base xc7 peut occuper plusieurs Go : elle n'est pas distribuée
-avec le projet. Prévoir suffisamment de RAM et d'espace pour sa génération.
-
-```bash
-sudo apt update
-sudo apt install git cmake ninja-build build-essential pkg-config \
-  libboost-all-dev libeigen3-dev libffi-dev libreadline-dev \
-  libgflags-dev libyaml-cpp-dev zlib1g-dev \
-  libusb-1.0-0-dev libftdi1-dev python3-dev python3-venv \
-  yosys openfpgaloader
-mkdir -p "$HOME/arty-tools"
-```
-
-Si `openfpgaloader` n'est pas proposé par la distribution, le compiler selon la
-documentation officielle. Installer ses règles udev, reconnecter l'USB et garder
-les privilèges utilisateur ordinaires pour lancer l'interface. Le câble USB de
-l'Arty dessert à la fois JTAG et UART via le FT2232.
-
-La méthode de reproductibilité est de figer **ensemble** le commit nextpnr et
-ses sous-modules, le commit Project X-Ray, et la version Yosys, puis de générer
-la chipdb avec ce même nextpnr. Ne mélangez pas un `.bin` trouvé ailleurs avec
-un binaire nextpnr d'un autre commit : le format interne peut évoluer.
-
-Les commandes ci-dessous suivent les procédures amont et sont un guide de
-construction, pas une affirmation qu'un ensemble de versions a été validé sur
-une carte. Le hash Project X-Ray correspond à la source consultée pendant
-le développement. Les deux commits sont figés ci-dessous ; enregistrez les
-versions effectivement installées et conservez les sous-modules.
-
-```bash
-export ARTY_TOOLS="$HOME/arty-tools"
-# Utiliser des commits complets plutôt que des branches mobiles.
-export ARTY_NEXTPNR_REV="8f178fc6a6d4dfbc57bef66c3ccff34d558047d5"
-export ARTY_XRAY_REV="c9f02d8576042325425824647ab5555b1bc77833"
-
-git clone https://github.com/gatecat/nextpnr-xilinx.git "$ARTY_TOOLS/nextpnr-xilinx"
-git -C "$ARTY_TOOLS/nextpnr-xilinx" checkout "$ARTY_NEXTPNR_REV"
-git -C "$ARTY_TOOLS/nextpnr-xilinx" submodule update --init --recursive
-
-git clone https://github.com/f4pga/prjxray.git "$ARTY_TOOLS/prjxray"
-git -C "$ARTY_TOOLS/prjxray" checkout "$ARTY_XRAY_REV"
-git -C "$ARTY_TOOLS/prjxray" submodule update --init --recursive
-
-python3 -m venv "$ARTY_TOOLS/venv"
-"$ARTY_TOOLS/venv/bin/python" -m pip install --upgrade pip
-"$ARTY_TOOLS/venv/bin/python" -m pip install -r "$ARTY_TOOLS/prjxray/requirements.txt"
-"$ARTY_TOOLS/venv/bin/python" -m pip install -e "$ARTY_TOOLS/prjxray"
-
-cmake -S "$ARTY_TOOLS/prjxray" -B "$ARTY_TOOLS/prjxray/build"
-cmake --build "$ARTY_TOOLS/prjxray/build" --target xc7frames2bit -j2
-cmake -S "$ARTY_TOOLS/nextpnr-xilinx" -B "$ARTY_TOOLS/nextpnr-xilinx" -DARCH=xilinx
-cmake --build "$ARTY_TOOLS/nextpnr-xilinx" -j2
-
-cd "$ARTY_TOOLS/nextpnr-xilinx"
-"$ARTY_TOOLS/venv/bin/python" xilinx/python/bbaexport.py \
-  --device xc7a100tcsg324-1 --bba xilinx/xc7a100tcsg324-1.bba \
-  --xray xilinx/external/prjxray-db/artix7 \
-  --metadata xilinx/external/nextpnr-xilinx-meta/artix7
-./bba/bbasm --l xilinx/xc7a100tcsg324-1.bba xilinx/xc7a100tcsg324-1.bin
-
-git rev-parse HEAD > "$ARTY_TOOLS/nextpnr-revision.txt"
-git submodule status --recursive > "$ARTY_TOOLS/nextpnr-submodules.txt"
-git -C "$ARTY_TOOLS/prjxray" rev-parse HEAD > "$ARTY_TOOLS/prjxray-revision.txt"
-"$ARTY_TOOLS/venv/bin/python" -m pip freeze > "$ARTY_TOOLS/python-requirements.lock"
-yosys -V > "$ARTY_TOOLS/yosys-version.txt"
-```
-
-Le script `bbaexport.py` utilise la base et les métadonnées du fork nextpnr.
-Contrôler ses options avec `--help` si le commit choisi modifie leur emplacement.
-Le répertoire de base Project X-Ray doit être le dossier `artix7`, contenant
-`xc7a100tcsg324-1/part.yaml`, avec ses fichiers tilegrid/segbits et métadonnées.
-La génération des fichiers de configuration utilise une base préexistante :
-il ne faut pas lancer les fuzzers Project X-Ray, qui servent à caractériser le
-composant et peuvent dépendre d'outils propriétaires.
-
-Ne sourcez pas les anciens scripts `utils/environment.sh` de Project X-Ray
-qui exigent une installation Vivado. Les commandes de l'application appellent
-directement `fasm2frames.py` et `xc7frames2bit`.
-
-## Configuration et utilisation
-
-Depuis la racine de ce projet :
-
-```bash
-cp examples/toolchain.example.json toolchain.json
-# Éditer toolchain.json : remplacer /opt/arty-tools par vos chemins absolus.
-arty-frame doctor --toolchain toolchain.json
-arty-frame build --toolchain toolchain.json
-arty-frame program --toolchain toolchain.json --bitstream build/arty_frame.bit
-```
-
-Ces opérations sont aussi disponibles dans l'onglet FPGA de l'interface Flet.
-Les chemins `chipdb`, `prjxray_db`, `build_dir` sont résolus relativement au
-fichier JSON. Les chemins d'exécutables contenant `/` ou `\`, ainsi que les
-chemins de scripts `.py` contenant l'un de ces séparateurs, sont également
-résolus relativement au dossier du JSON. Ainsi, `tools/bin/yosys.exe` et
-`.venv/Scripts/python.exe` du template Windows deviennent des chemins absolus
-locaux après copie du JSON à la racine du projet. Un nom simple, par exemple
-`yosys`, est cherché dans le PATH. Les autres arguments restent littéraux,
-sans interprétation de commandes shell ou de variables d'environnement.
-`fasm2frames` peut être un tableau `["/chemin/python", "/chemin/fasm2frames.py"]`.
-`openfpgaloader` contient uniquement l'exécutable, sans options supplémentaires.
-Le diagnostic teste la présence des outils/fichiers, pas leur compatibilité
-complète ni la présence de la carte.
-
-La compilation exécute successivement :
+Le build de référence utilise **ABC9**, la graine nextpnr par défaut **1** et
+la cible `xc7a100tcsg324-1`. Le rapport final indique **210,43771362304688 MHz**
+sur `core_clock`, avec **PASS at 200.00 MHz**. Le `.bit` contient un IDCODE
+`0x03631093`, compatible avec l'IDCODE `0x13631093` rapporté sur la carte
+(révision différente). Les trois resets ODDR R→SR ont été vérifiés dans le
+netlist routé. Le fichier mesure **3 825 970 octets** et son SHA256 est :
 
 ```text
-yosys -p 'read_verilog ...; synth_xilinx -family xc7 -flatten -nodram -top arty_top; write_json ...'
-nextpnr-xilinx --chipdb ... --xdc ... --json ... --fasm ... --freq 200
-python fasm2frames.py --db-root .../artix7 --part xc7a100tcsg324-1 design.fasm
-xc7frames2bit --part_file .../part.yaml --part_name xc7a100tcsg324-1 \
-              --frm_file design.frames --output_file design.bit
-openFPGALoader -b arty_a7_100t build/arty_frame.bit
+5849a6ffaf0cf05d3823e250ac7f6091d8c219c15194b61eabd411823e2e6b4e
 ```
 
-`fasm2frames` écrit les frames sur stdout ; ce flux est conservé séparément des
-diagnostics stderr. Aucune commande ne passe par un shell. `--timing-allow-fail`
-est interdit. Les commandes et leurs sorties figurent dans `build/build.log`
-et `build/program.log`. Chaque compilation utilise un dossier neuf dans
-`build/runs/`. Le chargement porte uniquement sur la SRAM ; aucune option de
-flash persistante n'est appelée. Après coupure de courant, charger à nouveau.
+## Reproduire un build dans un environnement de développement
 
-`-flatten` supprime la hiérarchie avant export JSON. `-nodram` évite les
-primitives de petite RAM distribuée que ce fork xc7 ne traite pas toutes.
-Le générateur d'horloge utilise `PLLE2_BASE`, couvert par le flux FASM du fork,
-avec `COMPENSATION="INTERNAL"`, mode pris en charge par son writer FASM,
-un VCO à 1 GHz (100 MHz × 10) et une sortie à 200 MHz (÷ 5).
+Depuis la racine du projet, dans un environnement de développement Linux
+x86-64 disposant de Python 3.11+, Bash, curl, tar et sha256sum :
 
-## Horloge et portée des rapports de timing
+```bash
+python -m pip install -e .
+bash scripts/bootstrap-fpga-tools.sh
+python -m arty_frame_studio.cli build --toolchain build/toolchain.ci.json
+```
 
-Le FPGA produit une horloge interne de 200 MHz à partir de l'oscillateur E3 de
-100 MHz. Les ODDR génèrent les demi-cycles de 2,5 ns. La fréquence sélectionnée
-dans l'application vaut 200 MHz / N, N entier de 1 à 65535 ; le Python et l'USB
-ne produisent aucun front GPIO.
+Aucune commande privilégiée, construction C++ ou caractérisation de puce
+n'est demandée par ce script. Les outils et les données occupent plusieurs
+Go. Le script de préparation est destiné au développement et à la CI ;
+il n'est pas une étape à effectuer pour piloter la carte sous Windows.
 
-Le parseur XDC de `gatecat/nextpnr-xilinx` prend en charge `create_clock` sur
-`get_ports` et `get_nets`. Il ignore `create_generated_clock`, les contraintes
-de délai d'entrée/sortie et les commandes Tcl SDC générales. Le XDC fourni
-impose donc explicitement **10 ns sur clk100 et 5 ns sur le net core_clock**,
-avec la syntaxe `[get_nets core_clock]` sans accolades. Le `--freq 200` reste
-une cible par défaut. La compilation exige dans la sortie nextpnr un rapport
-`Max frequency for clock 'core_clock': ... (PASS at 200.00 MHz)` ou une
-contrainte plus stricte, Fmax ≥ 200 MHz, et refuse tout rapport FAIL. Si le net
-est renommé ou si ce rapport manque, elle bloque plutôt que de fabriquer un
-bitstream supposé valide.
+La configuration accepte `nextpnr_backend` avec deux valeurs :
 
-**Cette vérification ne couvre pas toute la sortie DDR.** Le code de timing
-xc7 de ce fork modélise surtout les registres internes ; les endpoints ODDR
-et la liaison GPIO externe ne bénéficient pas d'une analyse complète. Le
-rapport PASS est une condition nécessaire pour poursuivre, pas une preuve de
-setup/hold à l'entrée du périphérique distant. Les phases CLK/DATA/LATCH,
-la charge des broches, les pistes, les câbles et le récepteur doivent être
-mesurés et validés. Un chronogramme idéal ne fournit pas ces mesures.
+| Backend | Options de placement/routage |
+| --- | --- |
+| `himbaechel` | Bundle openXC7 utilisé : `--device xc7a100tcsg324-1`, `-o xdc=…`, `-o fasm=…`, `--report timing.json`, `--write routed.json` |
+| `classic` | Ancien fork gatecat/nextpnr-xilinx : `--xdc …`, `--fasm …` |
 
-Un build réussi crée `successful-build.json` avec les hashes des sources,
-contraintes, configuration et bitstream. Tout nouveau build révoque ce reçu,
-même s'il échoue avant la synthèse. Une sortie vide, une erreur de commande,
-un timing manquant/raté, ou des sources modifiées interdisent la programmation
-par le flux `arty-frame program` associé à cette configuration. Un ancien
-`.bit` peut rester pour inspection, sans être autorisé par ce flux. Le
-chargement natif `jtag-program` d'un fichier existant est distinct : il valide
-le fichier et la cible matérielle, sans attester sa provenance ou un build
-récent de ces sources. Le verrou `.toolchain.lock` exclut compilation et programmation
-simultanées ; après un arrêt brutal, supprimer le verrou seulement après avoir
-vérifié qu'aucun processus de compilation ou de programmation ne tourne.
+`classic` reste la valeur par défaut pour les configurations historiques.
+Les formats chipdb et les options des deux backends ne sont pas
+interchangeables. Le bootstrap configure explicitement `himbaechel`.
+Le `nextpnr` générique d'une distribution ne suffit pas : il faut le backend
+xc7, sa chipdb 100T et la base correspondante.
 
-## Sources amont
+Le mapping Yosys utilise **ABC9 par défaut**, avec `synth_xilinx -abc9`,
+configurable par `"yosys_mapping": "abc9"`. Le choix historique
+`"yosys_mapping": "abc"` reste disponible ; il doit satisfaire le même
+contrôle de timing avant toute production de bitstream.
 
-- [nextpnr-xilinx : flux xc7, primitives et génération chipdb](https://github.com/gatecat/nextpnr-xilinx)
-- [Parseur XDC réellement utilisé](https://github.com/gatecat/nextpnr-xilinx/blob/master/xilinx/xdc.cc)
-- [Modèle de timing de l'architecture](https://github.com/gatecat/nextpnr-xilinx/blob/master/xilinx/arch.cc)
-- [Yosys synth_xilinx](https://yosyshq.readthedocs.io/projects/yosys/en/latest/cmd/synth_xilinx.html)
-- [Project X-Ray et outils de conversion](https://github.com/f4pga/prjxray)
-- [Base Project X-Ray](https://github.com/f4pga/prjxray-db)
-- [openFPGALoader](https://github.com/trabucayre/openFPGALoader)
+Les chemins de données et d'exécutables sont résolus relativement au fichier
+JSON ; les noms simples sont cherchés dans le PATH. Les commandes sont
+lancées sans shell. Un convertisseur Python peut être déclaré comme un tableau
+`["chemin/python", "chemin/fasm2frames.py"]`. Les exemples
+[historique](../examples/toolchain.example.json) et
+[Windows](../examples/toolchain.windows.example.json) décrivent des chemins
+à adapter ; ils ne distribuent aucun exécutable.
 
-Brochage et limites physiques : [hardware.md](hardware.md).
+`doctor` vérifie les exécutables et les fichiers, sans garantir leur
+compatibilité. L'absence d'openFPGALoader n'empêche pas la compilation ni le
+chargement Windows D2XX ; cet outil concerne uniquement le flux externe de
+programmation. Le flux natif utilise :
+
+```bat
+.venv\Scripts\arty-frame.exe jtag-program --bitstream firmware\prebuilt\arty_frame.bit
+```
+
+## Adaptations des primitives et du mapping
+
+Le PLL utilise **`PLLE2_ADV`**, dont le paramètre
+`COMPENSATION="INTERNAL"` est défini, avec entrée 100 MHz, VCO 1 GHz et sortie
+200 MHz. `PLLE2_BASE` n'expose pas ce paramètre ; la synthèse réelle a permis
+de corriger cette erreur que le précédent modèle de simulation acceptait.
+
+Les trois ODDR conservent leur reset asynchrone **R**. Le packer himbaechel
+`c68c1358` tente de réunir R et S sur la même entrée physique SR. Le projet
+produit donc une copie du JSON Yosys où seules les connexions **S constantes
+à zéro** sont retirées pour ces ODDR. Le JSON d'origine est conservé ; toute
+configuration différente est refusée. Après routage, le build vérifie que
+DATA, CLK et LATCH conservent le reset R sur leur port physique SR, avec
+reset à zéro. Il ne remplace pas ce reset par un masquage des données.
+
+Avec la version Yosys épinglée, `scratchpad -set abc.exe yosys-abc` sélectionne
+l'invocation ABC par lot. Cela évite un blocage de son mode interactif lié
+aux longs chemins temporaires et à Readline. Les logs conservent la commande
+exacte. `-flatten` supprime la hiérarchie et `-nodram` évite les petites RAM
+distribuées insuffisamment couvertes par ce flux.
+
+## Timing et portée de la validation
+
+Le XDC impose **10 ns sur clk100 et 5 ns sur core_clock** ; nextpnr reçoit
+également `--freq 200`. Le build exige le rapport final après routage
+`Max frequency for clock 'core_clock': … (PASS at 200.00 MHz)`, avec Fmax
+au moins 200 MHz et une contrainte au moins aussi stricte. Un rapport de
+placement provisoire n'est pas une preuve de fermeture du timing.
+`--timing-allow-fail` est interdit. Un rapport final absent ou en échec
+bloque la conversion en bitstream.
+
+Ce contrôle couvre les chemins modélisés par nextpnr. Il **ne certifie pas
+l'interface DDR ni la liaison Pmod externe** : fronts, skew, câbles et marges
+setup/hold du récepteur doivent être mesurés. Le firmware n'a pas été testé
+sur carte ici. Le chronogramme représente le comportement idéal.
+
+Chaque build utilise un dossier neuf dans `build/runs/` et révoque le reçu
+précédent avant toute opération. Une sortie vide, un timing refusé ou des
+sources modifiées empêchent `arty-frame program` de charger une ancienne
+configuration au titre de ce build. `jtag-program` est distinct : il
+contrôle la cible et le fichier, sans attester un build récent des sources.
+Le chargement est limité à la SRAM, perdue après coupure d'alimentation.
+
+Sources amont : [openXC7/nextpnr](https://github.com/openXC7/nextpnr),
+[distribution openXC7](https://github.com/cavearr/toolchain-openxc7-releases),
+[Yosys](https://yosyshq.readthedocs.io/projects/yosys/en/latest/cmd/synth_xilinx.html),
+[Project X-Ray](https://github.com/f4pga/prjxray),
+[base Project X-Ray](https://github.com/f4pga/prjxray-db),
+[openFPGALoader](https://github.com/trabucayre/openFPGALoader).
+Voir également [le brochage](hardware.md) et [les vérifications](verification.md).

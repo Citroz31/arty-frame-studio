@@ -394,12 +394,13 @@ class Studio:
             icon=ft.Icons.USB,
             on_click=self._jtag_probe,
         )
+        prebuilt_firmware = self.project_root / "firmware" / "prebuilt" / "arty_frame.bit"
         self.windows_bitstream_path = self._field(
             "Firmware existant pour l'Arty A7-100T (.bit)",
-            "",
+            str(prebuilt_firmware) if prebuilt_firmware.is_file() else "",
             width=650,
             on_change=lambda _: None,
-            helper="Aucun .bit précompilé n'est actuellement fourni avec l'application.",
+            helper="Chargez le firmware du projet par JTAG avant de connecter le port COM.",
         )
         self.jtag_program_button = ft.ElevatedButton(
             "Charger le .bit sous Windows",

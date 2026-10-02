@@ -16,9 +16,11 @@ module packet_rx #(
     localparam integer TIMEOUT_WIDTH=TIMEOUT_CYCLES <= 2 ? 1 : $clog2(TIMEOUT_CYCLES);
     reg [3:0] state;
     reg [7:0] version, op, seq, length, payload_index, crc_low;
+    reg [7:0] last_payload_index;
     reg [255:0] payload;
     reg [15:0] crc;
     reg [TIMEOUT_WIDTH-1:0] timeout_count;
+    integer payload_byte;
 
     function [15:0] crc_byte;
         input [15:0] previous;
@@ -42,6 +44,7 @@ module packet_rx #(
             seq <= 0;
             length <= 0;
             payload_index <= 0;
+            last_payload_index <= 0;
             crc_low <= 0;
             crc <= 16'hffff;
             payload <= 0;
@@ -77,17 +80,22 @@ module packet_rx #(
                     end
                     LENGTH: begin
                         length <= rx_data;
+                        last_payload_index <= rx_data-1'b1;
                         payload <= 0;
                         payload_index <= 0;
                         crc <= crc_byte(crc, rx_data);
                         state <= rx_data == 0 ? CRC_LOW : PAYLOAD;
                     end
                     PAYLOAD: begin
-                        if (payload_index < 32)
-                            payload[payload_index*8 +: 8] <= rx_data;
+                        // Constant byte slices become independent write enables.
+                        // A variable part-select otherwise creates a wide
+                        // arithmetic/shifter path from the received byte index.
+                        for (payload_byte=0; payload_byte<32; payload_byte=payload_byte+1)
+                            if (payload_index == payload_byte)
+                                payload[payload_byte*8 +: 8] <= rx_data;
                         crc <= crc_byte(crc, rx_data);
                         payload_index <= payload_index+1'b1;
-                        if (payload_index+1'b1 == length) state <= CRC_LOW;
+                        if (payload_index == last_payload_index) state <= CRC_LOW;
                     end
                     CRC_LOW: begin
                         crc_low <= rx_data;

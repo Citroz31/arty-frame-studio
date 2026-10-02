@@ -1,0 +1,6 @@
+PASS tb_engine: 1124018 half-tick waveform checks
+PASS tb_oddr: 42 aligned pin-edge checks
+PASS tb_protocol: 24 request/response cases
+PASS tb_top: UART PING/SEND/STATUS, 200 MHz modeled burst, 2 stopped-clock asynchronous resets and UART recovery
+PASS tb_uart: production 200 MHz / 115200 baud loopback
+RTL: toutes les simulations ont réussi (aucune mesure matérielle).

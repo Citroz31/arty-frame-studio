@@ -3,7 +3,7 @@
 Application de bureau **Python / Flet**, en français, pour une **Digilent Arty
 A7-100T**, avec pilotage USB/UART, trames série jusqu’à **26 bits**, sorties
 **DATA / CLK / LATCH**, simulation et exports de chronogrammes. La compilation
-FPGA utilise Yosys, nextpnr-xilinx et Project X-Ray. La programmation SRAM peut
+FPGA utilise Yosys, openXC7/nextpnr et Project X-Ray. La programmation SRAM peut
 utiliser openFPGALoader ou le backend Windows FTDI D2XX du projet.
 Vivado n’est pas utilisé par le projet.
 
@@ -13,19 +13,22 @@ réalisable est **200 MHz / N**, N entier de 1 à 65535, soit environ 3,052 kHz 
 pause sont quantifiées à **2,5 ns**. CLK est émise en rafales, idle bas ; le
 destinataire échantillonne DATA au front montant. DATA change au front descendant.
 
-**Le fonctionnement à 200 MHz sur la carte n’a pas été mesuré.** Le moteur utilise
-des sorties DDR, mais une fréquence numérique demandée ne garantit pas le timing
-du placement/routage, ni l’intégrité d’une liaison Pmod. Voir
-[le matériel](docs/hardware.md) et [la chaîne FPGA](docs/toolchain.md).
-Le dépôt contient le RTL et les commandes de compilation ; aucun bitstream
-100T routé et vérifié sur carte n’est fourni.
+Le [firmware précompilé pour le 100T](firmware/prebuilt/arty_frame.bit) est
+fourni avec son [manifeste](firmware/prebuilt/firmware-manifest.json) et ses
+rapports. La synthèse et le routage libres ont réussi : **Fmax 210,44 MHz,
+contrainte 200 MHz respectée** sur les chemins modélisés de `core_clock`.
+
+**Le firmware et ses sorties à 200 MHz n'ont pas encore été testés sur carte.**
+Le rapport nextpnr ne certifie pas l'interface DDR ni la liaison Pmod externe.
+Voir [le matériel](docs/hardware.md) et [la chaîne FPGA](docs/toolchain.md).
 
 ![Interface de simulation](docs/images/chronogramme-interface.png)
 
 ## Démarrage
 
 **Sous Windows :** installer Python 3.11 ou plus récent pour votre compte,
-télécharger et extraire le dépôt, puis double-cliquer sur
+[télécharger le ZIP du dépôt](https://github.com/Citroz31/arty-frame-studio/archive/refs/heads/main.zip),
+l'extraire avec son dossier `firmware/prebuilt/`, puis double-cliquer sur
 [`start-windows.cmd`](start-windows.cmd). Le lanceur installe les dépendances
 dans le dossier du projet. Aucun PowerShell administrateur, WSL, ni changement
 de pilote USB n'est demandé. Voir le [guide Windows natif](docs/windows.md).
@@ -71,21 +74,31 @@ ou `--project-root` pour les commandes FPGA de la CLI.
 3. Afficher le chronogramme idéal et exporter en SVG, CSV ou VCD (GTKWave). Le
    nombre de répétitions affichées est limité ; cette limite est indiquée sur
    le graphique et s’applique aussi aux exports.
-4. Pour la carte réelle sous Windows, l'onglet FPGA permet de détecter le 100T
-   par JTAG avec le pilote FTDI existant, puis de charger un `.bit` existant
-   sans outil externe. **Le chargeur est expérimental, testé avec FTDI simulé ;
-   aucun `.bit` précompilé n'est encore fourni.** La détection JTAG ne programme
-   pas le FPGA. Pour construire le firmware, consulter
-   [docs/toolchain.md](docs/toolchain.md) : le modèle de configuration accepte
-   des exécutables Windows natifs, mais une chaîne 100T Windows complète n'a
-   pas encore été validée.
-5. Brancher le port USB de l’Arty, choisir son port série, connecter, puis envoyer
-   une trame. La connexion vérifie la réponse du firmware fourni : un bitstream
-   UART compatible doit déjà être chargé dans la carte.
+4. Pour la carte réelle sous Windows, utiliser l'onglet **FPGA**, section
+   **JTAG Windows natif**. Indiquer `firmware/prebuilt/arty_frame.bit` dans le champ
+   **Firmware existant pour l'Arty A7-100T (.bit)**, puis cliquer sur
+   **Charger le .bit sous Windows** et attendre environ **30 à 60 secondes**.
+   Ce champ est rempli automatiquement lorsque le fichier est présent dans
+   le dépôt extrait. La détection JTAG
+   seule ne charge rien. Le chargeur utilise le pilote FTDI existant ;
+   la procédure détaillée figure dans le [guide Windows](docs/windows.md).
+5. Vérifier que la première LED monochrome est allumée, puis choisir
+   **Carte · USB / UART**, sélectionner le port de l'Arty et cliquer sur
+   **Connecter**. La réponse PING du firmware est vérifiée avant l'envoi
+   de trames. Dans la configuration observée, ce port est **COM7**.
 
 La programmation proposée charge la **SRAM volatile** : il faut reprogrammer
 après une coupure d’alimentation. Une programmation de la flash n’est pas effectuée.
 Les profils sauvegardent les paramètres dans un JSON versionné.
+
+Le pilote Digilent Adept Runtime, y compris 2.30.4, permet l'accès USB mais
+ne charge pas ce firmware. Un IDCODE `0x13631093` confirme l'Arty 100T ;
+il ne confirme pas que le protocole UART du projet est exécuté.
+
+La compilation peut être effectuée sur GitHub Actions avec les outils libres
+épinglés du projet. Le PC Windows ne fait ensuite que charger le fichier et
+envoyer les trames : aucun compilateur FPGA, Linux ou WSL n'y est requis.
+Voir [la chaîne et ses rapports](docs/toolchain.md).
 
 ## Vérification
 

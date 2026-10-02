@@ -17,11 +17,15 @@ module tb_top;
     reg [111:0] payload;
     reg waveform_done=0;
     integer tick;
+    integer core_edges=0;
+    integer reset_checks=0;
     reg [2:0] expected;
 
     arty_top board(.clk100(clk100),.reset_n(reset_n),.uart_rx(host_serial),
         .uart_tx(board_serial),.data_out(data_pin),.frame_clk(clock_pin),
         .latch_enable(latch_pin),.led(led));
+    always @(posedge board.core_clock or negedge board.core_clock)
+        core_edges=core_edges+1;
     uart_tx host_tx(.clk(host_clock),.reset(!reset_n),.data(host_data),
         .valid(host_valid),.ready(host_ready),.tx(host_serial));
     uart_rx host_rx(.clk(host_clock),.reset(!reset_n),.rx(board_serial),
@@ -49,6 +53,37 @@ module tb_top;
             wait(host_ready);
             @(negedge host_clock); host_data=value; host_valid=1;
             @(negedge host_clock); host_valid=0;
+        end
+    endtask
+
+    // Stop the actual ODDR clock while selected outputs are high. A mask on
+    // D1/D2 or CE alone cannot clear Q without another edge; the board's
+    // asynchronous reset must still drive all three output pins low.
+    task reset_without_clock;
+        input [2:0] high_mask;
+        integer frozen_edges;
+        begin
+            #0.1;
+            if(({data_pin,clock_pin,latch_pin} & high_mask)!==high_mask)
+                $fatal(1,"Reset test did not begin with the selected outputs high");
+            if(board.core_clock===1'b1) force board.core_clock=1'b1;
+            else force board.core_clock=1'b0;
+            frozen_edges=core_edges;
+            #1;
+            reset_n=0;
+            #0.1;
+            if(core_edges!=frozen_edges || {data_pin,clock_pin,latch_pin}!==3'b000)
+                $fatal(1,"Board reset did not clear ODDR pins with the clock stopped");
+            #20;
+            if(core_edges!=frozen_edges || {data_pin,clock_pin,latch_pin}!==3'b000)
+                $fatal(1,"Reset pins changed or a core clock edge occurred while frozen");
+            reset_checks=reset_checks+1;
+            release board.core_clock;
+            @(negedge clk100); reset_n=1;
+            wait(led[0]);
+            wait(!board.reset);
+            repeat(10) @(posedge host_clock);
+            captured_count=0;
         end
     endtask
     task request;
@@ -125,8 +160,25 @@ module tb_top;
         if(!waveform_done) $fatal(1,"Top SEND emitted no waveform");
         request(4,33,0);
         check_response(24,4,33,0,0,1);
-        $display("PASS tb_top: production UART PING/SEND/STATUS and 200 MHz modeled pin burst");
+
+        // Repeated long frames leave enough time to interrupt DATA/CLK and
+        // LATCH independently. Commands still arrive over the production UART.
+        payload=0;
+        payload[31:0]=1; payload[39:32]=1; payload[55:40]=100;
+        payload[71:56]=100; payload[103:88]=65535;
+        request(2,34,14);
+        wait(data_pin && clock_pin);
+        reset_without_clock(3'b110);
+        request(1,35,0);
+        check_response(0,1,35,0,0,0);
+        request(2,36,14);
+        wait(latch_pin);
+        reset_without_clock(3'b001);
+        request(1,37,0);
+        check_response(0,1,37,0,0,0);
+        if(reset_checks!=2) $fatal(1,"Missing asynchronous reset cases");
+        $display("PASS tb_top: UART PING/SEND/STATUS, 200 MHz modeled burst, %0d stopped-clock asynchronous resets and UART recovery",reset_checks);
         $finish;
     end
-    initial begin #10000000; $fatal(1,"Timeout"); end
+    initial begin #30000000; $fatal(1,"Timeout"); end
 endmodule

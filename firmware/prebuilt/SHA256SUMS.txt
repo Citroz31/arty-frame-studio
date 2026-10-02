@@ -1,0 +1,1 @@
+5849a6ffaf0cf05d3823e250ac7f6091d8c219c15194b61eabd411823e2e6b4e  arty_frame.bit

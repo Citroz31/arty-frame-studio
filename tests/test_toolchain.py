@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -26,9 +28,52 @@ if os.environ.get("FAKE_SKIP_OUTPUT") == name:
     sys.exit(0)
 if name == "yosys":
     path = shlex.split(args[-1].split("write_json ", 1)[1])[0]
-    Path(path).write_text('{"modules": {"arty_top": {}}}')
+    cells = {}
+    for index, cell_name in enumerate(("data_ddr", "clock_ddr", "latch_ddr")):
+        cells[cell_name] = {
+            "type": "ODDR",
+            "parameters": {"INIT": "0", "SRTYPE": "ASYNC", "DDR_CLK_EDGE": "SAME_EDGE"},
+            "attributes": {"src": "firmware/rtl/arty_top.v"},
+            "port_directions": {"C": "input", "D1": "input", "D2": "input", "CE": "input",
+                                "R": "input", "S": "input", "Q": "output"},
+            "connections": {"C": [10], "D1": [11], "D2": [12], "CE": ["1"],
+                            "R": [42], "S": ["0"], "Q": [100 + index]},
+        }
+    cells["reset_flop"] = {"type": "FDCE", "connections": {"CLR": [43]}}
+    netlist = {"creator": "fake-yosys", "modules": {"arty_top": {
+        "cells": cells, "netnames": {"reset": {"bits": [42]}}}}}
+    Path(path).write_text(os.environ.get("FAKE_NETLIST", json.dumps(netlist)))
 elif name == "nextpnr-xilinx":
-    Path(args[args.index("--fasm") + 1]).write_text("CLBLL_L_X1Y1.SLICEL_X0.A5LUT.INIT[0] = 1\n")
+    fasm = (args[args.index("--fasm") + 1] if "--fasm" in args
+            else next(arg[5:] for arg in args if arg.startswith("fasm=")))
+    Path(fasm).write_text("CLBLL_L_X1Y1.SLICEL_X0.A5LUT.INIT[0] = 1\n")
+    if "--report" in args:
+        Path(args[args.index("--report") + 1]).write_text('{"fmax": {}}')
+    if "--write" in args:
+        source = json.loads(Path(args[args.index("--json") + 1]).read_text())
+        cells = {}
+        for cell_name, cell in source["modules"]["arty_top"]["cells"].items():
+            if cell["type"] != "ODDR":
+                continue
+            cells[cell_name] = {
+                "type": "OLOGICE3_OUTFF", "parameters": cell["parameters"],
+                "attributes": {"X_ORIG_TYPE": "ODDR", "X_ORIG_PORT_SR": "R"},
+                "connections": {"SR": [901]},
+            }
+        routed = {"modules": {"top": {"cells": cells,
+                                     "netnames": {"reset": {"bits": [901]}}}}}
+        fault = os.environ.get("FAKE_ROUTED_FAULT")
+        if fault == "wrong_reset":
+            cells["data_ddr"]["connections"]["SR"] = ["0"]
+        elif fault == "set_port":
+            cells["clock_ddr"]["attributes"]["X_ORIG_PORT_SR"] = "S"
+        elif fault == "missing_oddr":
+            del cells["latch_ddr"]
+        elif fault == "missing_reset":
+            del routed["modules"]["top"]["netnames"]["reset"]
+        elif fault == "wrong_mode":
+            cells["latch_ddr"]["parameters"]["SRTYPE"] = "SYNC"
+        Path(args[args.index("--write") + 1]).write_text(json.dumps(routed))
     default_timing = "Info: Max frequency for clock 'core_clock': "
     default_timing += "210.52 MHz (PASS at 200.00 MHz)"
     print(os.environ.get("FAKE_TIMING", default_timing))
@@ -96,11 +141,124 @@ def test_complete_flow_preserves_frames_and_programs_sram(toolchain: Toolchain) 
         "openFPGALoader",
     ]
     assert "--timing-allow-fail" not in calls[1]
-    assert "synth_xilinx -family xc7 -flatten -nodram -top arty_top" in calls[0][-1]
+    assert calls[0][-1].startswith("scratchpad -set abc.exe yosys-abc;")
+    assert "synth_xilinx -family xc7 -flatten -nodram -abc9 -top arty_top" in calls[0][-1]
     assert calls[1][calls[1].index("--freq") + 1] == "200"
     assert calls[2][calls[2].index("--part") + 1] == "xc7a100tcsg324-1"
     assert calls[3][calls[3].index("--part_name") + 1] == "xc7a100tcsg324-1"
     assert calls[-1] == ["openFPGALoader", "-b", "arty_a7_100t", str(bitstream)]
+
+
+def test_himbaechel_build_uses_device_vopts_and_report(toolchain: Toolchain) -> None:
+    chain = Toolchain(
+        replace(toolchain.config, nextpnr_backend="himbaechel"), toolchain.project_root
+    )
+    assert chain.build().is_file()
+    place_route = history()[1]
+    assert "--xdc" not in place_route and "--fasm" not in place_route
+    assert place_route[place_route.index("--device") + 1] == "xc7a100tcsg324-1"
+    assert f"xdc={chain.constraints}" in place_route
+    assert any(arg.startswith("fasm=") for arg in place_route)
+    assert "--report" in place_route
+    assert "--write" in place_route
+    assert "--timing-allow-fail" not in place_route
+    original = next((chain.build_dir / "runs").glob("*/arty_frame.json"))
+    normalized = original.with_name("arty_frame.himbaechel.json")
+    before = json.loads(original.read_text())
+    expected = deepcopy(before)
+    for cell in expected["modules"]["arty_top"]["cells"].values():
+        if cell["type"] == "ODDR":
+            del cell["connections"]["S"]
+            del cell["port_directions"]["S"]
+    assert json.loads(normalized.read_text()) == expected
+    assert place_route[place_route.index("--json") + 1] == str(normalized)
+    journal = (chain.build_dir / "build.log").read_text()
+    assert "3 connexion(s) S inactive(s) retirée(s), R conservé" in journal
+    assert "Reset R→SR vérifié sur DATA/CLK/LATCH" in journal
+
+
+def test_classic_build_preserves_oddr_set_and_reset_ports(toolchain: Toolchain) -> None:
+    toolchain.build()
+    original = next((toolchain.build_dir / "runs").glob("*/arty_frame.json"))
+    for cell in json.loads(original.read_text())["modules"]["arty_top"]["cells"].values():
+        if cell["type"] == "ODDR":
+            assert cell["connections"]["S"] == ["0"]
+            assert cell["connections"]["R"] == [42]
+            assert cell["port_directions"]["S"] == "input"
+    assert not original.with_name("arty_frame.himbaechel.json").exists()
+    place_route = history()[1]
+    assert place_route[place_route.index("--json") + 1] == str(original)
+    assert "--write" not in place_route
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        ("connections", "S", ["1"]),
+        ("connections", "S", ["x"]),
+        ("connections", "S", [101]),
+        ("connections", "R", []),
+        ("connections", "R", ["x"]),
+        ("parameters", "INIT", "1"),
+        ("parameters", "INIT", "x"),
+        ("parameters", "SRTYPE", "SYNC"),
+        ("parameters", "DDR_CLK_EDGE", "OPPOSITE_EDGE"),
+    ],
+)
+def test_himbaechel_normalization_rejects_unsupported_oddr_modes(
+    toolchain: Toolchain,
+    monkeypatch: pytest.MonkeyPatch,
+    section: str,
+    field: str,
+    value: object,
+) -> None:
+    # Obtain the fixture netlist, then make exactly one unsupported ODDR change.
+    toolchain.build()
+    original = next((toolchain.build_dir / "runs").glob("*/arty_frame.json"))
+    changed = json.loads(original.read_text())
+    changed["modules"]["arty_top"]["cells"]["data_ddr"][section][field] = value
+    monkeypatch.setenv("FAKE_NETLIST", json.dumps(changed))
+    chain = Toolchain(
+        replace(toolchain.config, nextpnr_backend="himbaechel"), toolchain.project_root
+    )
+    with pytest.raises(ToolchainError, match="Normalisation ODDR himbaechel refusée"):
+        chain.build()
+    assert not chain.receipt.exists()
+    assert history()[-1][0] == "yosys"
+    assert not list((chain.build_dir / "runs").glob("*/arty_frame.himbaechel.json"))
+
+
+@pytest.mark.parametrize(
+    "fault", ["wrong_reset", "set_port", "missing_oddr", "missing_reset", "wrong_mode"]
+)
+def test_himbaechel_packer_must_preserve_all_oddr_resets(
+    toolchain: Toolchain, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    monkeypatch.setenv("FAKE_ROUTED_FAULT", fault)
+    chain = Toolchain(
+        replace(toolchain.config, nextpnr_backend="himbaechel"), toolchain.project_root
+    )
+    with pytest.raises(ToolchainError, match="ODDR"):
+        chain.build()
+    assert [call[0] for call in history()] == ["yosys", "nextpnr-xilinx"]
+    assert not chain.receipt.exists()
+    assert not chain.bitstream.exists()
+
+
+def test_unsupported_nextpnr_backend_is_rejected() -> None:
+    with pytest.raises(ValueError, match="nextpnr_backend"):
+        ToolchainConfig(nextpnr_backend="unsupported")  # type: ignore[arg-type]
+
+
+def test_routed_timing_supersedes_placement_estimate(
+    toolchain: Toolchain, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "FAKE_TIMING",
+        "Info: Max frequency for clock 'core_clock': 180.00 MHz (FAIL at 200.00 MHz)\n"
+        "Info: Max frequency for clock 'core_clock': 210.52 MHz (PASS at 200.00 MHz)",
+    )
+    assert toolchain.build().is_file()
 
 
 @pytest.mark.parametrize("stage", ["yosys", "nextpnr-xilinx", "fasm2frames", "xc7frames2bit"])

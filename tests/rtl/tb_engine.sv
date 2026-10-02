@@ -78,6 +78,8 @@ module tb_engine;
         end
     endtask
 
+    integer width_case, flag_case;
+
     initial begin
         word_in=0; bits_in=1; divider_in=1; latch_ticks_in=1;
         gap_ticks_in=0; repeat_in=1; flags_in=0;
@@ -98,6 +100,16 @@ module tb_engine;
                 $urandom_range(1,9),$urandom_range(0,9),
                 $urandom_range(1,3),$urandom_range(0,3));
         end
+        // Exercise the SEND-time alignment for every supported frame width.
+        for (width_case=1; width_case<=26; width_case=width_case+1) begin
+            repeat (20) begin
+                run_case($urandom_range(0,(1<<width_case)-1),width_case,
+                    $urandom_range(1,7),$urandom_range(1,9),
+                    $urandom_range(0,9),$urandom_range(1,3),$urandom_range(0,3));
+            end
+        end
+        for (flag_case=0; flag_case<4; flag_case=flag_case+1)
+            run_case(32'h123456,26,1,65535,65535,1,flag_case);
         // STOP must preserve completed, including repetitions already finished.
         @(negedge clk);
         word_in=1; bits_in=1; divider_in=10; latch_ticks_in=1;

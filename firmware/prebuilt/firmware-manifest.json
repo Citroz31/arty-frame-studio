@@ -1,0 +1,75 @@
+{
+  "source_base_commit": "02790f1efb62bbf9c5b50cfdf203df3a11ef8cac",
+  "source_provenance": "Local build; source_sha256 identifies the exact accompanying source files.",
+  "part": "xc7a100tcsg324-1",
+  "idcode": "0x03631093",
+  "sha256": "5849a6ffaf0cf05d3823e250ac7f6091d8c219c15194b61eabd411823e2e6b4e",
+  "file_bytes": 3825970,
+  "payload_bytes": 3825788,
+  "tools": {
+    "oss_cad_suite": {
+      "url": "https://github.com/YosysHQ/oss-cad-suite-build/releases/download/2026-03-24/oss-cad-suite-linux-x64-20260324.tgz",
+      "sha256": "69f5b5f306c92ea73322cda570242a7a1e4c49e416288750a56cd0feab49c155"
+    },
+    "openxc7": {
+      "url": "https://github.com/cavearr/toolchain-openxc7-releases/releases/download/2026-09-30/openxc7-toolchain-linux-x86-64-20260930.tgz",
+      "sha256": "2a4128908d848423005933ec2c5c2960213368f4b4b9a65287a7d898357335da"
+    },
+    "openxc7_build_info": {
+      "package-name": "openxc7-toolchain",
+      "description": "openXC7 toolchain for Xilinx 7-series FPGAs: nextpnr-xilinx, prjxray, fasm and the chipdb",
+      "release-tag": "2026-09-30",
+      "yosys-release-tag": "2026-03-24",
+      "nextpnr-xilinx-revision": "c68c13582e972292c86a5025140d52e713384cbc",
+      "prjxray-db-revision": "a90f27c1caefee5276f47440f4c730b50519a86f",
+      "eigen-version": "3.4.0",
+      "chipdb-source": "generated",
+      "use-cached-chipdb": "false",
+      "chipdb-id": "66c7425d4ef246f9",
+      "build-repo": "cavearr/toolchain-openxc7-releases",
+      "build-workflow": "build-pre-release",
+      "workflow-run-id": "36771302011",
+      "workflow-run-number": "1",
+      "build-time": "2026-09-30 20:37:38 UTC",
+      "commit": "dc668069e4ca01aaacc93c8e2bd28c68d1620a15",
+      "target-platform": "linux-x86-64",
+      "file-name": "openxc7-toolchain-linux-x86-64-20260930.tgz"
+    },
+    "chipdb_id": "66c7425d4ef246f9",
+    "yosys_version": "Yosys 0.63+173 (git sha1 66306a8ca, clang++ 18.1.8 -fPIC -O3)"
+  },
+  "yosys_mapping": "abc9",
+  "nextpnr_seed": 1,
+  "uart": {
+    "baud": 115200,
+    "data_bits": 8,
+    "parity": "none",
+    "stop_bits": 1
+  },
+  "timing_clock": "core_clock",
+  "timing_requirement_mhz": 200,
+  "routed_core_fmax_mhz": 210.43771362304688,
+  "timing_scope": "nextpnr register paths; excludes physical GPIO/DDR validation",
+  "oddr_reset_verified": true,
+  "hardware_validated": false,
+  "python_tests": 296,
+  "rtl_tests": 5,
+  "source_sha256": {
+    ".github/workflows/firmware.yml": "031e4cdb3b66c8dbae0ce51d2492a722c83217d4c7ccb3efaca1380fc058949c",
+    "firmware/constraints/arty_a7_100t.xdc": "39a467c2aaa7ef70d4b6f9adda9b7097fd3edfde567d13a6e949ab6c1f5e9402",
+    "firmware/rtl/arty_top.v": "7debff87df6add99cf4d8773ab48b4c7dcb788df9eede6740e1d1be2e99ca383",
+    "firmware/rtl/frame_controller.v": "d779ea51194634ed2cd63a202f0f63563eb746745416fa928b112c1b76dd28c7",
+    "firmware/rtl/frame_engine.v": "fe3526aeea5581b61b2e6dd4a68ec242373c578cc2394a707e0aad3fead25b0b",
+    "firmware/rtl/packet_rx.v": "5d0c44fa0e867ae519f7e78f88a6f5e2be61c73b5250d79f6b34ca11270d6587",
+    "firmware/rtl/uart_rx.v": "8d609b14214787654cf21e86f13445192b880703d99bbcc9a89ba451e85ba616",
+    "firmware/rtl/uart_tx.v": "c88696f9cdb6b7b16c44604ab33fd0934b7bfbfe58a2d23aa8be8fbc13478acd",
+    "firmware/sim/xilinx_primitives_sim.v": "a3719e2675197d204e8f25df32cd32550c5faa8d911469456fba70398a3d8c87",
+    "scripts/bootstrap-fpga-tools.sh": "cbdc5a58445ceada66ac136a7b089e50782f48b7a45c77474a35683eb1d6d8c9",
+    "src/arty_frame_studio/toolchain.py": "1d17b4cec7b2a2ba2d6b2833dda90156828a7b7758c93b1caac8138b8f0a60b1",
+    "tests/rtl/tb_engine.sv": "1f2153e5323f0993a511fe04edb4efc8512721478e901f7c650371fc7bffeeca",
+    "tests/rtl/tb_oddr.sv": "18b5dbc57f0ad52d2e2499b9a64d73defd0deef2c031620c92c01d1c7e4f80ad",
+    "tests/rtl/tb_protocol.sv": "6e3e1431e1f3987a0fa0e5768c48740bf1c6636c580c2f96b7e867be0d2b21f0",
+    "tests/rtl/tb_top.sv": "c1219706339142e2cf9572a60382d23c34ad8c649f870c53b5f43c07029a7424",
+    "tests/rtl/tb_uart.sv": "90a7a31fba6c7660e3cfa30a06ce52339aada736ab92a45e9232ce82e3e0077b"
+  }
+}

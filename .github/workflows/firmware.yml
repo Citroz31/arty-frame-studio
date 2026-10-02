@@ -1,0 +1,137 @@
+name: Build Arty A7-100T firmware
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - firmware/**
+      - tests/rtl/**
+      - scripts/bootstrap-fpga-tools.sh
+      - src/arty_frame_studio/toolchain.py
+      - src/arty_frame_studio/bitstream.py
+      - .github/workflows/firmware.yml
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: arty-firmware-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bitstream:
+    # Compilation takes place here; Windows users only download and load the .bit.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Prepare build logs
+        run: |
+          mkdir -p build
+          dpkg-query -W > build/runner-packages.txt
+      - name: Install application
+        run: |
+          python -m pip install -e .
+      - name: Download verified tools with their matching 100T chip database
+        run: |
+          bash scripts/bootstrap-fpga-tools.sh \
+            "$RUNNER_TEMP/arty-fpga-tools" "$GITHUB_WORKSPACE/build/toolchain.ci.json" \
+            2>&1 | tee build/bootstrap.log
+      - name: Run UART/GPIO RTL simulations
+        run: |
+          ARTY_APP_PYTHON=$(command -v python)
+          export PATH="$RUNNER_TEMP/arty-fpga-tools/oss-cad-suite/bin:$PATH"
+          "$ARTY_APP_PYTHON" firmware/sim/run_tests.py 2>&1 | tee build/rtl-tests.log
+      - name: Synthesize, route, require 200 MHz timing and write the bitstream
+        run: |
+          python -m arty_frame_studio.cli build --toolchain build/toolchain.ci.json \
+            2>&1 | tee build/firmware-build.log
+      - name: Validate the resulting bitstream and record its provenance
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import shutil
+          from arty_frame_studio.bitstream import read_bitstream
+
+          build = pathlib.Path("build")
+          image = read_bitstream(build / "arty_frame.bit")
+          receipt = json.loads((build / "successful-build.json").read_text())
+          assert receipt["part"] == "xc7a100tcsg324-1"
+          assert receipt["timing_clock"] == "core_clock"
+          assert receipt["timing_requirement_mhz"] == 200
+          assert receipt["bitstream_sha256"] == image.sha256
+          timing_path = pathlib.Path(receipt["run_dir"]) / "timing.json"
+          core_timing = json.loads(timing_path.read_text())["fmax"]["core_clock"]
+          assert core_timing["constraint"] >= 200
+          assert core_timing["achieved"] >= 200
+          output = build / "firmware-artifact"
+          output.mkdir()
+          for name in ("arty_frame.bit", "successful-build.json", "build.log", "rtl-tests.log"):
+              shutil.copy2(build / name, output / name)
+          shutil.copy2(timing_path, output / "timing.json")
+          manifest = {
+              "source_commit": os.environ["GITHUB_SHA"],
+              "workflow_run": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+              "part": image.part,
+              "idcode": f"0x{image.idcode:08X}",
+              "sha256": image.sha256,
+              "payload_bytes": len(image.payload),
+              "tools": json.loads((build / "tool-versions.json").read_text()),
+              "uart": {"baud": 115200, "data_bits": 8, "parity": "none", "stop_bits": 1},
+              "timing_scope": receipt["timing_scope"],
+              "timing_requirement_mhz": 200,
+              "routed_core_fmax_mhz": core_timing["achieved"],
+              "hardware_validated": False,
+              "source_sha256": {
+                  str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+                  for path in sorted(pathlib.Path("firmware").rglob("*"))
+                  if path.is_file() and path.suffix in (".v", ".xdc")
+              },
+          }
+          (output / "firmware-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          (output / "SHA256SUMS.txt").write_text(f"{image.sha256}  arty_frame.bit\n")
+          (output / "CHARGEMENT-WINDOWS.txt").write_text(
+              "Arty A7-100T, xc7a100tcsg324-1. Chargement en SRAM uniquement.\n"
+              "Dans Arty Frame Studio : FPGA > Charger le .bit sous Windows > arty_frame.bit.\n"
+              "Puis Pilotage > Carte USB/UART > COM7 > Connecter. UART 115200 8N1.\n"
+              "Verifier PING avant SEND. Recharger apres une coupure d'alimentation.\n"
+              "Compilation et simulations controlees ; aucun essai sur carte ici.\n"
+              "Le timing nextpnr ne certifie pas les GPIO/DDR et la liaison physique a 200 MHz.\n"
+          )
+          PY
+          cp build/tool-versions.json build/firmware-artifact/
+      - name: Upload the firmware only after all build checks succeed
+        uses: actions/upload-artifact@v4
+        with:
+          name: arty-a7-100t-firmware-${{ github.sha }}
+          path: build/firmware-artifact/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Keep diagnostics even when tool setup, timing or conversion fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arty-a7-100t-build-logs-${{ github.run_id }}
+          path: |
+            build/*.log
+            build/runner-packages.txt
+            build/toolchain.ci.json
+            build/tool-versions.json
+            build/successful-build.json
+            build/runs/**/*.json
+            build/runs/**/*.fasm
+          if-no-files-found: warn
+          retention-days: 30

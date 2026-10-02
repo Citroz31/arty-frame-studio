@@ -1,0 +1,32 @@
+{
+  "oss_cad_suite": {
+    "url": "https://github.com/YosysHQ/oss-cad-suite-build/releases/download/2026-03-24/oss-cad-suite-linux-x64-20260324.tgz",
+    "sha256": "69f5b5f306c92ea73322cda570242a7a1e4c49e416288750a56cd0feab49c155"
+  },
+  "openxc7": {
+    "url": "https://github.com/cavearr/toolchain-openxc7-releases/releases/download/2026-09-30/openxc7-toolchain-linux-x86-64-20260930.tgz",
+    "sha256": "2a4128908d848423005933ec2c5c2960213368f4b4b9a65287a7d898357335da"
+  },
+  "openxc7_build_info": {
+    "package-name": "openxc7-toolchain",
+    "description": "openXC7 toolchain for Xilinx 7-series FPGAs: nextpnr-xilinx, prjxray, fasm and the chipdb",
+    "release-tag": "2026-09-30",
+    "yosys-release-tag": "2026-03-24",
+    "nextpnr-xilinx-revision": "c68c13582e972292c86a5025140d52e713384cbc",
+    "prjxray-db-revision": "a90f27c1caefee5276f47440f4c730b50519a86f",
+    "eigen-version": "3.4.0",
+    "chipdb-source": "generated",
+    "use-cached-chipdb": "false",
+    "chipdb-id": "66c7425d4ef246f9",
+    "build-repo": "cavearr/toolchain-openxc7-releases",
+    "build-workflow": "build-pre-release",
+    "workflow-run-id": "36771302011",
+    "workflow-run-number": "1",
+    "build-time": "2026-09-30 20:37:38 UTC",
+    "commit": "dc668069e4ca01aaacc93c8e2bd28c68d1620a15",
+    "target-platform": "linux-x86-64",
+    "file-name": "openxc7-toolchain-linux-x86-64-20260930.tgz"
+  },
+  "chipdb_id": "66c7425d4ef246f9",
+  "yosys_version": "Yosys 0.63+173 (git sha1 66306a8ca, clang++ 18.1.8 -fPIC -O3)"
+}

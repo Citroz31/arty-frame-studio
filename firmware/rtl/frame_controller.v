@@ -23,12 +23,107 @@ module frame_controller #(
         .request_payload(payload)
     );
 
+    // The parser publishes its payload and request_valid together. Capture
+    // both on the following clock, then validate the captured request before
+    // driving the engine. No payload-dependent validation lies on START's
+    // high-fanout path to the 200 MHz engine registers.
+    reg captured_valid, captured_empty, captured_send_shape;
+    reg [7:0] captured_op, captured_seq, captured_parser_status;
+    reg [111:0] captured_payload;
+    reg [4:0] captured_shift_amount;
+    reg [31:0] captured_word_overflow;
+    reg validated_valid, send_eligible, stop_eligible;
+    reg [7:0] validated_op, validated_seq, validated_status;
+    reg [111:0] validated_payload;
+    reg [25:0] validated_aligned_word;
+    reg [7:0] next_static_status;
+    wire [31:0] word_overflow;
+    genvar word_bit;
+    generate
+        for (word_bit=0; word_bit<32; word_bit=word_bit+1) begin: validate_word
+            // Compare each occupied bit against the requested width instead
+            // of synthesizing an eight-bit-controlled 32-bit barrel shifter.
+            assign word_overflow[word_bit] = payload[word_bit]
+                && payload[39:32] <= word_bit;
+        end
+    endgenerate
+
+    always @* begin
+        next_static_status = captured_parser_status;
+        if (captured_parser_status == 0) begin
+            case (captured_op)
+                1, 3, 4: if (!captured_empty) next_static_status = 2;
+                2: if (!captured_send_shape || |captured_word_overflow)
+                       next_static_status = 2;
+                default: next_static_status = 1;
+            endcase
+        end
+    end
+
+    always @(posedge clk) begin
+        if (reset) begin
+            captured_valid <= 0;
+            captured_empty <= 0;
+            captured_send_shape <= 0;
+            captured_op <= 0;
+            captured_seq <= 0;
+            captured_parser_status <= 0;
+            captured_payload <= 0;
+            captured_shift_amount <= 0;
+            captured_word_overflow <= 0;
+            validated_valid <= 0;
+            send_eligible <= 0;
+            stop_eligible <= 0;
+            validated_op <= 0;
+            validated_seq <= 0;
+            validated_status <= 0;
+            validated_payload <= 0;
+            validated_aligned_word <= 0;
+        end else begin
+            // Unconditional data registers avoid making request_valid a
+            // clock-enable for every configuration and validation bit.
+            captured_valid <= request_valid;
+            captured_empty <= length == 0;
+            captured_send_shape <= length == 14
+                && payload[39:32] >= 1 && payload[39:32] <= 26
+                && payload[55:40] != 0 && payload[71:56] != 0
+                && payload[103:88] != 0 && payload[111:104] <= 3;
+            captured_op <= op;
+            captured_seq <= seq;
+            captured_parser_status <= parser_status;
+            captured_payload <= payload[111:0];
+            captured_shift_amount <= 5'd26 - payload[36:32];
+            captured_word_overflow <= word_overflow;
+            validated_valid <= captured_valid;
+            // Register complete command eligibility separately from the
+            // eight-bit response status. START/STOP only need these bits,
+            // current queue capacity, and the engine's current BUSY state.
+            send_eligible <= captured_valid && captured_parser_status == 0
+                && captured_op == 2 && captured_send_shape
+                && !(|captured_word_overflow);
+            stop_eligible <= captured_valid && captured_parser_status == 0
+                && captured_op == 3 && captured_empty;
+            validated_op <= captured_op;
+            validated_seq <= captured_seq;
+            validated_status <= next_static_status;
+            validated_payload <= captured_payload;
+            // Prepare the MSB-first shift register before START reaches the
+            // engine. LSB-first uses the original low bits without alignment.
+            validated_aligned_word <= captured_payload[104]
+                ? captured_payload[25:0]
+                : captured_payload[25:0] << captured_shift_amount;
+        end
+    end
+
     // Bounded reply queue absorbs modest back-to-back traffic. The host must
     // keep one request in flight. A saturated queue discards a request without
     // performing its command, so a timeout cannot hide an unacknowledged SEND.
     reg [47:0] replies [0:3];
     reg [1:0] read_pointer, write_pointer;
     reg [2:0] reply_count;
+    reg write_pending;
+    reg [1:0] pending_address;
+    reg [47:0] pending_reply;
     reg sending;
     reg preparing;
     reg [3:0] tx_index;
@@ -36,44 +131,39 @@ module frame_controller #(
     reg [15:0] response_crc;
     reg [95:0] tx_packet;
     wire take_reply = !sending && !preparing && reply_count != 0;
-    wire accept_request = request_valid && (reply_count < 4 || take_reply);
+    // reply_count covers committed entries only. An accepted reply reserves
+    // one slot until its registered write is committed on the next edge.
+    // A simultaneous pop makes that slot available at actual acceptance.
+    wire reply_capacity = (reply_count < 4
+        && !(write_pending && reply_count == 3)) || take_reply;
+    wire accept_request = validated_valid && reply_capacity;
     reg [7:0] status, reply_busy;
     reg [15:0] reply_completed;
 
-    wire send_payload_valid = length == 14
-        && payload[39:32] >= 1 && payload[39:32] <= 26
-        && (payload[31:0] >> payload[39:32]) == 0
-        && payload[55:40] != 0 && payload[71:56] != 0
-        && payload[103:88] != 0 && payload[111:104] <= 3;
-    wire start = accept_request && status == 0 && op == 2;
-    wire stop = accept_request && status == 0 && op == 3;
+    wire start = send_eligible && reply_capacity && !busy;
+    wire stop = stop_eligible && reply_capacity;
 
     always @* begin
-        status = parser_status;
+        status = validated_status;
         reply_busy = {7'b0, busy};
         reply_completed = completed;
-        if (parser_status == 0) begin
-            case (op)
-                1, 3, 4: if (length != 0) status = 2;
-                2: if (!send_payload_valid) status = 2;
-                   else if (busy) status = 3;
-                default: status = 1;
-            endcase
-        end
-        if (status == 0 && op == 2) begin
+        // BUSY and completion are sampled at actual acceptance, rather than
+        // when the request entered the validation pipeline.
+        if (send_eligible && busy) status = 3;
+        if (start) begin
             reply_busy = 1;
             reply_completed = 0;
-        end else if (status == 0 && op == 3) begin
+        end else if (stop) begin
             reply_busy = 0;
         end
     end
 
-    frame_engine engine (
+    frame_engine #(.WORD_PREALIGNED(1)) engine (
         .clk(clk), .reset(reset), .start(start), .stop(stop),
-        .word_in(payload[31:0]), .bits_in(payload[36:32]),
-        .divider_in(payload[55:40]), .latch_ticks_in(payload[71:56]),
-        .gap_ticks_in(payload[87:72]), .repeat_in(payload[103:88]),
-        .flags_in(payload[105:104]), .busy(busy), .completed(completed),
+        .word_in({6'b0, validated_aligned_word}), .bits_in(validated_payload[36:32]),
+        .divider_in(validated_payload[55:40]), .latch_ticks_in(validated_payload[71:56]),
+        .gap_ticks_in(validated_payload[87:72]), .repeat_in(validated_payload[103:88]),
+        .flags_in(validated_payload[105:104]), .busy(busy), .completed(completed),
         .data_rise(data_rise), .data_fall(data_fall),
         .clock_rise(clock_rise), .clock_fall(clock_fall),
         .latch_rise(latch_rise), .latch_fall(latch_fall)
@@ -117,6 +207,9 @@ module frame_controller #(
             read_pointer <= 0;
             write_pointer <= 0;
             reply_count <= 0;
+            write_pending <= 0;
+            pending_address <= 0;
+            pending_reply <= 0;
             sending <= 0;
             preparing <= 0;
             tx_index <= 0;
@@ -124,15 +217,21 @@ module frame_controller #(
             response_crc <= 16'hffff;
             tx_packet <= 0;
         end else begin
-            case ({accept_request, take_reply})
+            case ({write_pending, take_reply})
                 2'b10: reply_count <= reply_count+1'b1;
                 2'b01: reply_count <= reply_count-1'b1;
                 default: reply_count <= reply_count;
             endcase
+            // Snapshot the reply at the same edge that executes START/STOP.
+            // Only the write enable is conditional; unconditional data and
+            // address registers keep queue-capacity logic off their enables.
+            write_pending <= accept_request;
+            pending_reply <= {
+                reply_completed, reply_busy, status, validated_seq, validated_op | 8'h80
+            };
+            pending_address <= write_pointer;
+            if (write_pending) replies[pending_address] <= pending_reply;
             if (accept_request) begin
-                replies[write_pointer] <= {
-                    reply_completed, reply_busy, status, seq, op | 8'h80
-                };
                 write_pointer <= write_pointer+1'b1;
             end
             if (take_reply) begin

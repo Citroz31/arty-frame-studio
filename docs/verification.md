@@ -1,43 +1,87 @@
-# Vérifications réalisées
+# Vérifications réalisées et limites
 
-Validation logicielle dans l’environnement de développement, sans carte branchée :
+Le firmware précompilé a passé la synthèse, le placement/routage et le
+contrôle strict à 200 MHz : **Fmax après routage 210,44 MHz**. Le chargement
+de ce firmware et ses sorties physiques restent à tester sur la carte.
 
-- 278 tests Python passent : paramètres et profils, chronogrammes et exports,
-  CRC/paquets et resynchronisation, transport avec UART simulée, commandes démo,
-  interface, CLI et chaîne de compilation avec exécutables de test.
-  Le diagnostic série distingue l’ouverture du port du PING compatible,
-  indique le nombre d'octets et un aperçu RX limité à 32 octets, et ne transmet
-  aucune commande SEND ou STOP.
-- Le backend Windows FTDI D2XX est testé avec une DLL simulée et un modèle
-  indépendant TAP/MPSSE : cible vérifiée avant JPROGRAM, ordre des bits,
-  continuité des blocs USB, contrôle DONE/STAT et fermeture après erreur.
-  Le modèle Digilent simule également buffers et multiplexeurs : le profil
-  incomplet renvoie TDO constant ; le profil Arty complet permet la lecture IDCODE.
-  Ce modèle suit les réglages amont et ne valide pas le schéma physique de la carte.
-  Le parser `.bit` contrôle les métadonnées, les limites du fichier et l'IDCODE
-  déclaré sans interpréter les données FDRI comme des commandes.
-- Le workflow comprend un travail Windows natif : lanceur CMD, tests Python,
-  Ruff et mypy. Les fixtures de processus à shebang Unix y sont ignorées ;
-  un test de processus Python natif vérifie les chemins et arguments littéraux.
-  Aucun test matériel FTDI ni accès à une Arty réelle n'est effectué par ce workflow.
-- Ruff, formatage et mypy passent sur les modules Python.
-- Cinq bancs Icarus Verilog passent, avec 467 832 demi-ticks contrôlés pour le
-  moteur, 24 cas protocole et vérification des sorties ODDR, de l’UART et de la
-  chaîne UART jusqu’aux sorties de la carte modélisée.
-- Interface Flet 0.28.3 rendue avec Chromium : démarrage en mode démo et
-  chronogramme visible avec le Canvas natif de Flet, sans exception JavaScript.
-  Les modèles de carte
-  et les primitives de simulation ne sont pas utilisés pour construire le FPGA.
-- Distribution source et wheel construites. La distribution source comprend
-  le RTL, les contraintes, les tests, les exemples et la documentation.
+## Logiciel et simulation
 
-La synthèse matérielle, le placement/routage avec la base xc7a100tcsg324-1,
-la programmation JTAG réelle et les mesures sur carte ne sont pas certifiés par
-ces vérifications. Les modèles PLL/ODDR de simulation sont des modèles de
-comportement, sans caractéristiques analogiques ni vérification setup/hold.
-Le contrôle Fmax nextpnr de l’application porte sur les chemins de registres
-modélisés par cet outil, pas sur la fermeture temporelle complète de l’interface DDR.
+Les **296 tests Python passent** : paramètres et profils, chronogrammes,
+protocole UART, transport, interface, CLI et protections du flux FPGA.
+Ruff, formatage et mypy vérifient le code Python.
 
-Après installation de la chaîne : inspecter `build/build.log`, valider le montage
-à fréquence réduite, observer les trois sorties et vérifier les marges temporelles
-du récepteur avant de demander les fréquences les plus élevées.
+Les **cinq bancs Icarus Verilog passent** : **1 124 018 vérifications du
+moteur**, **42 cas ODDR**, **24 cas protocole**, chemin UART complet jusqu'aux
+sorties DATA/CLK/LATCH et liaison UART à **200 MHz / 115200 bauds**. Le banc
+de carte vérifie aussi deux resets lorsque l'horloge est arrêtée, puis la
+reprise de fonctionnement.
+
+Le backend Windows FTDI D2XX possède des tests avec DLL simulée et modèle
+TAP/MPSSE indépendant : contrôle de cible avant JPROGRAM, ordre des bits,
+continuité des transferts, DONE/STAT et fermeture après erreur. Le modèle
+Digilent vérifie le profil GPIO Arty complet. Le parser `.bit` contrôle les
+métadonnées et l'IDCODE sans interpréter les données FDRI comme des commandes.
+Ces modèles ne remplacent pas un essai physique.
+
+Le diagnostic série envoie uniquement PING, jamais SEND ou STOP ; il indique
+les identifiants USB, le nombre d'octets reçus et un aperçu limité à 32 octets.
+Le workflow de tests comprend Windows natif, le lanceur CMD, Python, Ruff
+et mypy. La présence d'un workflow ne signifie pas qu'une carte physique
+est connectée aux tests.
+
+L'interface Flet 0.28.3 a été rendue avec Chromium : démarrage en démo et
+chronogramme affiché avec le Canvas natif, sans exception JavaScript.
+Des distributions source et wheel ont été construites pendant le développement.
+Les modèles de simulation PLL/ODDR ne sont jamais inclus dans la synthèse.
+
+## Compilation réelle
+
+Les archives épinglées OSS CAD Suite **2026-03-24** et openXC7 **2026-09-30**
+ont été extraites et exécutées dans l'environnement de développement.
+Le bootstrap a vérifié leurs SHA256 et la présence de la chipdb 100T et de
+la base Project X-Ray. Yosys est en version **0.63+173**, commit `66306a8ca` ;
+nextpnr himbaechel est au commit `c68c1358`.
+
+La synthèse réelle a révélé que `COMPENSATION` appartient à `PLLE2_ADV`,
+pas à `PLLE2_BASE` : le RTL et le modèle de simulation ont été corrigés.
+Le flux vérifie aussi le maintien du reset asynchrone R des trois ODDR dans
+le netlist routé après normalisation des seules entrées S inactives.
+Voir [les adaptations et le contrôle de timing](toolchain.md).
+
+Le build réel a terminé avec un code de sortie **0**, le mapping **ABC9** et
+la graine nextpnr par défaut **1**. Cible : `xc7a100tcsg324-1` ; Fmax finale :
+**210,43771362304688 MHz**, **PASS at 200.00 MHz** sur `core_clock`. Les trois
+ODDR conservent R→SR après routage. La provenance et les hashes du reçu
+correspondent aux sources qui ont produit le fichier.
+
+Le parser du projet accepte le `.bit` de **3 825 970 octets**, dont
+**3 825 788 octets** de configuration, et son IDCODE **`0x03631093`**. SHA256 :
+
+```text
+5849a6ffaf0cf05d3823e250ac7f6091d8c219c15194b61eabd411823e2e6b4e
+```
+
+Voir [firmware-manifest.json](../firmware/prebuilt/firmware-manifest.json),
+[build.log](../firmware/prebuilt/build.log) et
+[timing.json](../firmware/prebuilt/timing.json). Le contrôle impose 200 MHz
+et refuse tout résultat final absent ou en échec.
+
+## Retours matériels et essai à effectuer
+
+Un utilisateur a confirmé que le backend Windows reconnaît son Arty A7-100T
+par JTAG : IDCODE **`0x13631093`**. Son port **COM7**, canal FTDI B, reçoit des
+octets mais aucun PING compatible avant chargement du firmware du projet.
+Cette observation confirme l'accès JTAG et série ; elle ne valide pas le
+chargement de notre firmware ni ses sorties GPIO.
+
+Aucune Arty réelle n'est raccordée à l'environnement de développement.
+La programmation du `.bit`, la réponse PING après chargement et les mesures
+physiques restent donc à confirmer sur la carte. Le manifeste du firmware
+indique `hardware_validated: false`.
+
+Après chargement sous Windows, vérifier la LED PLL puis PING avant tout SEND.
+Commencer à fréquence réduite, observer DATA/CLK/LATCH sur JB1/JB2/JB3 et
+contrôler les marges du récepteur avant d'augmenter la fréquence. Les modèles
+PLL/ODDR ne représentent pas les effets analogiques ni setup/hold ; le Fmax
+nextpnr ne certifie pas toute la sortie DDR et la liaison externe à 200 MHz.
+La procédure de chargement figure dans [windows.md](windows.md).

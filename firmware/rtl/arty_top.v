@@ -16,14 +16,18 @@ module arty_top (
     IBUF input_buffer (.I(clk100), .O(input_clock));
     // Integer PLL configuration is supported by the nextpnr-xilinx FASM
     // writer: VCO=100 MHz*10=1 GHz, CLKOUT0=1 GHz/5=200 MHz.
-    PLLE2_BASE #(
+    // COMPENSATION is a PLLE2_ADV parameter; PLLE2_BASE does not expose it.
+    PLLE2_ADV #(
         .BANDWIDTH("OPTIMIZED"), .COMPENSATION("INTERNAL"), .CLKIN1_PERIOD(10.0),
         .DIVCLK_DIVIDE(1), .CLKFBOUT_MULT(10),
         .CLKOUT0_DIVIDE(5), .STARTUP_WAIT("FALSE")
     ) pll (
-        .CLKIN1(input_clock), .CLKFBIN(feedback_clock),
+        .CLKIN1(input_clock), .CLKIN2(1'b0), .CLKINSEL(1'b1),
+        .CLKFBIN(feedback_clock),
         .CLKFBOUT(feedback_raw), .CLKOUT0(clock_raw), .LOCKED(locked),
         .RST(!reset_n), .PWRDWN(1'b0),
+        .DCLK(1'b0), .DEN(1'b0), .DWE(1'b0),
+        .DI(16'b0), .DADDR(7'b0), .DO(), .DRDY(),
         .CLKOUT1(), .CLKOUT2(), .CLKOUT3(), .CLKOUT4(), .CLKOUT5()
     );
     BUFG feedback_buffer (.I(feedback_raw), .O(feedback_clock));

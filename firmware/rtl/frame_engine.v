@@ -1,7 +1,12 @@
 `timescale 1ns/1ps
 // Two logical 2.5 ns steps per 200 MHz cycle. Connect *_rise/*_fall to
 // ODDR D1/D2 with DDR_CLK_EDGE="SAME_EDGE". No 400 MHz fabric clock.
-module frame_engine (
+// The two boundaries are decoded in parallel: no cascaded half-step ALUs.
+module frame_engine #(
+    // A packet controller can align the word in its validation pipeline.
+    // The default keeps the standalone SEND interface unchanged.
+    parameter WORD_PREALIGNED = 0
+) (
     input wire clk, input wire reset,
     input wire start, input wire stop,
     input wire [31:0] word_in,
@@ -14,159 +19,285 @@ module frame_engine (
     output reg clock_rise, clock_fall,
     output reg latch_rise, latch_fall
 );
-    localparam IDLE=0, RISE_WAIT=1, FALL_WAIT=2, PRE_LATCH=3,
-               LATCH_HOLD=4, GAP_WAIT=5;
-    reg [2:0] phase;
-    reg [31:0] word_config;
-    reg [4:0] bit_count, bit_index;
+    localparam [5:0] IDLE=6'b000001, RISE_WAIT=6'b000010,
+        FALL_WAIT=6'b000100, PRE_LATCH=6'b001000,
+        LATCH_HOLD=6'b010000, GAP_WAIT=6'b100000;
+    reg [5:0] phase, next_phase;
+    reg [25:0] word_config, shift_word;
+    reg [4:0] bit_count, bits_left;
     reg [15:0] divider, latch_ticks, gap_ticks, remaining, ticks;
+    reg [15:0] divider_minus_one, latch_minus_one, gap_minus_one;
     reg [1:0] flags;
-    reg data_level, clock_level, latch_level;
-
-    reg [2:0] next_phase;
-    reg [4:0] next_bit_index;
-    reg [15:0] next_remaining, next_ticks, next_completed;
+    reg initial_data, data_level, clock_level, latch_level;
+    reg ticks_one, ticks_two;
+    reg divider_one, divider_two, divider_three;
+    reg latch_one, latch_two, latch_three;
+    reg gap_zero, gap_one, gap_two, gap_three;
     reg next_data, next_clock, next_latch;
+    reg reload_divider, reload_latch, reload_gap, reload_minus_one;
+    reg shift_data, finish;
 
-    assign busy = phase != IDLE;
-
-    function selected_bit;
-        input [4:0] index;
-        begin
-            selected_bit = flags[0] ? word_config[index]
-                                   : word_config[bit_count - 1'b1 - index];
-        end
-    endfunction
-
-    task finish_frame;
-        begin
-            next_completed = next_completed + 1'b1;
-            if (next_remaining == 1) begin
-                next_remaining = 0;
-                next_phase = IDLE;
-                next_data = 0;
-                next_clock = 0;
-            end else begin
-                next_remaining = next_remaining - 1'b1;
-                next_bit_index = 0;
-                next_data = selected_bit(0);
-                next_phase = RISE_WAIT;
-                next_ticks = divider;
-            end
-        end
-    endtask
-
-    task half_step;
-        begin
-            if (next_phase != IDLE) begin
-                if (next_ticks > 1) begin
-                    next_ticks = next_ticks - 1'b1;
-                end else begin
-                    case (next_phase)
-                        RISE_WAIT: begin
-                            next_clock = 1;
-                            next_phase = FALL_WAIT;
-                            next_ticks = divider;
-                        end
-                        FALL_WAIT: begin
-                            next_clock = 0;
-                            next_ticks = divider;
-                            if (next_bit_index + 1'b1 == bit_count) begin
-                                next_data = 0;
-                                next_phase = PRE_LATCH;
-                            end else begin
-                                next_bit_index = next_bit_index + 1'b1;
-                                next_data = selected_bit(next_bit_index);
-                                next_phase = RISE_WAIT;
-                            end
-                        end
-                        PRE_LATCH: begin
-                            next_latch = !flags[1];
-                            next_phase = LATCH_HOLD;
-                            next_ticks = latch_ticks;
-                        end
-                        LATCH_HOLD: begin
-                            next_latch = flags[1];
-                            if (gap_ticks == 0)
-                                finish_frame;
-                            else begin
-                                next_phase = GAP_WAIT;
-                                next_ticks = gap_ticks;
-                            end
-                        end
-                        GAP_WAIT: finish_frame;
-                        default: next_phase = IDLE;
-                    endcase
-                end
-            end
-        end
-    endtask
+    // Alignment occurs only at SEND. During transmission the next data bit
+    // is a fixed wire, avoiding an index adder and a 32:1 mux on each edge.
+    wire [25:0] aligned_input = WORD_PREALIGNED ? word_in[25:0]
+        : (flags_in[0] ? word_in[25:0]
+            : (word_in[25:0] << (5'd26 - bits_in)));
+    wire input_data = flags_in[0] ? aligned_input[0] : aligned_input[25];
+    wire following_data = flags[0] ? shift_word[1] : shift_word[24];
+    wire [25:0] shifted_word = flags[0] ? {1'b0,shift_word[25:1]}
+        : {shift_word[24:0],1'b0};
+    wire last_bit = bits_left == 1;
+    wire last_frame = remaining == 1;
+    wire boundary = ticks_one || ticks_two;
+    wire first_finish = ticks_one && (phase[5] || (phase[4] && gap_zero));
+    // All assignments use the explicit one-hot constants above. The IDLE
+    // bit therefore gives busy directly, without a wide state comparator
+    // in the feedback path to SEND acceptance and register enables.
+    assign busy = !phase[0];
 
     always @* begin
-        next_phase = phase;
-        next_bit_index = bit_index;
-        next_remaining = remaining;
-        next_ticks = ticks;
-        next_completed = completed;
         next_data = data_level;
         next_clock = clock_level;
         next_latch = latch_level;
-        data_rise = next_data;
-        clock_rise = next_clock;
-        latch_rise = next_latch;
-        half_step;
-        data_fall = next_data;
-        clock_fall = next_clock;
-        latch_fall = next_latch;
-        half_step;
+        data_rise = data_level;
+        clock_rise = clock_level;
+        latch_rise = latch_level;
+        data_fall = data_level;
+        clock_fall = clock_level;
+        latch_fall = latch_level;
+        reload_divider = 0;
+        reload_latch = 0;
+        reload_gap = 0;
+        reload_minus_one = ticks_one;
+        shift_data = 0;
+        // A core cycle spans at most two boundaries, so at most one frame
+        // can finish. Decode all finish routes in parallel from the old state.
+        finish = (phase[5] && boundary)
+            || (phase[4] && boundary && gap_zero)
+            || (phase[4] && ticks_one && gap_one)
+            || (phase[3] && ticks_one && latch_one && gap_zero);
+
+        // Independent one-hot next-state equations avoid a cascaded phase
+        // selection followed by a second mux for frame completion/repetition.
+        next_phase[0] = phase[0] || (finish && last_frame);
+        next_phase[1] = (phase[1] && !boundary)
+            || (phase[1] && ticks_one && divider_one && !last_bit)
+            || (phase[2] && boundary && !last_bit
+                && !(ticks_one && divider_one))
+            || (finish && !last_frame && !(first_finish && divider_one));
+        next_phase[2] = (phase[2] && !boundary)
+            || (phase[2] && ticks_one && divider_one && !last_bit)
+            || (phase[1] && boundary && !(ticks_one && divider_one))
+            || (finish && !last_frame && first_finish && divider_one);
+        next_phase[3] = (phase[3] && !boundary)
+            || (phase[2] && boundary && last_bit
+                && !(ticks_one && divider_one))
+            || (phase[1] && ticks_one && divider_one && last_bit);
+        next_phase[4] = (phase[4] && !boundary)
+            || (phase[3] && boundary && !(ticks_one && latch_one))
+            || (phase[2] && ticks_one && divider_one && last_bit);
+        next_phase[5] = (phase[5] && !boundary)
+            || (phase[4] && boundary && !gap_zero && !(ticks_one && gap_one))
+            || (phase[3] && ticks_one && latch_one && !gap_zero);
+
+        if (boundary) begin
+            // The state register is one-hot on reset and every transition.
+            // Decode its bits directly and preserve that mutual exclusivity
+            // in synthesis instead of rebuilding six-bit comparators.
+            (* parallel_case *) case (1'b1)
+                phase[1]: begin
+                    next_clock = 1;
+                    reload_divider = 1;
+                    if (ticks_one) begin
+                        clock_fall = 1;
+                        if (divider_one) begin
+                            // Both rise and fall occur in this core cycle.
+                            next_clock = 0;
+                            next_data = last_bit ? 1'b0 : following_data;
+                            shift_data = !last_bit;
+                            reload_minus_one = 0;
+                        end
+                    end
+                end
+                phase[2]: begin
+                    next_clock = 0;
+                    next_data = last_bit ? 1'b0 : following_data;
+                    shift_data = !last_bit;
+                    reload_divider = 1;
+                    if (ticks_one) begin
+                        clock_fall = 0;
+                        data_fall = next_data;
+                        if (divider_one) begin
+                            reload_minus_one = 0;
+                            if (last_bit) begin
+                                next_latch = !flags[1];
+                                reload_divider = 0;
+                                reload_latch = 1;
+                            end else begin
+                                next_clock = 1;
+                            end
+                        end
+                    end
+                end
+                phase[3]: begin
+                    next_latch = !flags[1];
+                    reload_latch = 1;
+                    if (ticks_one) begin
+                        latch_fall = !flags[1];
+                        if (latch_one) begin
+                            next_latch = flags[1];
+                            reload_latch = 0;
+                            reload_minus_one = 0;
+                            if (!gap_zero) begin
+                                reload_gap = 1;
+                            end
+                        end
+                    end
+                end
+                phase[4]: begin
+                    next_latch = flags[1];
+                    if (ticks_one) latch_fall = flags[1];
+                    if (!gap_zero) begin
+                        reload_gap = 1;
+                        if (ticks_one && gap_one) begin
+                            reload_gap = 0;
+                            reload_minus_one = 0;
+                        end
+                    end
+                end
+                default: begin end
+            endcase
+
+            if (finish) begin
+                next_clock = 0;
+                next_data = last_frame ? 1'b0 : initial_data;
+                reload_divider = !last_frame;
+                // A direct finish on the first boundary leaves one half-tick
+                // for the new repetition. Other finishes are the second edge.
+                if (first_finish) begin
+                    data_fall = next_data;
+                    clock_fall = 0;
+                    if (!last_frame && divider_one) begin
+                        next_clock = 1;
+                        reload_minus_one = 0;
+                    end
+                end else reload_minus_one = 0;
+            end
+        end
     end
 
     always @(posedge clk) begin
         if (reset) begin
             phase <= IDLE;
             word_config <= 0;
+            shift_word <= 0;
             bit_count <= 1;
-            bit_index <= 0;
+            bits_left <= 1;
             divider <= 1;
+            divider_minus_one <= 0;
             latch_ticks <= 1;
+            latch_minus_one <= 0;
             gap_ticks <= 0;
+            gap_minus_one <= 0;
             remaining <= 0;
             ticks <= 0;
+            ticks_one <= 0;
+            ticks_two <= 0;
+            divider_one <= 1;
+            divider_two <= 0;
+            divider_three <= 0;
+            latch_one <= 1;
+            latch_two <= 0;
+            latch_three <= 0;
+            gap_zero <= 1;
+            gap_one <= 0;
+            gap_two <= 0;
+            gap_three <= 0;
             flags <= 0;
             completed <= 0;
+            initial_data <= 0;
             data_level <= 0;
             clock_level <= 0;
             latch_level <= 0;
         end else if (stop) begin
             phase <= IDLE;
             remaining <= 0;
+            ticks_one <= 0;
+            ticks_two <= 0;
             data_level <= 0;
             clock_level <= 0;
             latch_level <= flags[1];
         end else if (start && !busy) begin
-            word_config <= word_in;
+            word_config <= aligned_input;
+            shift_word <= aligned_input;
             bit_count <= bits_in;
-            bit_index <= 0;
+            bits_left <= bits_in;
             divider <= divider_in;
+            divider_minus_one <= divider_in - 1'b1;
             latch_ticks <= latch_ticks_in;
+            latch_minus_one <= latch_ticks_in - 1'b1;
             gap_ticks <= gap_ticks_in;
+            gap_minus_one <= gap_ticks_in - 1'b1;
             remaining <= repeat_in;
             ticks <= divider_in;
+            ticks_one <= divider_in == 1;
+            ticks_two <= divider_in == 2;
+            divider_one <= divider_in == 1;
+            divider_two <= divider_in == 2;
+            divider_three <= divider_in == 3;
+            latch_one <= latch_ticks_in == 1;
+            latch_two <= latch_ticks_in == 2;
+            latch_three <= latch_ticks_in == 3;
+            gap_zero <= gap_ticks_in == 0;
+            gap_one <= gap_ticks_in == 1;
+            gap_two <= gap_ticks_in == 2;
+            gap_three <= gap_ticks_in == 3;
             flags <= flags_in;
             completed <= 0;
             phase <= RISE_WAIT;
-            data_level <= flags_in[0] ? word_in[0] : word_in[bits_in-1'b1];
+            initial_data <= input_data;
+            data_level <= input_data;
             clock_level <= 0;
             latch_level <= flags_in[1];
         end else begin
             phase <= next_phase;
-            bit_index <= next_bit_index;
-            remaining <= next_remaining;
-            ticks <= next_ticks;
-            completed <= next_completed;
             data_level <= next_data;
             clock_level <= next_clock;
             latch_level <= next_latch;
+            if (finish) begin
+                completed <= completed + 1'b1;
+                remaining <= remaining - 1'b1;
+                bits_left <= bit_count;
+                shift_word <= word_config;
+            end else if (shift_data) begin
+                bits_left <= bits_left - 1'b1;
+                shift_word <= shifted_word;
+            end
+            // Every reload belongs to an active one-hot phase. Put that
+            // invariant around the timer selection so its register enable
+            // depends on busy/SEND, not the complete reload decision tree.
+            if (busy) begin
+                if (reload_divider) begin
+                    ticks <= reload_minus_one ? divider_minus_one : divider;
+                    ticks_one <= reload_minus_one ? divider_two : divider_one;
+                    ticks_two <= reload_minus_one ? divider_three : divider_two;
+                end else if (reload_latch) begin
+                    ticks <= reload_minus_one ? latch_minus_one : latch_ticks;
+                    ticks_one <= reload_minus_one ? latch_two : latch_one;
+                    ticks_two <= reload_minus_one ? latch_three : latch_two;
+                end else if (reload_gap) begin
+                    ticks <= reload_minus_one ? gap_minus_one : gap_ticks;
+                    ticks_one <= reload_minus_one ? gap_two : gap_one;
+                    ticks_two <= reload_minus_one ? gap_three : gap_two;
+                end else begin
+                    ticks <= ticks - 2'd2;
+                    ticks_one <= ticks == 3;
+                    ticks_two <= ticks == 4;
+                end
+            end else begin
+                ticks_one <= 0;
+                ticks_two <= 0;
+            end
         end
     end
 endmodule

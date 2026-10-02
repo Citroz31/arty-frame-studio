@@ -1,186 +1,111 @@
-# Windows natif : démarrage et diagnostic de l'Arty
+# Windows : charger le firmware puis communiquer sur COM7
 
-L'application et les diagnostics ci-dessous s'exécutent sous Windows avec
-votre compte utilisateur, sans droits administrateur et sans changement de
-pilote USB. Ils utilisent le pilote FTDI déjà installé.
+Conserver le pilote Digilent Adept Runtime déjà installé, notamment **2.30.4**.
+L'application utilise FTDI D2XX pour le JTAG et le port COM pour l'UART, avec
+votre compte Windows. Aucun WSL, Linux ou PowerShell administrateur n'est
+nécessaire pour charger un firmware précompilé et piloter la carte.
 
-**COM7 visible confirme l'accès USB/UART, pas la présence de notre firmware.**
-Si seul le pilote a été installé, le message
-`Délai de réponse dépassé pour PING (séquence 0)` est attendu : le FPGA doit
-exécuter le firmware du projet pour répondre. Le dépôt ne fournit actuellement
-**aucun `.bit` précompilé et validé sur carte**.
+**Un IDCODE `0x13631093` confirme que le JTAG reconnaît l'Arty A7-100T.**
+COM7 permet l'accès série, mais PING ne répondra que si le firmware de ce
+projet a été chargé. Le début RX `1b 5b 32 4a` correspond à `ESC[2J` ; du texte
+et des astérisques reçus peuvent venir d'une démonstration déjà présente sur
+la carte. Ce ne sont pas des réponses au protocole Arty Frame Studio.
 
-## Démarrer l'application
+Le [firmware précompilé](../firmware/prebuilt/arty_frame.bit) est fourni
+dans `firmware/prebuilt/`. Sa synthèse et son routage ont réussi avec une
+**Fmax de 210,44 MHz pour une contrainte de 200 MHz**. Il reste à tester
+son chargement, PING et les sorties sur la carte réelle.
 
-Placer le dépôt dans un dossier où votre compte peut écrire. Installer
-Python **3.11 ou plus récent pour votre utilisateur** s'il manque, puis
-double-cliquer sur **`start-windows.cmd`**. Le lanceur crée la `.venv` locale,
-installe les dépendances au premier démarrage et ouvre Flet. Un accès Internet
-est nécessaire pour cette première installation Python.
+## Charger le fichier sous Windows
 
-Après une mise à jour du dépôt, actualiser les dépendances depuis PowerShell,
-dans le dossier du projet :
+1. [Télécharger le ZIP mis à jour](https://github.com/Citroz31/arty-frame-studio/archive/refs/heads/main.zip)
+   et l'extraire dans un dossier accessible à votre compte. Le ZIP contient
+   `firmware/prebuilt/arty_frame.bit`. Installer Python **3.11 ou plus récent pour
+   votre utilisateur**, puis double-cliquer sur **`start-windows.cmd`**.
+   Après une mise à jour, `start-windows.cmd --setup-only`, depuis un terminal
+   ordinaire, actualise les dépendances. La simulation fonctionne sans carte.
+2. Brancher l'Arty sur **USB PROG/UART** et fermer les autres applications JTAG
+   ou série, notamment Adept et les terminaux qui utilisent COM7.
+3. Ouvrir **FPGA**, section **JTAG Windows natif**, puis **Détecter le FPGA sous
+   Windows**. La détection lit l'IDCODE ; elle ne programme pas la carte.
+4. Dans **Firmware existant pour l'Arty A7-100T (.bit)**, indiquer le chemin
+   complet de `firmware\prebuilt\arty_frame.bit` dans le dossier extrait.
+   L'application le présélectionne si ce fichier est présent. Cliquer sur
+   **Charger le .bit sous Windows**. Prévoir environ **30 à 60 secondes**
+   à la cadence JTAG de 1 MHz, puis attendre **SRAM chargée** dans le journal.
+5. Vérifier la **première LED monochrome**, indicateur de verrouillage PLL de
+   ce firmware. Dans **Pilotage**, sélectionner **Carte · USB / UART**,
+   actualiser les ports, choisir **COM7**, puis cliquer sur **Connecter**.
+   La connexion teste PING avant de permettre l'envoi de trames.
+6. Après une réponse PING valide, commencer à fréquence réduite. Les sorties
+   sont **JB1/E15 : DATA**, **JB2/E16 : CLK**, **JB3/D15 : LATCH** ; relier la
+   masse sur **JB5 ou JB11**. Ce sont des signaux **3,3 V**. Voir
+   [le brochage et les limites physiques](hardware.md).
 
-```powershell
-.\start-windows.cmd --setup-only
-```
+La programmation charge uniquement la **SRAM volatile**, pas la flash.
+**Recharger le `.bit` après chaque coupure d'alimentation.** Le programme
+présent en flash, par exemple une démonstration d'origine, peut revenir au
+redémarrage. Ne pas utiliser **Compiler le FPGA** ou **Programmer la SRAM**
+du flux d'outils externes pour ce parcours de chargement Windows natif.
 
-La simulation et le mode « Démo locale » fonctionnent sans firmware chargé.
-Pour vérifier la carte, utiliser les diagnostics suivants avant d'envoyer
-une trame.
+Le chargement Windows vérifie la cible, l'IDCODE embarqué et le statut DONE.
+Ce backend est testé avec une interface FTDI simulée ; la détection JTAG a été
+confirmée par un retour utilisateur. Le chargement de ce firmware et les
+sorties physiques restent à vérifier sur une carte réelle.
 
-## Lire l'identifiant du FPGA par JTAG
+## Paramètres JTAG et UART
 
-### Adept Runtime et lecture `0xFFFFFFFF`
+Les champs **DLL FTDI D2XX (facultatif)** et **Série JTAG A (facultatif)**
+peuvent rester vides avec une seule carte. Si plusieurs interfaces sont
+présentes, sélectionner la série du **canal A/JTAG**, et conserver le
+**canal B/UART** pour COM7. Dans la configuration rapportée :
 
-Le Runtime Digilent Adept, par exemple **2.30.4**, installe des composants
-USB/JTAG ; son installation ne charge pas le firmware UART de ce projet.
-Le chargeur actuel utilise **FTDI D2XX**, sans appeler directement les DLL
-DMGR/DJTG du SDK Adept. Conserver votre installation existante.
-
-Une erreur `IDCODE JTAG 0xFFFFFFFF` après la synchronisation MPSSE signifie
-que la liaison FTDI a répondu mais que la lecture TDO reste à 1 : ce n'est
-pas un identifiant de FPGA, ni une preuve de panne de la carte ou du pilote.
-Une version précédente du projet configurait seulement les quatre lignes
-JTAG et omettait les GPIO de commande du chemin Digilent. La version corrigée
-configure **les deux groupes GPIO** selon le profil Arty d'openFPGALoader,
-`E8/EB` et `00/60`. Le journal affiche ce profil pour identifier la version
-utilisée. La correction est testée par simulation ; il faut la vérifier sur carte.
-
-Après mise à jour, fermer l'application puis la relancer avec
-`start-windows.cmd`, garder la carte alimentée et branchée sur **USB PROG/UART**,
-et fermer les autres logiciels qui accèdent au JTAG, dont Adept. Relancer
-la détection FPGA. L'identifiant attendu est `0x03631093` (la révision peut
-modifier le premier chiffre). Avec plusieurs interfaces, lister les séries
-avec `jtag-devices` et sélectionner celle de l'Arty, canal A.
-
-Si `FFFFFFFF` persiste, vérifier alimentation, câble et série sélectionnée.
-Ne modifier aucun pilote uniquement sur la base de ce résultat.
-Le programme mentionne alors TDO constant et les vérifications correspondantes.
-
-Le Runtime seul ne garantit pas la présence de l'utilitaire `djtgcfg.exe` ;
-aucune commande Adept externe n'est nécessaire dans ce parcours.
-
-Références du profil utilisé :
-[Arty → Digilent](https://github.com/trabucayre/openFPGALoader/blob/master/src/board.hpp),
-[GPIO du câble Digilent](https://github.com/trabucayre/openFPGALoader/blob/master/src/cable.hpp),
-[activation des buffers et multiplexeurs](https://github.com/openocd-org/openocd/blob/master/tcl/interface/ftdi/digilent-hs2.cfg).
-
-### Lancer la détection
-
-Dans l'onglet **FPGA**, section **« JTAG Windows natif »**, cliquer sur
-**« Détecter le FPGA sous Windows »**. L'application ouvre le canal **A/JTAG**
-du FT2232 avec FTDI D2XX et lit l'IDCODE du FPGA. Le canal **B/UART** reste
-celui de COM7.
-
-Le champ **« DLL FTDI D2XX (facultatif) »** peut rester vide : le programme
-cherche la DLL du pilote existant. Si elle n'est pas trouvée, fournir son
-chemin. La DLL et Python doivent avoir la **même architecture**, par exemple
-tous deux 64 bits. Si plusieurs cartes sont raccordées, renseigner la série
-du **canal A** dans le champ prévu.
-
-Depuis PowerShell :
-
-```powershell
-.\start-windows.cmd --diagnose-jtag
-```
-
-Pour lister les interfaces et choisir explicitement la carte :
-
-```powershell
-.\.venv\Scripts\arty-frame.exe jtag-devices
-.\.venv\Scripts\arty-frame.exe jtag-diagnose --serial "SERIE_CANAL_A"
-```
-
-Avec une DLL fournie explicitement, si nécessaire :
-
-```powershell
-.\.venv\Scripts\arty-frame.exe jtag-diagnose --ftdi-dll "C:\FTDI\ftd2xx.dll"
-```
-
-**Un IDCODE 100T reconnu confirme l'accès JTAG. Ce diagnostic ne programme
-pas le FPGA et ne teste pas le firmware UART.** Il ne charge aucun bitstream.
-Conserver les pilotes FTDI existants ; ne remplacer aucune interface par
-WinUSB avec Zadig, en particulier l'interface **B/UART/VCP** qui fournit COM7.
-
-## Vérifier le firmware sur COM7
-
-Fermer les autres terminaux série et déconnecter la carte dans Flet avant
-le diagnostic : COM7 doit être utilisé par un seul logiciel à la fois.
-
-```powershell
-.\start-windows.cmd --diagnose-com7
-```
-
-La commande équivalente est :
-
-```powershell
-.\.venv\Scripts\arty-frame.exe diagnose --port COM7 --timeout 2
-```
-
-Elle envoie uniquement **PING**, aucune commande SEND ni trame GPIO. La liaison
-utilise **115200 bauds, 8N1, aucun contrôle de flux**. Si PING répond, ouvrir
-Flet, choisir **« Carte · USB / UART »**, actualiser les ports, sélectionner
-COM7 et cliquer sur **Connecter**.
-
-Si le délai PING expire malgré des octets reçus, la liaison série reçoit des
-données mais aucun paquet compatible. Cela peut provenir d'un autre programme,
-du mauvais port COM ou d'un débit différent ; le nombre d'octets seul ne permet
-pas de choisir la cause. Le journal indique le port testé, les identifiants USB
-des ports recensés et les **32 premiers octets reçus au maximum**, en hexadécimal
-et ASCII lisible. Les caractères de contrôle sont remplacés dans l'aperçu texte.
-Ce diagnostic n'envoie toujours aucune trame GPIO et ne relance pas automatiquement
-une commande. Il faut charger **notre firmware UART** pour utiliser le pilotage.
-
-| Résultat | Signification et vérification suivante |
+| Interface | Identifiant |
 | --- | --- |
-| COM7 absent | Vérifier câble, alimentation, numéro COM actuel et pilote FTDI VCP. |
-| Port occupé ou accès refusé | Fermer le logiciel qui utilise COM7. |
-| DLL D2XX introuvable | Indiquer la DLL du pilote installé ; vérifier l'architecture de Python et de la DLL. |
-| IDCODE `FFFFFFFF` ou `00000000` | TDO constant : utiliser la version avec profil Digilent Arty, vérifier alimentation et série JTAG A, puis fermer les autres logiciels JTAG. |
-| JTAG reconnaît le 100T, PING expire | L'accès au FPGA fonctionne ; vérifier le chargement du firmware UART du projet. |
-| PING expire après un chargement | Vérifier le bon firmware, le port choisi et la première LED monochrome `led[0]`, indicateur de verrouillage PLL de ce firmware. |
-| PING répond | Le firmware répond au protocole ; l'envoi de trames devient disponible. |
+| FPGA Arty A7-100T | IDCODE `0x13631093`, révision incluse |
+| FTDI canal A/JTAG | Série `210319BE770AA` |
+| FTDI canal B/UART | Série `210319BE770AB`, COM7, VID `0403`, PID `6010` |
 
-## Ce qu'il reste pour programmer
+Le numéro COM et les séries varient selon la carte et le PC. La DLL D2XX et
+Python doivent avoir la même architecture, par exemple tous deux 64 bits.
+La liaison UART est fixée à **115200 bauds, 8N1, sans contrôle de flux**.
+Conserver les pilotes existants : aucune substitution WinUSB/Zadig n'est
+nécessaire pour ce parcours.
 
-Le firmware doit être disponible en `.bit`, puis chargé par JTAG en **SRAM**.
-Cette configuration disparaît hors tension ; il faut la recharger après
-une coupure. Installer le pilote ou lire l'IDCODE ne réalise pas ce chargement.
+## Si la connexion échoue
 
-Si vous possédez déjà un `.bit` destiné à l'Artix-7 100T csg324, le backend
-Windows FTDI D2XX peut le charger avec le pilote existant, sans outil externe
-de programmation. Dans l'onglet FPGA, utiliser le champ de fichier `.bit`
-et le bouton de chargement Windows, distincts du bouton de détection.
-La commande équivalente est :
+| Résultat | Vérification suivante |
+| --- | --- |
+| COM7 absent | Vérifier USB PROG/UART, alimentation et numéro COM actuel. |
+| Port occupé ou accès refusé | Fermer les autres terminaux et applications utilisant ce port. |
+| IDCODE `FFFFFFFF` ou `00000000` | Mettre à jour l'application, vérifier la série du canal A, le câble et l'alimentation ; fermer les autres outils JTAG. |
+| DLL D2XX introuvable | Renseigner sa localisation dans le pilote installé ; vérifier l'architecture de Python et de la DLL. |
+| JTAG reconnaît le 100T, PING expire | Charger le firmware du projet par JTAG ; la détection seule ne le fait pas. |
+| PING expire après chargement | Vérifier le fichier chargé, COM7, la LED PLL et que le bouton rouge RESET n'est pas maintenu ; enregistrer le journal. |
+| Des octets sont reçus sans réponse compatible | Vérifier que le bon firmware a été chargé depuis la dernière coupure ; le texte d'une autre démo n'est pas une réponse PING. |
+| PING répond | Le firmware dialogue avec l'application ; commencer l'essai des sorties à fréquence réduite. |
 
-```powershell
-.\.venv\Scripts\arty-frame.exe jtag-program --bitstream "C:\Arty\arty_frame.bit"
+Les chronogrammes de l'application sont idéaux. La compilation à 200 MHz
+ne remplace pas une mesure CLK/DATA/LATCH et des marges du récepteur.
+
+## Diagnostics facultatifs depuis un terminal ordinaire
+
+Depuis le dossier du projet, dans CMD :
+
+```bat
+start-windows.cmd --diagnose-jtag
+start-windows.cmd --diagnose-com7
+.venv\Scripts\arty-frame.exe jtag-devices
+.venv\Scripts\arty-frame.exe jtag-program --bitstream firmware\prebuilt\arty_frame.bit
 ```
 
-Comme pour le diagnostic, les options `--serial "SERIE_CANAL_A"` et
-`--ftdi-dll "C:\FTDI\ftd2xx.dll"` sont disponibles si nécessaire. Le chargeur
-vérifie la cible, l'IDCODE embarqué dans le bitstream et les indicateurs de
-configuration, dont DONE. **Ce backend est expérimental : tests simulés
-uniquement, aucun essai matériel réalisé ici.** Il ne compile pas le firmware
-et ne fournit pas un fichier prêt à charger.
+Le diagnostic COM7 envoie uniquement PING, aucune commande SEND ou STOP.
+Les commandes `jtag-diagnose` et `jtag-program` acceptent les options
+`--serial "210319BE770AA"` et `--ftdi-dll "C:\FTDI\ftd2xx.dll"` si nécessaire.
+Aucun utilitaire `djtgcfg.exe` n'est requis.
 
-Après chargement de **notre firmware UART**, lancer le diagnostic COM7/PING
-ci-dessus avant d'envoyer une trame. Un `.bit` quelconque pour la même puce
-peut se charger sans répondre au protocole de l'application.
-
-La couche de compilation peut appeler des outils Windows natifs fournis dans
-un dossier utilisateur. Le modèle
-[`toolchain.windows.example.json`](../examples/toolchain.windows.example.json)
-prévoit leurs chemins ; **il ne contient ni les exécutables, ni la base 100T,
-ni un bitstream**. Une chaîne complète de compilation et de programmation
-100T sous Windows n'a pas encore été validée dans ce projet. La présence de
-Yosys ou d'une distribution OSS CAD Suite ne prouve pas que le backend xc7
-et les convertisseurs nécessaires y soient disponibles et compatibles.
-
-Le diagnostic et le chargement JTAG D2XX d'un fichier existant sont distincts
-de cette chaîne de compilation. Ils conservent votre pilote FTDI ; aucune
-substitution WinUSB/Zadig n'est demandée.
-Les exigences de compilation sont détaillées dans [toolchain.md](toolchain.md).
-Le raccordement des sorties figure dans [hardware.md](hardware.md) :
-DATA sur JB1, CLK sur JB2 et LATCH sur JB3, en logique 3,3 V.
+La compilation distante et les rapports sont décrits dans
+[toolchain.md](toolchain.md). Le fichier précompilé est accompagné de
+[firmware-manifest.json](../firmware/prebuilt/firmware-manifest.json),
+[build.log](../firmware/prebuilt/build.log) et
+[timing.json](../firmware/prebuilt/timing.json).

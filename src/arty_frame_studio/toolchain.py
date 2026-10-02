@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Literal
 
 TARGET_PART = "xc7a100tcsg324-1"
 TARGET_BOARD = "arty_a7_100t"
@@ -40,7 +40,9 @@ class DoctorResult:
 @dataclass(frozen=True)
 class ToolchainConfig:
     yosys: Command = "yosys"
+    yosys_mapping: Literal["abc", "abc9"] = "abc9"
     nextpnr_xilinx: Command = "nextpnr-xilinx"
+    nextpnr_backend: Literal["classic", "himbaechel"] = "classic"
     fasm2frames: Command = "fasm2frames"
     xc7frames2bit: Command = "xc7frames2bit"
     openfpgaloader: Command = "openFPGALoader"
@@ -52,6 +54,10 @@ class ToolchainConfig:
     def __post_init__(self) -> None:
         if self.part != TARGET_PART:
             raise ValueError(f"Cette application exige le composant {TARGET_PART}.")
+        if self.nextpnr_backend not in ("classic", "himbaechel"):
+            raise ValueError("nextpnr_backend doit être classic ou himbaechel.")
+        if self.yosys_mapping not in ("abc", "abc9"):
+            raise ValueError("yosys_mapping doit être abc ou abc9.")
         for name in _TOOLS:
             command = getattr(self, name)
             args = (command,) if isinstance(command, str) else command
@@ -217,6 +223,7 @@ class Toolchain:
         journal: IO[str],
         *,
         stdout_path: Path | None = None,
+        env: dict[str, str] | None = None,
     ) -> str:
         command_line = "$ " + shlex.join(args)
         journal.write(command_line + "\n")
@@ -233,6 +240,7 @@ class Toolchain:
                     text=True,
                     encoding="utf-8",
                     errors="replace",
+                    env=env,
                 )
             else:
                 # fasm2frames writes frame data to stdout: preserve it byte-for-byte,
@@ -246,6 +254,7 @@ class Toolchain:
                         text=True,
                         encoding="utf-8",
                         errors="replace",
+                        env=env,
                     )
         except OSError as exc:
             raise ToolchainError(f"Impossible de lancer {args[0]} : {exc}") from exc
@@ -275,6 +284,127 @@ class Toolchain:
             raise ToolchainError(f"L'outil n'a pas produit de sortie non vide : {path}")
 
     @staticmethod
+    def _normalize_himbaechel_oddr(source: Path, destination: Path) -> int:
+        """Preserve Yosys output and remove only inactive ODDR set connections.
+
+        openXC7/nextpnr c68c1358 maps both ODDR R and S onto the physical SR
+        port. A constant-zero S can overwrite R and leave a dangling GND user.
+        Its packer treats an absent S as inactive. Limit that workaround to
+        the project's reset-only, initially-low, asynchronous SAME_EDGE mode.
+        """
+        try:
+            data = json.loads(source.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ToolchainError(f"Netlist Yosys JSON illisible : {source} : {exc}") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("modules"), dict):
+            raise ToolchainError("Netlist Yosys invalide : objet modules manquant.")
+        normalized = 0
+        for module_name, module in data["modules"].items():
+            if not isinstance(module, dict) or not isinstance(module.get("cells", {}), dict):
+                raise ToolchainError(f"Netlist Yosys invalide : cellules de {module_name}.")
+            for cell_name, cell in module.get("cells", {}).items():
+                if not isinstance(cell, dict):
+                    raise ToolchainError(f"Netlist Yosys invalide : {module_name}.{cell_name}.")
+                if cell.get("type") != "ODDR":
+                    continue
+                parameters = cell.get("parameters", {})
+                connections = cell.get("connections", {})
+                directions = cell.get("port_directions", {})
+                if not all(
+                    isinstance(item, dict) for item in (parameters, connections, directions)
+                ):
+                    raise ToolchainError(f"ODDR {module_name}.{cell_name} : champs JSON invalides.")
+                init = parameters.get("INIT")
+                init_is_zero = (type(init) is int and init == 0) or (
+                    isinstance(init, str) and bool(init) and set(init) == {"0"}
+                )
+                reset = connections.get("R")
+                reset_is_connected = (
+                    isinstance(reset, list)
+                    and len(reset) == 1
+                    and ((type(reset[0]) is int and reset[0] >= 0) or reset[0] in ("0", "1"))
+                )
+                if (
+                    connections.get("S") != ["0"]
+                    or not reset_is_connected
+                    or directions.get("S") != "input"
+                    or directions.get("R") != "input"
+                    or not init_is_zero
+                    or parameters.get("SRTYPE") != "ASYNC"
+                    or parameters.get("DDR_CLK_EDGE") != "SAME_EDGE"
+                ):
+                    raise ToolchainError(
+                        f"Normalisation ODDR himbaechel refusée pour {module_name}.{cell_name} : "
+                        "exiger S constant à 0, R connecté, INIT=0, SRTYPE=ASYNC "
+                        "et DDR_CLK_EDGE=SAME_EDGE."
+                    )
+                del connections["S"]
+                del directions["S"]
+                normalized += 1
+        try:
+            with destination.open("w", encoding="utf-8") as stream:
+                json.dump(data, stream, separators=(",", ":"))
+                stream.write("\n")
+        except OSError as exc:
+            raise ToolchainError(
+                f"Impossible d'écrire la copie du netlist : {destination}"
+            ) from exc
+        return normalized
+
+    @staticmethod
+    def _verify_himbaechel_oddr_reset(source: Path, routed: Path) -> None:
+        """Confirm that all three packed output SR pins still use reset.
+
+        nextpnr renumbers JSON bit identifiers. Match the named reset network
+        independently in each netlist instead of comparing bit IDs across tools.
+        """
+        try:
+            before = json.loads(source.read_text(encoding="utf-8"))["modules"]["arty_top"]
+            after = json.loads(routed.read_text(encoding="utf-8"))["modules"]["top"]
+            before_reset = before["netnames"]["reset"]["bits"]
+            after_reset = after["netnames"]["reset"]["bits"]
+            expected = {"data_ddr", "clock_ddr", "latch_ddr"}
+            original_cells = {
+                name: cell for name, cell in before["cells"].items() if cell["type"] == "ODDR"
+            }
+            routed_cells = {
+                name: cell
+                for name, cell in after["cells"].items()
+                if cell.get("attributes", {}).get("X_ORIG_TYPE") == "ODDR"
+            }
+            reset_bits_valid = all(
+                isinstance(bits, list) and len(bits) == 1 and type(bits[0]) is int and bits[0] >= 0
+                for bits in (before_reset, after_reset)
+            )
+            valid = (
+                reset_bits_valid
+                and set(original_cells) == expected
+                and set(routed_cells) == expected
+                and all(
+                    original_cells[name]["connections"]["R"] == before_reset
+                    and routed_cells[name]["type"] == "OLOGICE3_OUTFF"
+                    and routed_cells[name]["attributes"].get("X_ORIG_PORT_SR") == "R"
+                    and routed_cells[name]["connections"]["SR"] == after_reset
+                    and all(
+                        routed_cells[name]["parameters"][parameter]
+                        == original_cells[name]["parameters"][parameter]
+                        for parameter in ("INIT", "SRTYPE", "DDR_CLK_EDGE")
+                    )
+                    for name in expected
+                )
+            )
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ToolchainError(
+                f"Vérification du reset ODDR impossible dans le netlist routé : {routed}"
+            ) from exc
+        if not valid:
+            raise ToolchainError(
+                "Reset ODDR non confirmé : DATA/CLK/LATCH doivent conserver leur "
+                "reset R sur le port physique SR relié au réseau reset. "
+                "Aucun bitstream n'est autorisé."
+            )
+
+    @staticmethod
     def _check_core_timing(report: str) -> None:
         # nextpnr reports routed Fmax per clock. Require the synthesized BUFG
         # net named core_clock and a 200 MHz (or tighter) requirement explicitly.
@@ -283,14 +413,15 @@ class Toolchain:
             r"\s*\((PASS|FAIL) at\s*([0-9.]+)\s*MHz\)"
         )
         matches = re.findall(pattern, report)
-        core_results = [
-            (actual, verdict, target)
-            for clock, actual, verdict, target in matches
-            if clock == "core_clock"
-        ]
+        # Placement estimates can fail before the final routed report passes.
+        # Keep the last result for each clock; _run still requires exit code 0.
+        final_results = {
+            clock: (actual, verdict, target) for clock, actual, verdict, target in matches
+        }
+        core_results = [final_results["core_clock"]] if "core_clock" in final_results else []
         if (
             not core_results
-            or any(verdict == "FAIL" for _, _, verdict, _ in matches)
+            or any(verdict == "FAIL" for _, verdict, _ in final_results.values())
             or any(
                 float(actual) < 200 or float(target) < 200 or verdict != "PASS"
                 for actual, verdict, target in core_results
@@ -331,31 +462,73 @@ class Toolchain:
                     return '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
                 script = (
-                    "read_verilog "
+                    # Yosys 66306a8ca's interactive ABC pool waits for an echo
+                    # that Readline truncates with long temporary paths. A
+                    # basename selects the batch ABC invocation instead.
+                    "scratchpad -set abc.exe yosys-abc; read_verilog "
                     + " ".join(quote(path) for path in self._sources())
-                    + "; synth_xilinx -family xc7 -flatten -nodram -top arty_top; write_json "
+                    + "; synth_xilinx -family xc7 -flatten -nodram "
+                    + ("-abc9 " if self.config.yosys_mapping == "abc9" else "")
+                    + "-top arty_top; write_json "
                     + quote(netlist)
                 )
-                self._run([*self._args("yosys"), "-p", script], log, journal)
+                yosys_executable = shutil.which(self._args("yosys")[0])
+                yosys_env = os.environ.copy()
+                if yosys_executable:
+                    # Also find ABC beside a portable absolute Yosys path.
+                    yosys_env["PATH"] = (
+                        str(Path(yosys_executable).parent) + os.pathsep + yosys_env.get("PATH", "")
+                    )
+                self._run([*self._args("yosys"), "-p", script], log, journal, env=yosys_env)
                 self._require_output(netlist)
-                report = self._run(
-                    [
-                        *self._args("nextpnr_xilinx"),
-                        "--chipdb",
-                        str(self.config.chipdb),
-                        "--xdc",
-                        str(self.constraints),
-                        "--json",
-                        str(netlist),
-                        "--fasm",
-                        str(fasm),
-                        "--freq",
-                        "200",
-                    ],
-                    log,
-                    journal,
-                )
+                place_route_netlist = netlist
+                if self.config.nextpnr_backend == "himbaechel":
+                    place_route_netlist = run_dir / "arty_frame.himbaechel.json"
+                    count = self._normalize_himbaechel_oddr(netlist, place_route_netlist)
+                    normalization = (
+                        f"[ODDR himbaechel] {count} connexion(s) S inactive(s) retirée(s), "
+                        f"R conservé ; copie {place_route_netlist}, original Yosys {netlist}."
+                    )
+                    journal.write(normalization + "\n")
+                    journal.flush()
+                    if log:
+                        log(normalization)
+                place_route = [
+                    *self._args("nextpnr_xilinx"),
+                    "--chipdb",
+                    str(self.config.chipdb),
+                    "--json",
+                    str(place_route_netlist),
+                    "--freq",
+                    "200",
+                ]
+                if self.config.nextpnr_backend == "himbaechel":
+                    place_route.extend(
+                        [
+                            "--device",
+                            self.config.part,
+                            "-o",
+                            f"xdc={self.constraints}",
+                            "-o",
+                            f"fasm={fasm}",
+                            "--report",
+                            str(run_dir / "timing.json"),
+                            "--write",
+                            str(run_dir / "routed.json"),
+                        ]
+                    )
+                else:
+                    place_route.extend(["--xdc", str(self.constraints), "--fasm", str(fasm)])
+                report = self._run(place_route, log, journal)
                 self._require_output(fasm)
+                if self.config.nextpnr_backend == "himbaechel":
+                    self._require_output(run_dir / "routed.json")
+                    self._verify_himbaechel_oddr_reset(netlist, run_dir / "routed.json")
+                    verification = "[ODDR himbaechel] Reset R→SR vérifié sur DATA/CLK/LATCH."
+                    journal.write(verification + "\n")
+                    journal.flush()
+                    if log:
+                        log(verification)
                 self._check_core_timing(report)
                 self._run(
                     [
