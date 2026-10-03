@@ -1,12 +1,15 @@
 # Vérifications réalisées et limites
 
-Le firmware précompilé a passé la synthèse, le placement/routage et le
-contrôle strict à 200 MHz : **Fmax après routage 218,05 MHz**. Le chargement
-de ce firmware et ses sorties physiques restent à tester sur la carte.
+Le firmware précompilé, révision 2 du protocole (LED et INFO), a passé la
+synthèse, le placement/routage et le contrôle strict à 200 MHz : **Fmax après
+routage 206,14 MHz** avec la graine de placement 4. Les valeurs exactes de
+chaque publication sont dans [le manifeste](../firmware/prebuilt/firmware-manifest.json).
+Le chargement de ce firmware et ses sorties physiques restent à tester sur la
+carte.
 
 ## Logiciel et simulation
 
-Les **324 tests Python passent** : paramètres et profils, chronogrammes,
+Les **385 tests Python passent** : paramètres et profils, chronogrammes,
 protocole UART, transport, interface, CLI et protections du flux FPGA.
 Ruff, formatage et mypy vérifient le code Python.
 
@@ -17,10 +20,19 @@ n'est pas répété ; l'interface exige STOP confirmé ou reconnexion avant de
 permettre une nouvelle émission.
 
 Les **cinq bancs Icarus Verilog passent** : **1 124 018 vérifications du
-moteur**, **42 cas ODDR**, **24 cas protocole**, chemin UART complet jusqu'aux
+moteur**, **42 cas ODDR**, **38 cas protocole** (dont les formats valides et
+invalides de LED et les six pages INFO), chemin UART complet jusqu'aux
 sorties DATA/CLK/LATCH et liaison UART à **200 MHz / 115200 bauds**. Le banc
-de carte vérifie aussi deux resets lorsque l'horloge est arrêtée, puis la
-reprise de fonctionnement.
+de carte vérifie aussi le test LED par l'UART (motif, retour automatique à
+l'état, retour immédiat), une page INFO, deux resets lorsque l'horloge est
+arrêtée, puis la reprise de fonctionnement.
+
+Ils couvrent aussi la configuration de firmware personnalisé (table PLL,
+broches Pmod, XDC de référence identique au dépôt, avertissements), le build
+personnalisé avec outils simulés, le balayage des graines nextpnr, la
+compilation GitHub contre une API simulée (téléchargement, ZIP hostile,
+manifeste et configuration discordants) et l'adaptation de l'interface à
+l'horloge annoncée par la carte.
 
 Le backend Windows FTDI D2XX possède des tests avec DLL simulée et modèle
 TAP/MPSSE indépendant : contrôle de cible avant JPROGRAM, ordre des bits,
@@ -55,9 +67,11 @@ Le flux vérifie aussi le maintien du reset asynchrone R des trois ODDR dans
 le netlist routé après normalisation des seules entrées S inactives.
 Voir [les adaptations et le contrôle de timing](toolchain.md).
 
-Le build réel a terminé avec un code de sortie **0**, le mapping **ABC9** et
-la graine nextpnr par défaut **1**. Cible : `xc7a100tcsg324-1` ; Fmax finale :
-**218,05494689941406 MHz**, **PASS at 200.00 MHz** sur `core_clock`. Les trois
+Le build réel a terminé avec un code de sortie **0** et le mapping **ABC9**.
+Les graines 1 à 3 ont échoué après routage (188,7, 199,6 et 165,5 MHz) ; la
+graine **4** donne **206,14306640625 MHz**, **PASS at 200.00 MHz** sur
+`core_clock`. La marge est donc d'environ 3 %, limitée par des chemins du
+moteur de trame où le routage représente 75 à 85 % du délai. Les trois
 ODDR conservent R→SR après routage. La provenance et les hashes du reçu
 correspondent aux sources qui ont produit le fichier.
 
@@ -65,7 +79,7 @@ Le parser du projet accepte le `.bit` de **3 825 995 octets**, dont
 **3 825 788 octets** de configuration, et son IDCODE **`0x03631093`**. SHA256 :
 
 ```text
-4d4f8831154475354e5385581bd08ab296dcdd16b1d4f683ab8f52a51cf4975d
+859ad3674bcd2505c6f510436a5f123c3004f208be9fde969338a82e8f47effb
 ```
 
 Voir [firmware-manifest.json](../firmware/prebuilt/firmware-manifest.json),
@@ -73,15 +87,12 @@ Voir [firmware-manifest.json](../firmware/prebuilt/firmware-manifest.json),
 [timing.json](../firmware/prebuilt/timing.json). Le contrôle impose 200 MHz
 et refuse tout résultat final absent ou en échec.
 
-Ce fichier a été récupéré depuis le [run 37113537280](https://github.com/Citroz31/arty-frame-studio/actions/runs/37113537280),
-associé au commit `7fa89e95099d3db9968eb42c0e77aa4ec8a2fccf`. Les huit fichiers
-RTL/XDC/modèle de primitives correspondent exactement au manifeste. La
-version initiale aux broches UART inversées a été remplacée : RX=A9, TX=D10.
-Les cinq simulations RTL ont également été exécutées localement après revue.
-
-Le workflow Linux/Windows de ce commit a réussi. Les 324 tests de la présente
-amélioration ont été exécutés localement ; leur journal est fourni séparément
-du build firmware. Les fins de lignes LF des `.v`/`.xdc` sont imposées par
+Ce fichier a été publié par le job `publish` du
+[run 37142507552](https://github.com/Citroz31/arty-frame-studio/actions/runs/37142507552),
+à partir du commit `d588999`, après exécution de toute la suite Python sur le
+nouveau contenu ([python-tests.log](../firmware/prebuilt/python-tests.log)).
+Les fichiers RTL/XDC/modèle de primitives correspondent exactement au
+manifeste. Les broches UART sont RX=A9, TX=D10. Les fins de lignes LF des `.v`/`.xdc` sont imposées par
 `.gitattributes` pour conserver les empreintes lors d'un checkout Windows.
 
 ## Retours matériels et essai à effectuer

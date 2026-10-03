@@ -11,7 +11,7 @@ La compilation décrite ci-dessous concerne les développeurs et GitHub Actions.
 
 Le [firmware précompilé](../firmware/prebuilt/arty_frame.bit) a été produit
 avec cette chaîne : synthèse, placement/routage et contrôle de timing réussis
-à **200 MHz**, avec une Fmax après routage de **218,05 MHz**. Les sorties
+à **200 MHz**, avec une Fmax après routage de **206,14 MHz** (graine 4). Les sorties
 physiques et le chargement de ce firmware n'ont pas encore été testés sur carte.
 
 ## Outils épinglés et provenance
@@ -59,24 +59,24 @@ Le fichier publié dans `firmware/prebuilt/` est accompagné de :
 | [build.log](../firmware/prebuilt/build.log) | Commandes et résultats, dont le rapport de fréquence après routage |
 | [timing.json](../firmware/prebuilt/timing.json) | Rapport de timing nextpnr |
 
-Le build de référence utilise **ABC9**, la graine nextpnr par défaut **1** et
-la cible `xc7a100tcsg324-1`. Le rapport final indique **218,05494689941406 MHz**
-sur `core_clock`, avec **PASS at 200.00 MHz**. Le `.bit` contient un IDCODE
+Le build de référence utilise **ABC9**, la graine nextpnr **4** (première des
+graines 1 à 8 qui respecte le timing) et la cible `xc7a100tcsg324-1`. Le
+rapport final indique **206,14306640625 MHz** sur `core_clock`, avec
+**PASS at 200.00 MHz**. Le `.bit` contient un IDCODE
 `0x03631093`, compatible avec l'IDCODE `0x13631093` rapporté sur la carte
 (révision différente). Les trois resets ODDR R→SR ont été vérifiés dans le
 netlist routé. Le fichier mesure **3 825 995 octets** et son SHA256 est :
 
 ```text
-4d4f8831154475354e5385581bd08ab296dcdd16b1d4f683ab8f52a51cf4975d
+859ad3674bcd2505c6f510436a5f123c3004f208be9fde969338a82e8f47effb
 ```
 
 ## Reproduire un build dans un environnement de développement
 
-Le firmware distribué provient du commit `7fa89e95099d3db9968eb42c0e77aa4ec8a2fccf`
-et du [run GitHub Actions 37113537280](https://github.com/Citroz31/arty-frame-studio/actions/runs/37113537280).
-Ce build corrige le brochage UART et enregistre les six entrées ODDR.
-Les sources RTL/XDC restent identiques dans la version actuelle ; les
-améliorations Python n'altèrent pas le contenu de configuration FPGA.
+Le firmware distribué provient du commit `d588999` et du
+[run GitHub Actions 37142507552](https://github.com/Citroz31/arty-frame-studio/actions/runs/37142507552),
+publié par son job `publish`. Il ajoute au brochage UART corrigé et aux
+entrées ODDR enregistrées les commandes LED et INFO (révision 2).
 `arty-frame firmware-check` contrôle le fichier, les sources et le rapport
 de timing avant son utilisation, sans outil FPGA ni matériel raccordé.
 
