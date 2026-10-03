@@ -65,5 +65,10 @@ un paquet incomplet après son timeout. Il n’offre pas de déduplication persi
 une commande SEND ou STOP n’est **jamais répétée automatiquement** après un
 timeout, car elle peut avoir été exécutée. PING (à la connexion) et STATUS,
 sans effet sur la carte, sont redemandés une fois avec un nouveau numéro de
-séquence. Consulter STATUS ou envoyer STOP avant de
-décider d’un nouvel envoi.
+séquence. En cas d'échec des deux tentatives, les diagnostics conservent les
+octets et le premier aperçu RX reçus, même si la deuxième tentative est muette.
+
+L'interface demande STATUS immédiatement après un timeout SEND ou STOP.
+Le compteur et le champ busy ne permettent pas de savoir avec certitude si
+la commande sans réponse a été exécutée. L'interface conserve cette incertitude
+et désactive SEND jusqu'à un STOP confirmé ou une reconnexion explicite.

@@ -1,14 +1,20 @@
 # Vérifications réalisées et limites
 
 Le firmware précompilé a passé la synthèse, le placement/routage et le
-contrôle strict à 200 MHz : **Fmax après routage 210,44 MHz**. Le chargement
+contrôle strict à 200 MHz : **Fmax après routage 218,05 MHz**. Le chargement
 de ce firmware et ses sorties physiques restent à tester sur la carte.
 
 ## Logiciel et simulation
 
-Les **296 tests Python passent** : paramètres et profils, chronogrammes,
+Les **324 tests Python passent** : paramètres et profils, chronogrammes,
 protocole UART, transport, interface, CLI et protections du flux FPGA.
 Ruff, formatage et mypy vérifient le code Python.
+
+Ils couvrent aussi le refus du `.bit` obsolète, la cohérence fichier/manifeste/
+sources/timing, les fréquences juste sous les 65 534 seuils réalisables et
+les réponses SEND/STOP perdues avec ou sans réponse STATUS. Un SEND incertain
+n'est pas répété ; l'interface exige STOP confirmé ou reconnexion avant de
+permettre une nouvelle émission.
 
 Les **cinq bancs Icarus Verilog passent** : **1 124 018 vérifications du
 moteur**, **42 cas ODDR**, **24 cas protocole**, chemin UART complet jusqu'aux
@@ -37,7 +43,8 @@ Les modèles de simulation PLL/ODDR ne sont jamais inclus dans la synthèse.
 ## Compilation réelle
 
 Les archives épinglées OSS CAD Suite **2026-03-24** et openXC7 **2026-09-30**
-ont été extraites et exécutées dans l'environnement de développement.
+ont été extraites et exécutées dans l'environnement de développement et
+sur GitHub Actions pour le firmware corrigé.
 Le bootstrap a vérifié leurs SHA256 et la présence de la chipdb 100T et de
 la base Project X-Ray. Yosys est en version **0.63+173**, commit `66306a8ca` ;
 nextpnr himbaechel est au commit `c68c1358`.
@@ -50,21 +57,32 @@ Voir [les adaptations et le contrôle de timing](toolchain.md).
 
 Le build réel a terminé avec un code de sortie **0**, le mapping **ABC9** et
 la graine nextpnr par défaut **1**. Cible : `xc7a100tcsg324-1` ; Fmax finale :
-**210,43771362304688 MHz**, **PASS at 200.00 MHz** sur `core_clock`. Les trois
+**218,05494689941406 MHz**, **PASS at 200.00 MHz** sur `core_clock`. Les trois
 ODDR conservent R→SR après routage. La provenance et les hashes du reçu
 correspondent aux sources qui ont produit le fichier.
 
-Le parser du projet accepte le `.bit` de **3 825 970 octets**, dont
+Le parser du projet accepte le `.bit` de **3 825 995 octets**, dont
 **3 825 788 octets** de configuration, et son IDCODE **`0x03631093`**. SHA256 :
 
 ```text
-5849a6ffaf0cf05d3823e250ac7f6091d8c219c15194b61eabd411823e2e6b4e
+4d4f8831154475354e5385581bd08ab296dcdd16b1d4f683ab8f52a51cf4975d
 ```
 
 Voir [firmware-manifest.json](../firmware/prebuilt/firmware-manifest.json),
 [build.log](../firmware/prebuilt/build.log) et
 [timing.json](../firmware/prebuilt/timing.json). Le contrôle impose 200 MHz
 et refuse tout résultat final absent ou en échec.
+
+Ce fichier a été récupéré depuis le [run 37113537280](https://github.com/Citroz31/arty-frame-studio/actions/runs/37113537280),
+associé au commit `7fa89e95099d3db9968eb42c0e77aa4ec8a2fccf`. Les huit fichiers
+RTL/XDC/modèle de primitives correspondent exactement au manifeste. La
+version initiale aux broches UART inversées a été remplacée : RX=A9, TX=D10.
+Les cinq simulations RTL ont également été exécutées localement après revue.
+
+Le workflow Linux/Windows de ce commit a réussi. Les 324 tests de la présente
+amélioration ont été exécutés localement ; leur journal est fourni séparément
+du build firmware. Les fins de lignes LF des `.v`/`.xdc` sont imposées par
+`.gitattributes` pour conserver les empreintes lors d'un checkout Windows.
 
 ## Retours matériels et essai à effectuer
 

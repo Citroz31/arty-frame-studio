@@ -13,7 +13,7 @@ la carte. Ce ne sont pas des réponses au protocole Arty Frame Studio.
 
 Le [firmware précompilé](../firmware/prebuilt/arty_frame.bit) est fourni
 dans `firmware/prebuilt/`. Sa synthèse et son routage ont réussi avec une
-**Fmax de 210,44 MHz pour une contrainte de 200 MHz**. Il reste à tester
+**Fmax de 218,05 MHz pour une contrainte de 200 MHz**. Il reste à tester
 son chargement, PING et les sorties sur la carte réelle.
 
 ## Charger le fichier sous Windows
@@ -28,9 +28,9 @@ son chargement, PING et les sorties sur la carte réelle.
    ou série, notamment Adept et les terminaux qui utilisent COM7.
 3. Ouvrir **FPGA**, section **JTAG Windows natif**, puis **Détecter le FPGA sous
    Windows**. La détection lit l'IDCODE ; elle ne programme pas la carte.
-4. **Le `.bit` actuellement fourni dans `firmware/prebuilt/` est obsolète**
-   (broches UART inversées) : utiliser un firmware regénéré à partir des
-   sources corrigées. Dans **Firmware existant pour l'Arty A7-100T (.bit)**,
+4. Utiliser le **nouveau** `firmware/prebuilt/arty_frame.bit` du ZIP, avec
+   RX sur A9 et TX sur D10. Remplacer votre ancienne copie au brochage inversé.
+   Dans **Firmware existant pour l'Arty A7-100T (.bit)**,
    indiquer le chemin
    complet de `firmware\prebuilt\arty_frame.bit` dans le dossier extrait.
    L'application le présélectionne si ce fichier est présent. Cliquer sur
@@ -50,6 +50,20 @@ La programmation charge uniquement la **SRAM volatile**, pas la flash.
 présent en flash, par exemple une démonstration d'origine, peut revenir au
 redémarrage. Ne pas utiliser **Compiler le FPGA** ou **Programmer la SRAM**
 du flux d'outils externes pour ce parcours de chargement Windows natif.
+
+Avant le chargement natif, le firmware fourni est contrôlé : SHA256 du `.bit`,
+hashes des sources RTL/XDC et modèle de simulation, rapport de timing du cœur.
+Une modification des sources exige un nouveau `.bit` et ses rapports. Garder
+le dossier `firmware/prebuilt/` complet. Le même contrôle est disponible dans
+un terminal ordinaire, à la racine du projet :
+
+```cmd
+.venv\Scripts\arty-frame.exe firmware-check
+```
+
+DTR et RTS sont désactivés avant l'ouverture de COM7. Si PING ne répond
+toujours pas avec le nouveau firmware, vérifier le cavalier JP2, le bouton
+RESET, LED0 et les autres applications qui peuvent ouvrir le port série.
 
 Le chargement Windows vérifie la cible, l'IDCODE embarqué et le statut DONE.
 Ce backend est testé avec une interface FTDI simulée ; la détection JTAG a été

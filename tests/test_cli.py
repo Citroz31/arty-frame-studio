@@ -151,3 +151,10 @@ def test_native_program_uses_existing_bitstream_without_build_or_com(monkeypatch
     output = capsys.readouterr().out
     assert "Configuration SRAM terminée" in output
     assert "Vérifiez le firmware UART" in output
+
+
+def test_firmware_check_works_without_hardware(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "SerialDevice", lambda *a, **k: pytest.fail("Unexpected UART"))
+    monkeypatch.setattr(cli, "program_arty", lambda *a, **k: pytest.fail("Unexpected JTAG"))
+    assert main(["firmware-check", "--project-root", str(Path(__file__).resolve().parents[1])]) == 0
+    assert "sources RTL/XDC" in capsys.readouterr().out

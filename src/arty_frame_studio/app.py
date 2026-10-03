@@ -24,7 +24,9 @@ from .model import (
     load_profile,
     parse_word,
     save_profile,
+    ticks_for_ns,
 )
+from .prebuilt import validate_programming_image
 from .protocol import DeviceStatus
 from .simulation import Waveform, export_csv, export_vcd, simulate, waveform_svg
 from .toolchain import Toolchain, ToolchainConfig
@@ -44,12 +46,13 @@ CHART_HEIGHT = 332
 SIGNALS = (("DATA", "data", "#2563EB"), ("CLK", "clk", "#B45309"), ("LATCH", "latch", "#9333EA"))
 
 
-def ticks_from_ns(value: str) -> int:
+def ticks_from_ns(value: str, *, allow_zero: bool = False) -> int:
     """Round a finite nonnegative duration to the hardware's 2.5 ns grid."""
-    ns = float(value.strip().replace(",", "."))
-    if not math.isfinite(ns) or ns < 0:
-        raise ValueError("La durée doit être un nombre positif ou nul.")
-    return int(math.floor(ns / 2.5 + 0.5))
+    try:
+        ns = float(value.strip().replace(",", "."))
+    except ValueError as exc:
+        raise ValueError("La durée doit être un nombre en nanosecondes.") from exc
+    return ticks_for_ns(ns, allow_zero=allow_zero)
 
 
 def format_duration(ns: float) -> str:
@@ -199,6 +202,7 @@ class Studio:
         self.current_config: FrameConfig | None = None
         self.waveform: Waveform | None = None
         self.last_sent: FrameConfig | None = None
+        self.command_uncertain = False
         self.previous_base = "hex"
         self.loop: asyncio.AbstractEventLoop | None = None
         self.worker_messages: list[str] = []
@@ -682,7 +686,7 @@ class Studio:
             bit_count=bits,
             divider=int(self.divider.value or ""),
             latch_ticks=ticks_from_ns(self.latch_ns.value or ""),
-            gap_ticks=ticks_from_ns(self.gap_ns.value or ""),
+            gap_ticks=ticks_from_ns(self.gap_ns.value or "", allow_zero=True),
             repeat_count=int(self.repeat.value or ""),
             lsb_first=bool(self.lsb.value),
             latch_active_low=bool(self.latch_low.value),
@@ -797,6 +801,7 @@ class Studio:
             or busy
             or self.serial_pending
             or self.tool_pending
+            or self.command_uncertain
         )
         self.stop_button.disabled = not connected or self.serial_pending or self.tool_pending
         self.simulate_button.disabled = self.current_config is None
@@ -894,6 +899,7 @@ class Studio:
                         raise
                     self.device = device
                     self.last_sent = None
+                    self.command_uncertain = False
                     self._status_received(status)
                     label = (
                         "Démo locale · aucun signal physique"
@@ -925,11 +931,36 @@ class Studio:
         state = "Émission en cours" if status.busy else "Prêt"
         total = f" / {self.last_sent.repeat_count}" if self.last_sent is not None else ""
         self.hardware_status.value = f"{state} · {status.completed}{total} trame(s) terminée(s)"
+        if self.command_uncertain:
+            self.hardware_status.value += " · Commande non confirmée : STOP ou reconnexion requis"
         self.hardware_status.color = AMBER if status.busy else MUTED
         self._buttons()
 
+    async def _recover_command_timeout(self, exc: CommandTimeout) -> None:
+        """Observe the board without repeating a command that may have run."""
+        self.command_uncertain = True
+        self.last_sent = None
+        self.hardware_status.value = "Commande non confirmée · Lecture de STATUS en cours"
+        self._log(
+            f"{exc.opcode.name} non confirmé : lecture de STATUS, sans répéter la commande.", AMBER
+        )
+        try:
+            if self.device is None:
+                raise ValueError("La carte n'est plus connectée.")
+            status = await asyncio.to_thread(self.device.status)
+            self._status_received(status)
+            self._log(
+                f"STATUS observé · busy={int(status.busy)} · "
+                f"{status.completed} trame(s) terminée(s). "
+                "Ce statut ne prouve pas si la commande sans réponse a été exécutée.",
+                AMBER,
+            )
+        except Exception as status_error:
+            self.hardware_status.value = "État inconnu · STOP ou reconnexion requis"
+            self._log(f"Lecture de STATUS impossible : {status_error}", RED)
+
     async def _send(self, _: Any) -> None:
-        if self.serial_pending or self.tool_pending:
+        if self.serial_pending or self.tool_pending or self.command_uncertain:
             return
         try:
             config = self._config()
@@ -943,7 +974,11 @@ class Studio:
             async with self.serial_lock:
                 if self.device is None or not self.device.connected:
                     raise ValueError("Connectez la carte ou le mode démo avant l'envoi.")
-                status = await asyncio.to_thread(self.device.send, config)
+                try:
+                    status = await asyncio.to_thread(self.device.send, config)
+                except CommandTimeout as exc:
+                    await self._recover_command_timeout(exc)
+                    raise
                 self.last_sent = config
                 self._status_received(status)
                 self._log(
@@ -968,7 +1003,13 @@ class Studio:
             async with self.serial_lock:
                 if self.device is None or not self.device.connected:
                     raise ValueError("Aucun appareil connecté.")
-                self._status_received(await asyncio.to_thread(self.device.stop))
+                try:
+                    status = await asyncio.to_thread(self.device.stop)
+                except CommandTimeout as exc:
+                    await self._recover_command_timeout(exc)
+                    raise
+                self.command_uncertain = False
+                self._status_received(status)
                 self._log("STOP · sorties ramenées au repos.", AMBER)
         except Exception as exc:
             self._error("Arrêt", exc)
@@ -1243,6 +1284,12 @@ class Studio:
 
         def run() -> Any:
             image = read_bitstream(bitstream)
+            manifest = validate_programming_image(image, self.project_root)
+            if manifest is not None:
+                self._worker_log(
+                    f"Firmware fourni vérifié · sources {manifest['source_commit'][:7]} · "
+                    f"Fmax {manifest['routed_core_fmax_mhz']:.2f} MHz."
+                )
             self._worker_log(f"Bitstream {image.part} · SHA256 {image.sha256}")
             return program_arty(
                 image.payload, serial=serial or None, dll_path=Path(dll) if dll else None

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .bitstream import read_bitstream
 from .model import FrameConfig, load_profile, save_profile
+from .prebuilt import validate_programming_image, verify_prebuilt_firmware
 from .simulation import export_csv, export_vcd, simulate, waveform_svg
 from .toolchain import Toolchain, ToolchainConfig
 from .transport import DemoDevice, SerialDevice, TransportError, list_ports
@@ -21,6 +22,10 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Arty A7-100T : trames et FPGA sans Vivado")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("ports", help="Lister les ports USB/UART")
+    firmware = commands.add_parser(
+        "firmware-check", help="Vérifier le firmware fourni et ses sources"
+    )
+    firmware.add_argument("--project-root", type=Path, default=Path.cwd())
     diagnose = commands.add_parser("diagnose", help="Vérifier le port et le PING du firmware UART")
     diagnose.add_argument("--port", required=True, help="COM7, /dev/ttyUSB1, etc.")
     diagnose.add_argument(
@@ -36,6 +41,7 @@ def _parser() -> argparse.ArgumentParser:
                 "--serial", help="Numéro de série du canal JTAG A, si plusieurs cartes"
             )
         if name == "jtag-program":
+            item.add_argument("--project-root", type=Path, default=Path.cwd())
             item.add_argument(
                 "--bitstream",
                 required=True,
@@ -72,6 +78,23 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "ports":
             for port in list_ports():
                 print(f"{port.device}\t{port.description}\t{port.hwid}")
+        elif args.command == "firmware-check":
+            manifest = verify_prebuilt_firmware(args.project_root)
+            print("Firmware fourni : SHA256, sources RTL/XDC et timing du cœur vérifiés.")
+            print(
+                json.dumps(
+                    {
+                        key: manifest[key]
+                        for key in (
+                            "source_commit",
+                            "sha256",
+                            "routed_core_fmax_mhz",
+                            "hardware_validated",
+                        )
+                    },
+                    ensure_ascii=False,
+                )
+            )
         elif args.command == "diagnose":
             probe = SerialDevice(args.port, timeout=args.timeout)
             print(f"Diagnostic {probe.port} : 115200 bauds, 8N1, aucun contrôle de flux.")
@@ -108,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
             print("Artix-7 100T détecté par JTAG. Le firmware UART reste à vérifier par PING.")
         elif args.command == "jtag-program":
             image = read_bitstream(args.bitstream)
+            validate_programming_image(image, args.project_root)
             print(f"Bitstream : {image.path}\nPart : {image.part}\nSHA256 : {image.sha256}")
             print("Chargement SRAM par FTDI D2XX Windows ; backend expérimental.")
             jtag_program = program_arty(image.payload, serial=args.serial, dll_path=args.ftdi_dll)

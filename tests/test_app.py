@@ -11,7 +11,7 @@ from arty_frame_studio.app import Studio, waveform_signal_points
 from arty_frame_studio.model import FrameConfig
 from arty_frame_studio.protocol import Opcode
 from arty_frame_studio.simulation import simulate
-from arty_frame_studio.transport import CommandTimeout
+from arty_frame_studio.transport import CommandTimeout, DemoDevice
 
 
 class PageStub:
@@ -208,7 +208,9 @@ def test_native_program_does_not_need_build_tools_or_enable_uart_send(tmp_path, 
         bitstream.write_bytes(b"checked by parser")
         studio.windows_bitstream_path.value = str(bitstream)
         studio.ftdi_serial.value = "ARTY001A"
-        image = SimpleNamespace(part="7a100tcsg324", sha256="checked-hash", payload=b"config")
+        image = SimpleNamespace(
+            path=bitstream, part="7a100tcsg324", sha256="checked-hash", payload=b"config"
+        )
         monkeypatch.setattr(app, "read_bitstream", lambda path: image)
         monkeypatch.setattr(app, "program_arty", program)
         monkeypatch.setattr(studio, "_toolchain", lambda: pytest.fail("Unexpected build"))
@@ -237,6 +239,80 @@ def test_programming_disables_uart_actions(tmp_path):
         await studio._toggle_connection()
         assert studio.device is not None and studio.device.connected
         assert studio.last_sent is None
+
+    run_async(exercise())
+
+
+def test_duration_validation_uses_model_limits_and_allows_zero_gap(tmp_path):
+    studio = make_studio(tmp_path)
+    studio.latch_ns.value = "1"
+    studio._changed()
+    assert studio.current_config is None
+    assert "2.5" in studio.validation.value
+    assert "latch_ticks" not in studio.validation.value
+    studio.latch_ns.value = "3,75"
+    studio.gap_ns.value = "0"
+    studio._changed()
+    assert studio.current_config.latch_ticks == 2
+    assert studio.current_config.gap_ticks == 0
+
+
+@pytest.mark.parametrize("lost_opcode", [Opcode.SEND, Opcode.STOP])
+@pytest.mark.parametrize("lost_status", [False, True])
+def test_lost_command_response_reads_status_without_repeating_command(
+    tmp_path, lost_opcode, lost_status
+):
+    calls = []
+
+    class LostResponseDevice(DemoDevice):
+        def send(self, config):
+            calls.append(Opcode.SEND)
+            status = super().send(config)
+            if lost_opcode == Opcode.SEND:
+                raise CommandTimeout(Opcode.SEND, 1)
+            return status
+
+        def stop(self):
+            calls.append(Opcode.STOP)
+            status = super().stop()
+            if lost_opcode == Opcode.STOP and calls.count(Opcode.STOP) == 1:
+                raise CommandTimeout(Opcode.STOP, 2)
+            return status
+
+        def status(self):
+            calls.append(Opcode.STATUS)
+            if lost_status:
+                raise CommandTimeout(Opcode.STATUS, 3)
+            return super().status()
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.repeat.value = "65535"
+        studio.divider.value = "2000"
+        device = LostResponseDevice()
+        studio.device = device
+        device.connect()
+        await studio._send(None)
+        if lost_opcode == Opcode.STOP:
+            await studio._stop(None)
+        assert calls.count(lost_opcode) == 1
+        assert calls[-1] == Opcode.STATUS
+        assert studio.command_uncertain
+        assert studio.send_button.disabled
+        assert not studio.stop_button.disabled
+        assert studio.last_sent is None
+        assert any("sans répéter la commande" in line for line in studio.log_lines)
+        if lost_status:
+            assert "État inconnu" in studio.hardware_status.value
+        else:
+            assert "Commande non confirmée" in studio.hardware_status.value
+        await studio._send(None)
+        assert calls[-1] == Opcode.STATUS
+        # A manually requested, acknowledged STOP clears the uncertainty.
+        await studio._stop(None)
+        assert not studio.command_uncertain
+        assert not studio.send_button.disabled
+        assert not studio.device_status.busy
 
     run_async(exercise())
 

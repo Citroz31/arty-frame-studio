@@ -120,7 +120,7 @@ def test_unrelated_uart_text_is_reported_as_data_without_a_valid_ping():
     device, endpoint = make_serial(lambda packet: text)
     with pytest.raises(CommandTimeout) as error:
         device.connect()
-    assert error.value.received_bytes == len(text)
+    assert error.value.received_bytes == len(text) * CONNECT_PING_ATTEMPTS
     assert error.value.received_sample == text
     assert "ASCII : Arty factory demo.." in str(error.value)
     assert "Aucun octet reçu" not in str(error.value)
@@ -133,7 +133,7 @@ def test_ping_timeout_preview_is_bounded_and_never_emits_raw_controls():
     device, endpoint = make_serial(lambda packet: raw, timeout=0.05)
     with pytest.raises(CommandTimeout) as error:
         device.connect()
-    assert error.value.received_bytes == 464
+    assert error.value.received_bytes == len(raw) * CONNECT_PING_ATTEMPTS
     assert error.value.received_sample == raw[:32]
     assert "1b 5b 33 31 6d 00" in str(error.value)
     assert "\x1b" not in str(error.value)
@@ -301,6 +301,22 @@ def test_open_settle_is_bounded():
     with pytest.raises(ValueError, match="attente"):
         SerialDevice("COM7", open_settle=-1)
     assert SerialDevice("COM7").open_settle > 0
+
+
+def test_failed_retry_preserves_first_attempt_uart_diagnostics():
+    text = b"\x1b[2JArty factory demo\r\n"
+
+    def handler(packet):
+        return text if len(endpoint.requests) == 1 else b""
+
+    device, endpoint = make_serial(handler)
+    with pytest.raises(CommandTimeout) as error:
+        device.connect()
+    assert error.value.received_bytes == len(text)
+    assert error.value.received_sample == text
+    assert "Arty factory demo" in str(error.value)
+    assert [p.opcode for p in endpoint.requests] == [Opcode.PING, Opcode.PING]
+    assert not endpoint.is_open
 
 
 def test_partial_write_is_reported_without_retry():

@@ -224,23 +224,35 @@ class SerialDevice:
         if attempts > 1 and opcode not in _REPEATABLE:
             raise ValueError("Seuls PING et STATUS peuvent être redemandés automatiquement.")
         with self._lock:
-            for _ in range(attempts - 1):
+            timeouts: list[CommandTimeout] = []
+            for attempt in range(attempts):
                 try:
                     return self._transaction(opcode, config)
-                except CommandTimeout:
-                    pass
-            try:
-                return self._transaction(opcode, config)
-            except CommandTimeout as exc:
-                if attempts == 1:
-                    raise
-                raise CommandTimeout(
-                    opcode,
-                    exc.sequence,
-                    f"{exc.details} {attempts} tentatives sans réponse compatible.",
-                    received_bytes=exc.received_bytes,
-                    received_sample=exc.received_sample,
-                ) from exc
+                except CommandTimeout as exc:
+                    if attempts == 1:
+                        raise
+                    timeouts.append(exc)
+                    if attempt == attempts - 1:
+                        sample = next(
+                            (
+                                failure.received_sample
+                                for failure in timeouts
+                                if failure.received_sample
+                            ),
+                            b"",
+                        )
+                        details = " ".join(
+                            f"Tentative {index}: {failure.details}"
+                            for index, failure in enumerate(timeouts, start=1)
+                        )
+                        raise CommandTimeout(
+                            opcode,
+                            exc.sequence,
+                            f"{attempts} tentatives sans réponse compatible. {details}",
+                            received_bytes=sum(failure.received_bytes for failure in timeouts),
+                            received_sample=sample,
+                        ) from exc
+            raise AssertionError("Une transaction doit réussir ou lever une exception.")
 
     def _transaction(self, opcode: Opcode, config: FrameConfig | None) -> DeviceStatus:
         with self._lock:

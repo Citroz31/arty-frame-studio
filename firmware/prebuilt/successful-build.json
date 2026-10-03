@@ -1,10 +1,10 @@
 {
   "version": 1,
   "part": "xc7a100tcsg324-1",
-  "input_sha256": "960a80dda85e537afe5432ade082f514afd589a5b1dd75824214066424bbbe10",
-  "bitstream_sha256": "5849a6ffaf0cf05d3823e250ac7f6091d8c219c15194b61eabd411823e2e6b4e",
+  "input_sha256": "a289889e396f49d10ff82df3e0fd7b469f695d0d5351eca48372d4049c8eeb4a",
+  "bitstream_sha256": "4d4f8831154475354e5385581bd08ab296dcdd16b1d4f683ab8f52a51cf4975d",
   "timing_clock": "core_clock",
   "timing_requirement_mhz": 200,
   "timing_scope": "nextpnr register paths; excludes physical GPIO/DDR validation",
-  "run_dir": "/workspace/arty-frame-studio/build/runs/461cbd33135942a5bf11e9cc76c90e68"
+  "run_dir": "/home/runner/work/arty-frame-studio/arty-frame-studio/build/runs/f752ba82a6e944b3825492b07c363fab"
 }

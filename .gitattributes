@@ -1,0 +1,4 @@
+*.v text eol=lf
+*.xdc text eol=lf
+*.bit binary
+firmware/prebuilt/*.log -whitespace

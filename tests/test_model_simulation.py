@@ -56,11 +56,14 @@ def test_word_order_and_frequency_are_exact() -> None:
     [
         (200e6, 1),
         (199.9e6, 2),
+        (199999999.0, 2),
         (150e6, 2),
         (100e6, 2),
+        (99999999.0, 3),
         (90e6, 3),
         (80e6, 3),
         (66.6666667e6, 3),
+        (66666666.6, 4),
         (10e6, 20),
     ],
 )
@@ -73,8 +76,21 @@ def test_selected_frequency_is_the_highest_not_above_the_request() -> None:
     for step in range(1, 4000):
         frequency = 200e6 / (1 + step * 0.37)
         divider = divider_for_frequency(frequency)
-        assert 200e6 / divider <= frequency * (1 + 1e-6)
+        assert 200e6 / divider <= frequency
         assert divider == 1 or 200e6 / (divider - 1) > frequency
+
+
+def test_exact_dividers_and_immediately_lower_frequencies() -> None:
+    import math
+
+    for divider in range(1, 65536):
+        exact = 200e6 / divider
+        assert divider_for_frequency(exact) == divider
+        if divider < 65535:
+            below = math.nextafter(exact, -math.inf)
+            selected = divider_for_frequency(below)
+            assert selected == divider + 1
+            assert 200e6 / selected <= below
 
 
 @pytest.mark.parametrize("frequency", [0, -1, 1, 201e6, float("nan"), float("inf")])

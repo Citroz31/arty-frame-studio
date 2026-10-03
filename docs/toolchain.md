@@ -11,7 +11,7 @@ La compilation décrite ci-dessous concerne les développeurs et GitHub Actions.
 
 Le [firmware précompilé](../firmware/prebuilt/arty_frame.bit) a été produit
 avec cette chaîne : synthèse, placement/routage et contrôle de timing réussis
-à **200 MHz**, avec une Fmax après routage de **210,44 MHz**. Les sorties
+à **200 MHz**, avec une Fmax après routage de **218,05 MHz**. Les sorties
 physiques et le chargement de ce firmware n'ont pas encore été testés sur carte.
 
 ## Outils épinglés et provenance
@@ -60,17 +60,25 @@ Le fichier publié dans `firmware/prebuilt/` est accompagné de :
 | [timing.json](../firmware/prebuilt/timing.json) | Rapport de timing nextpnr |
 
 Le build de référence utilise **ABC9**, la graine nextpnr par défaut **1** et
-la cible `xc7a100tcsg324-1`. Le rapport final indique **210,43771362304688 MHz**
+la cible `xc7a100tcsg324-1`. Le rapport final indique **218,05494689941406 MHz**
 sur `core_clock`, avec **PASS at 200.00 MHz**. Le `.bit` contient un IDCODE
 `0x03631093`, compatible avec l'IDCODE `0x13631093` rapporté sur la carte
 (révision différente). Les trois resets ODDR R→SR ont été vérifiés dans le
-netlist routé. Le fichier mesure **3 825 970 octets** et son SHA256 est :
+netlist routé. Le fichier mesure **3 825 995 octets** et son SHA256 est :
 
 ```text
-5849a6ffaf0cf05d3823e250ac7f6091d8c219c15194b61eabd411823e2e6b4e
+4d4f8831154475354e5385581bd08ab296dcdd16b1d4f683ab8f52a51cf4975d
 ```
 
 ## Reproduire un build dans un environnement de développement
+
+Le firmware distribué provient du commit `7fa89e95099d3db9968eb42c0e77aa4ec8a2fccf`
+et du [run GitHub Actions 37113537280](https://github.com/Citroz31/arty-frame-studio/actions/runs/37113537280).
+Ce build corrige le brochage UART et enregistre les six entrées ODDR.
+Les sources RTL/XDC restent identiques dans la version actuelle ; les
+améliorations Python n'altèrent pas le contenu de configuration FPGA.
+`arty-frame firmware-check` contrôle le fichier, les sources et le rapport
+de timing avant son utilisation, sans outil FPGA ni matériel raccordé.
 
 Depuis la racine du projet, dans un environnement de développement Linux
 x86-64 disposant de Python 3.11+, Bash, curl, tar et sha256sum :

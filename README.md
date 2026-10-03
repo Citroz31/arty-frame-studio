@@ -14,14 +14,15 @@ dépasser** la demande (150 MHz donne 100 MHz) et affiche la valeur obtenue. Les
 pause sont quantifiées à **2,5 ns**. CLK est émise en rafales, idle bas ; le
 destinataire échantillonne DATA au front montant. DATA change au front descendant.
 
-> **Firmware précompilé obsolète.** Le `.bit` de `firmware/prebuilt/` a été
-> compilé avec les broches UART D10/A9 inversées : il ne répond pas à PING et
-> crée un conflit de sorties sur A9. Ne pas le charger ; regénérer le firmware
-> à partir des sources corrigées (voir [prebuilt/README](firmware/prebuilt/README.md)).
+Le firmware fourni a été remplacé par la version corrigée : **RX sur A9,
+TX sur D10**, entrées ODDR enregistrées. Remplacer aussi votre ancienne copie
+du `.bit`, qui inversait les broches UART et ne pouvait pas répondre à PING.
+L'application refuse ce fichier obsolète et vérifie le manifeste du firmware
+fourni avant son chargement. Voir [le firmware](firmware/prebuilt/README.md).
 
 Le [firmware précompilé pour le 100T](firmware/prebuilt/arty_frame.bit) est
 fourni avec son [manifeste](firmware/prebuilt/firmware-manifest.json) et ses
-rapports. La synthèse et le routage libres ont réussi : **Fmax 210,44 MHz,
+rapports. La synthèse et le routage libres ont réussi : **Fmax 218,05 MHz,
 contrainte 200 MHz respectée** sur les chemins modélisés de `core_clock`.
 
 **Le firmware et ses sorties à 200 MHz n'ont pas encore été testés sur carte.**
@@ -96,6 +97,12 @@ ou `--project-root` pour les commandes FPGA de la CLI.
 La programmation proposée charge la **SRAM volatile** : il faut reprogrammer
 après une coupure d’alimentation. Une programmation de la flash n’est pas effectuée.
 Les profils sauvegardent les paramètres dans un JSON versionné.
+
+Après un délai dépassé sur SEND ou STOP, l'interface lit STATUS sans répéter
+la commande. L'état observé ne prouve pas son exécution : les nouveaux SEND
+restent désactivés jusqu'à un STOP confirmé ou une reconnexion explicite.
+Les compteurs de diagnostic cumulent les tentatives PING et conservent le
+premier aperçu RX.
 
 Le pilote Digilent Adept Runtime, y compris 2.30.4, permet l'accès USB mais
 ne charge pas ce firmware. Un IDCODE `0x13631093` confirme l'Arty 100T ;
