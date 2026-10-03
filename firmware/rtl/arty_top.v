@@ -120,15 +120,21 @@ module arty_top #(
     // LED test: a manual LED command shows its pattern on LD4-LD7, then the
     // status display returns after LED_HOLD_CYCLES; an automatic command or
     // a reset returns at once. led_hold[30] set means status display.
+    // led_write comes from the reply-queue capacity logic: register it before
+    // it fans out to the counter, which is placed near the distant LED pins.
+    reg led_command;
+    reg [4:0] led_command_value;
     reg [3:0] led_pattern;
     reg [30:0] led_hold;
     always @(posedge core_clock) begin
+        led_command <= !reset && led_write;
+        led_command_value <= led_value;
         if (reset) begin
             led_pattern <= 0;
             led_hold <= {31{1'b1}};
-        end else if (led_write) begin
-            led_pattern <= led_value[3:0];
-            led_hold <= led_value[4] ? LED_HOLD : {31{1'b1}};
+        end else if (led_command) begin
+            led_pattern <= led_command_value[3:0];
+            led_hold <= led_command_value[4] ? LED_HOLD : {31{1'b1}};
         end else if (!led_hold[30]) begin
             led_hold <= led_hold - 1'b1;
         end
