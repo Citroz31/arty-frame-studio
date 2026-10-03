@@ -1,5 +1,12 @@
 # Firmware Arty A7-100T précompilé
 
+> **Ne pas charger ce `arty_frame.bit` : il est obsolète.** Il a été compilé
+> avec les broches UART inversées (`uart_rx` sur D10, `uart_tx` sur A9).
+> Le FPGA y écoute la ligne de réception du PC : PING ne peut pas répondre.
+> Il pilote aussi A9, déjà pilotée par la sortie TXD du FT2232 (conflit de
+> sorties). Regénérer le firmware avec le workflow **Build Arty A7-100T
+> firmware** à partir des sources corrigées, puis remplacer ce dossier.
+
 `arty_frame.bit` cible uniquement `xc7a100tcsg324-1`. UART 115200 bauds, 8N1.
 Synthèse Yosys ABC9 et routage nextpnr : 210,44 MHz, contrainte 200 MHz passée.
 296 tests Python et cinq simulations RTL passent. Aucun essai de ce firmware

@@ -62,6 +62,8 @@ CLK est basse entre les rafales ; latch est au niveau inactif choisi.
 Une seule requête est en vol côté Python, avec vérification du CRC, de l’opcode
 et du numéro de séquence. Le firmware reçoit des paquets bornés et abandonne
 un paquet incomplet après son timeout. Il n’offre pas de déduplication persistante :
-une commande SEND n’est **jamais répétée automatiquement** après un timeout,
-car elle peut avoir été exécutée. Consulter STATUS ou envoyer STOP avant de
+une commande SEND ou STOP n’est **jamais répétée automatiquement** après un
+timeout, car elle peut avoir été exécutée. PING (à la connexion) et STATUS,
+sans effet sur la carte, sont redemandés une fois avec un nouveau numéro de
+séquence. Consulter STATUS ou envoyer STOP avant de
 décider d’un nouvel envoi.

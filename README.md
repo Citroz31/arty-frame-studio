@@ -9,9 +9,15 @@ Vivado n’est pas utilisé par le projet.
 
 Le PC envoie les paramètres par UART ; le FPGA produit les fronts. La fréquence
 réalisable est **200 MHz / N**, N entier de 1 à 65535, soit environ 3,052 kHz à
-200 MHz. La fréquence réellement sélectionnée est affichée. Les durées latch et
+200 MHz. L’application retient la fréquence réalisable la plus élevée **sans
+dépasser** la demande (150 MHz donne 100 MHz) et affiche la valeur obtenue. Les durées latch et
 pause sont quantifiées à **2,5 ns**. CLK est émise en rafales, idle bas ; le
 destinataire échantillonne DATA au front montant. DATA change au front descendant.
+
+> **Firmware précompilé obsolète.** Le `.bit` de `firmware/prebuilt/` a été
+> compilé avec les broches UART D10/A9 inversées : il ne répond pas à PING et
+> crée un conflit de sorties sur A9. Ne pas le charger ; regénérer le firmware
+> à partir des sources corrigées (voir [prebuilt/README](firmware/prebuilt/README.md)).
 
 Le [firmware précompilé pour le 100T](firmware/prebuilt/arty_frame.bit) est
 fourni avec son [manifeste](firmware/prebuilt/firmware-manifest.json) et ses

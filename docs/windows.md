@@ -28,7 +28,10 @@ son chargement, PING et les sorties sur la carte réelle.
    ou série, notamment Adept et les terminaux qui utilisent COM7.
 3. Ouvrir **FPGA**, section **JTAG Windows natif**, puis **Détecter le FPGA sous
    Windows**. La détection lit l'IDCODE ; elle ne programme pas la carte.
-4. Dans **Firmware existant pour l'Arty A7-100T (.bit)**, indiquer le chemin
+4. **Le `.bit` actuellement fourni dans `firmware/prebuilt/` est obsolète**
+   (broches UART inversées) : utiliser un firmware regénéré à partir des
+   sources corrigées. Dans **Firmware existant pour l'Arty A7-100T (.bit)**,
+   indiquer le chemin
    complet de `firmware\prebuilt\arty_frame.bit` dans le dossier extrait.
    L'application le présélectionne si ce fichier est présent. Cliquer sur
    **Charger le .bit sous Windows**. Prévoir environ **30 à 60 secondes**

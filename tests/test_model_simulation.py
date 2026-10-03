@@ -51,10 +51,30 @@ def test_word_order_and_frequency_are_exact() -> None:
     assert replace(config, repeat_count=7).total_duration_ns == config.frame_duration_ns * 7
 
 
-@pytest.mark.parametrize("frequency,divider", [(200e6, 1), (100e6, 2), (80e6, 3), (10e6, 20)])
-def test_frequency_selects_closest_achievable_value(frequency: float, divider: int) -> None:
+@pytest.mark.parametrize(
+    "frequency,divider",
+    [
+        (200e6, 1),
+        (199.9e6, 2),
+        (150e6, 2),
+        (100e6, 2),
+        (90e6, 3),
+        (80e6, 3),
+        (66.6666667e6, 3),
+        (10e6, 20),
+    ],
+)
+def test_frequency_never_exceeds_the_request(frequency: float, divider: int) -> None:
     assert divider_for_frequency(frequency) == divider
     assert divider_for_frequency(200e6 / 65535) == 65535
+
+
+def test_selected_frequency_is_the_highest_not_above_the_request() -> None:
+    for step in range(1, 4000):
+        frequency = 200e6 / (1 + step * 0.37)
+        divider = divider_for_frequency(frequency)
+        assert 200e6 / divider <= frequency * (1 + 1e-6)
+        assert divider == 1 or 200e6 / (divider - 1) > frequency
 
 
 @pytest.mark.parametrize("frequency", [0, -1, 1, 201e6, float("nan"), float("inf")])

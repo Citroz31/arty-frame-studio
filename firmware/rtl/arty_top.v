@@ -64,16 +64,26 @@ module arty_top (
         .clock_rise(clock_rise), .clock_fall(clock_fall),
         .latch_rise(latch_rise), .latch_fall(latch_fall)
     );
+    // frame_engine decodes the falling-edge values combinationally. Register
+    // all six ODDR inputs so only a flip-flop-to-OLOGIC route remains: the
+    // nextpnr report does not certify the fabric-to-OLOGIC endpoints. The
+    // uniform one-cycle delay keeps DATA, CLK and LATCH aligned.
+    reg [5:0] oddr_inputs;
+    always @(posedge core_clock) begin
+        if (reset) oddr_inputs <= 0;
+        else oddr_inputs <= {data_rise, data_fall, clock_rise, clock_fall,
+                             latch_rise, latch_fall};
+    end
     ODDR #(.DDR_CLK_EDGE("SAME_EDGE"), .INIT(1'b0), .SRTYPE("ASYNC")) data_ddr (
-        .C(core_clock), .CE(1'b1), .D1(data_rise), .D2(data_fall),
+        .C(core_clock), .CE(1'b1), .D1(oddr_inputs[5]), .D2(oddr_inputs[4]),
         .R(reset), .S(1'b0), .Q(data_out)
     );
     ODDR #(.DDR_CLK_EDGE("SAME_EDGE"), .INIT(1'b0), .SRTYPE("ASYNC")) clock_ddr (
-        .C(core_clock), .CE(1'b1), .D1(clock_rise), .D2(clock_fall),
+        .C(core_clock), .CE(1'b1), .D1(oddr_inputs[3]), .D2(oddr_inputs[2]),
         .R(reset), .S(1'b0), .Q(frame_clk)
     );
     ODDR #(.DDR_CLK_EDGE("SAME_EDGE"), .INIT(1'b0), .SRTYPE("ASYNC")) latch_ddr (
-        .C(core_clock), .CE(1'b1), .D1(latch_rise), .D2(latch_fall),
+        .C(core_clock), .CE(1'b1), .D1(oddr_inputs[1]), .D2(oddr_inputs[0]),
         .R(reset), .S(1'b0), .Q(latch_enable)
     );
     assign led = {completed != 0, 1'b0, busy, locked};

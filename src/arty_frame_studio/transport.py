@@ -42,6 +42,7 @@ class CommandTimeout(TransportError):
     ) -> None:
         self.opcode = opcode
         self.sequence = sequence
+        self.details = details
         self.received_bytes = received_bytes
         self.received_sample = received_sample[:32]
         message = f"Délai de réponse dépassé pour {opcode.name} (séquence {sequence})."
@@ -94,11 +95,20 @@ def list_ports() -> list[PortInfo]:
     return sorted(ports, key=lambda port: port.device)
 
 
+# PING et STATUS ne modifient pas la carte : une réponse perdue peut être
+# redemandée. SEND et STOP ne sont jamais répétés automatiquement.
+_REPEATABLE = (Opcode.PING, Opcode.STATUS)
+CONNECT_PING_ATTEMPTS = 2
+STATUS_ATTEMPTS = 2
+
+
 class SerialDevice:
     """Une requête à la fois, confirmation avec numéro de séquence et opcode.
 
-    Aucun appel n'est relancé automatiquement, y compris SEND. Le paramètre
-    ``serial_factory`` permet de vérifier le protocole sans matériel.
+    Seuls PING (à la connexion) et STATUS sont redemandés une fois après un
+    délai dépassé ; SEND et STOP ne le sont jamais. ``serial_factory`` reçoit
+    ``port=None`` et retourne un port non ouvert, ouvert ensuite par ``open()`` :
+    il permet de vérifier le protocole sans matériel.
     """
 
     def __init__(
@@ -107,6 +117,7 @@ class SerialDevice:
         baudrate: int = 115200,
         *,
         timeout: float = 0.75,
+        open_settle: float = 0.05,
         serial_factory: Callable[..., Any] | None = None,
     ) -> None:
         if not isinstance(port, str) or not port.strip() or any(char in port for char in "\r\n\0"):
@@ -115,9 +126,12 @@ class SerialDevice:
             raise ValueError("La vitesse UART doit être un entier positif.")
         if not 0 < timeout <= 60:
             raise ValueError("Le délai UART doit être compris entre 0 et 60 secondes.")
+        if not 0 <= open_settle <= 5:
+            raise ValueError("L'attente après ouverture doit être comprise entre 0 et 5 secondes.")
         self.port = port.strip()
         self.baudrate = baudrate
         self.timeout = timeout
+        self.open_settle = open_settle
         self._serial_factory = serial_factory
         self._serial: Any = None
         self._lock = threading.RLock()
@@ -144,7 +158,7 @@ class SerialDevice:
                 factory = serial.Serial
             try:
                 self._serial = factory(
-                    port=self.port,
+                    port=None,
                     baudrate=self.baudrate,
                     bytesize=8,
                     parity="N",
@@ -155,10 +169,21 @@ class SerialDevice:
                     rtscts=False,
                     dsrdtr=False,
                 )
+                # Le cavalier JP2 de l'Arty A7 relie DTR du FT2232 à ck_rst, le
+                # reset du FPGA. pyserial active DTR et RTS à l'ouverture par
+                # défaut : les désactiver avant open() évite de réinitialiser
+                # la carte (garanti sous Windows ; Linux peut émettre une brève
+                # impulsion à l'ouverture, d'où l'attente et le second PING).
+                self._serial.dtr = False
+                self._serial.rts = False
+                self._serial.port = self.port
+                self._serial.open()
                 self._decoder = PacketDecoder()
+                if self.open_settle:
+                    time.sleep(self.open_settle)
                 if hasattr(self._serial, "reset_input_buffer"):
                     self._serial.reset_input_buffer()
-                return self.ping()
+                return self._exchange(Opcode.PING, attempts=CONNECT_PING_ATTEMPTS)
             except Exception as exc:
                 self.close()
                 if isinstance(exc, TransportError):
@@ -179,7 +204,7 @@ class SerialDevice:
         return self._exchange(Opcode.STOP)
 
     def status(self) -> DeviceStatus:
-        return self._exchange(Opcode.STATUS)
+        return self._exchange(Opcode.STATUS, attempts=STATUS_ATTEMPTS)
 
     def close(self) -> None:
         with self._lock:
@@ -191,7 +216,33 @@ class SerialDevice:
                     # L'état local doit rester fermé même si le périphérique a disparu.
                     pass
 
-    def _exchange(self, opcode: Opcode, config: FrameConfig | None = None) -> DeviceStatus:
+    def _exchange(
+        self, opcode: Opcode, config: FrameConfig | None = None, *, attempts: int = 1
+    ) -> DeviceStatus:
+        if type(attempts) is not int or attempts < 1:
+            raise ValueError("Le nombre de tentatives doit être un entier positif.")
+        if attempts > 1 and opcode not in _REPEATABLE:
+            raise ValueError("Seuls PING et STATUS peuvent être redemandés automatiquement.")
+        with self._lock:
+            for _ in range(attempts - 1):
+                try:
+                    return self._transaction(opcode, config)
+                except CommandTimeout:
+                    pass
+            try:
+                return self._transaction(opcode, config)
+            except CommandTimeout as exc:
+                if attempts == 1:
+                    raise
+                raise CommandTimeout(
+                    opcode,
+                    exc.sequence,
+                    f"{exc.details} {attempts} tentatives sans réponse compatible.",
+                    received_bytes=exc.received_bytes,
+                    received_sample=exc.received_sample,
+                ) from exc
+
+    def _transaction(self, opcode: Opcode, config: FrameConfig | None) -> DeviceStatus:
         with self._lock:
             if not self.connected:
                 raise TransportError("La carte n'est pas connectée.")

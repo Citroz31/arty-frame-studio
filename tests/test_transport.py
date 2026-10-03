@@ -8,6 +8,7 @@ import pytest
 from arty_frame_studio.model import FrameConfig
 from arty_frame_studio.protocol import Opcode, PacketDecoder, StatusCode
 from arty_frame_studio.transport import (
+    CONNECT_PING_ATTEMPTS,
     CommandTimeout,
     DemoDevice,
     DeviceError,
@@ -28,7 +29,12 @@ def response(packet, *, opcode=None, sequence=None, status=0, busy=0, completed=
 class FakeSerial:
     def __init__(self, handler=None, **kwargs):
         self.settings = kwargs
-        self.is_open = True
+        # Comme pyserial : port non ouvert, DTR/RTS actifs tant qu'on ne les change pas.
+        self.port = kwargs.get("port")
+        self.dtr = True
+        self.rts = True
+        self.opened_with = None
+        self.is_open = False
         self.requests = []
         self._receive = bytearray()
         self.handler = handler or (lambda packet: response(packet))
@@ -56,6 +62,10 @@ class FakeSerial:
         del self._receive[: len(chunk)]
         return chunk
 
+    def open(self):
+        self.opened_with = {"port": self.port, "dtr": self.dtr, "rts": self.rts}
+        self.is_open = True
+
     def close(self):
         self.is_open = False
 
@@ -67,7 +77,8 @@ def make_serial(handler=None, timeout=0.015):
         endpoint.settings = kwargs
         return endpoint
 
-    return SerialDevice("/dev/ttyUSB1", timeout=timeout, serial_factory=factory), endpoint
+    device = SerialDevice("/dev/ttyUSB1", timeout=timeout, open_settle=0, serial_factory=factory)
+    return device, endpoint
 
 
 def test_connection_verifies_ping_and_full_serial_settings():
@@ -75,7 +86,9 @@ def test_connection_verifies_ping_and_full_serial_settings():
     status = device.connect()
     assert status.ok and device.connected
     assert [p.opcode for p in endpoint.requests] == [Opcode.PING]
-    assert endpoint.settings["port"] == "/dev/ttyUSB1"
+    # JP2 relie DTR à ck_rst : DTR/RTS doivent être inactifs avant l'ouverture.
+    assert endpoint.settings["port"] is None
+    assert endpoint.opened_with == {"port": "/dev/ttyUSB1", "dtr": False, "rts": False}
     assert endpoint.settings["baudrate"] == 115200
     assert endpoint.settings["bytesize"] == 8
     assert endpoint.settings["parity"] == "N"
@@ -95,6 +108,8 @@ def test_connection_does_not_accept_an_unresponsive_port():
     with pytest.raises(CommandTimeout, match="PING") as error:
         device.connect()
     assert error.value.received_bytes == 0
+    assert f"{CONNECT_PING_ATTEMPTS} tentatives" in str(error.value)
+    assert [p.opcode for p in endpoint.requests] == [Opcode.PING] * CONNECT_PING_ATTEMPTS
     assert "Le port USB/UART a été ouvert" in str(error.value)
     assert "bitstream" in str(error.value)
     assert not device.connected and not endpoint.is_open
@@ -109,7 +124,7 @@ def test_unrelated_uart_text_is_reported_as_data_without_a_valid_ping():
     assert error.value.received_sample == text
     assert "ASCII : Arty factory demo.." in str(error.value)
     assert "Aucun octet reçu" not in str(error.value)
-    assert [p.opcode for p in endpoint.requests] == [Opcode.PING]
+    assert [p.opcode for p in endpoint.requests] == [Opcode.PING] * CONNECT_PING_ATTEMPTS
     assert not endpoint.is_open
 
 
@@ -124,7 +139,7 @@ def test_ping_timeout_preview_is_bounded_and_never_emits_raw_controls():
     assert "\x1b" not in str(error.value)
     assert "\x00" not in str(error.value)
     assert "ASCII : .[31m." in str(error.value)
-    assert [p.opcode for p in endpoint.requests] == [Opcode.PING]
+    assert [p.opcode for p in endpoint.requests] == [Opcode.PING] * CONNECT_PING_ATTEMPTS
     assert not endpoint.is_open
 
 
@@ -135,11 +150,11 @@ def test_windows_port_name_is_trimmed_before_opening():
         endpoint.settings = settings
         return endpoint
 
-    device = SerialDevice(" COM7 ", serial_factory=factory)
+    device = SerialDevice(" COM7 ", open_settle=0, serial_factory=factory)
     try:
         assert device.connect().ok
         assert device.port == "COM7"
-        assert endpoint.settings["port"] == "COM7"
+        assert endpoint.opened_with == {"port": "COM7", "dtr": False, "rts": False}
     finally:
         device.close()
 
@@ -249,6 +264,43 @@ def test_sequence_rollover_and_concurrent_requests_remain_matched():
         results = list(executor.map(lambda _: device.status(), range(260)))
     assert all(result.ok for result in results)
     assert [p.sequence for p in endpoint.requests] == [index % 256 for index in range(261)]
+
+
+def test_connection_repeats_a_lost_ping_once():
+    def handler(packet):
+        return b"" if len(endpoint.requests) == 1 else response(packet)
+
+    device, endpoint = make_serial(handler)
+    assert device.connect().ok
+    assert [p.opcode for p in endpoint.requests] == [Opcode.PING, Opcode.PING]
+    assert [p.sequence for p in endpoint.requests] == [0, 1]
+
+
+def test_status_is_repeated_once_but_stop_and_send_never_are():
+    lost = {Opcode.STATUS: 1, Opcode.STOP: 99, Opcode.SEND: 99}
+
+    def handler(packet):
+        if lost.get(packet.opcode, 0):
+            lost[packet.opcode] -= 1
+            return b""
+        return response(packet, completed=3)
+
+    device, endpoint = make_serial(handler)
+    device.connect()
+    assert device.status().completed == 3
+    with pytest.raises(CommandTimeout):
+        device.stop()
+    with pytest.raises(CommandTimeout):
+        device.send(FrameConfig())
+    assert [p.opcode for p in endpoint.requests] == [1, 4, 4, 3, 2]
+    with pytest.raises(ValueError, match="PING et STATUS"):
+        device._exchange(Opcode.SEND, FrameConfig(), attempts=2)
+
+
+def test_open_settle_is_bounded():
+    with pytest.raises(ValueError, match="attente"):
+        SerialDevice("COM7", open_settle=-1)
+    assert SerialDevice("COM7").open_settle > 0
 
 
 def test_partial_write_is_reported_without_retry():

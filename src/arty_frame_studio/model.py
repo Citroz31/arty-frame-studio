@@ -66,12 +66,18 @@ class FrameConfig:
 
 
 def divider_for_frequency(hz: float) -> int:
-    """Choisit le diviseur offrant la plus petite erreur absolue de fréquence."""
+    """Choisit la fréquence réalisable la plus élevée sans dépasser la demande.
+
+    Un récepteur dimensionné pour ``hz`` n'est ainsi jamais surcadencé : 150 MHz
+    donne 100 MHz (N=2), pas 200 MHz. Un écart relatif de 1 ppm, très inférieur
+    à la tolérance de l'oscillateur, absorbe l'arrondi d'une saisie décimale.
+    """
     if not math.isfinite(hz) or not REFERENCE_HZ / MAX_COUNTER <= hz <= REFERENCE_HZ:
         raise ValueError(f"Fréquence entre {REFERENCE_HZ / MAX_COUNTER:.3f} Hz et 200 MHz requise.")
     ideal = REFERENCE_HZ / hz
-    candidates = {max(1, math.floor(ideal)), min(MAX_COUNTER, math.ceil(ideal))}
-    return min(candidates, key=lambda divider: (abs(REFERENCE_HZ / divider - hz), divider))
+    nearest = round(ideal)
+    divider = nearest if math.isclose(ideal, nearest, rel_tol=1e-6) else math.ceil(ideal)
+    return min(MAX_COUNTER, max(1, divider))
 
 
 def ticks_for_ns(ns: float, *, allow_zero: bool = False) -> int:

@@ -16,8 +16,8 @@ des signaux CLK/DATA/LATCH.
 | --- | --- | --- | --- |
 | Oscillateur 100 MHz | `clk100` | E3 | Oscillateur intégré |
 | Reset actif bas | `reset_n` | C2 | Bouton rouge RESET / `ck_rst` |
-| USB UART vers FPGA | `uart_rx` | D10 | FT2232 `uart_rxd_out` |
-| FPGA vers USB UART | `uart_tx` | A9 | FT2232 `uart_txd_in` |
+| USB UART vers FPGA | `uart_rx` | A9 | FT2232 `uart_txd_in` |
+| FPGA vers USB UART | `uart_tx` | D10 | FT2232 `uart_rxd_out` |
 | Données série | `data_out` | E15 | JB broche 1 |
 | Horloge série | `frame_clk` | E16 | JB broche 2 |
 | Latch enable | `latch_enable` | D15 | JB broche 3 |
@@ -41,8 +41,17 @@ La présence d'un Pmod rapide ne certifie pas une liaison à 200 MHz. Vérifier
 la révision et les schémas de votre carte avant de reproduire ce raccordement.
 
 Le brochage provient du [Master XDC officiel Arty A7-100](https://github.com/Digilent/digilent-xdc/blob/master/Arty-A7-100-Master.xdc).
-Les signaux `uart_rxd_out` et `uart_txd_in` sont nommés du point de vue de
-l'interface USB, ce qui explique leur direction dans le RTL.
+Digilent nomme `uart_rxd_out` et `uart_txd_in` du point de vue du PC (DTE) :
+`uart_txd_in` (A9) porte les données émises par le PC, c'est une **entrée** du
+FPGA ; `uart_rxd_out` (D10) porte les données reçues par le PC, c'est une
+**sortie** du FPGA. LiteX utilise le même brochage (`tx` = D10, `rx` = A9).
+Les versions antérieures du XDC inversaient ces deux broches : un `.bit`
+compilé avec elles ne peut pas répondre à PING et pilote A9 contre la sortie
+TXD du FT2232.
+
+Le cavalier **JP2** relie le signal DTR du FT2232 à `ck_rst`, le reset du
+FPGA. L'application désactive DTR et RTS avant d'ouvrir le port série ;
+un autre terminal série qui active DTR peut maintenir ou relancer le reset.
 
 ## Signaux et fréquence
 
