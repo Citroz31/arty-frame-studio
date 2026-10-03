@@ -15,12 +15,25 @@ module tb_protocol;
     integer captured_count=0;
     reg [255:0] test_payload=0;
     integer requests=0;
-    frame_controller #(.PACKET_TIMEOUT_CYCLES(60)) dut (
+    wire led_write;
+    wire [4:0] led_value;
+    reg [4:0] last_led=0;
+    integer led_writes=0;
+    integer page;
+    reg [15:0] info_expected [0:5];
+    frame_controller #(
+        .PACKET_TIMEOUT_CYCLES(60), .CORE_HZ(32'd150000000), .BUILD_ID(32'hA5C31E2D)
+    ) dut (
         .clk(clk), .reset(reset), .rx_data(rx_data), .rx_valid(rx_valid),
         .tx_data(tx_data), .tx_valid(tx_valid), .tx_ready(tx_ready),
         .busy(busy), .completed(completed), .data_rise(dr), .data_fall(df),
-        .clock_rise(cr), .clock_fall(cf), .latch_rise(lr), .latch_fall(lf)
+        .clock_rise(cr), .clock_fall(cf), .latch_rise(lr), .latch_fall(lf),
+        .led_write(led_write), .led_value(led_value)
     );
+    always @(posedge clk) if (led_write) begin
+        last_led=led_value;
+        led_writes=led_writes+1;
+    end
     always @(posedge clk) if (tx_valid && tx_ready) begin
         captured[captured_count]=tx_data;
         captured_count=captured_count+1;
@@ -159,6 +172,31 @@ module tb_protocol;
         test_payload[103:88]=2; test_payload[87:72]=0;
         transaction(1,2,27,14,0,0,1,0);
         transaction(1,4,28,0,0,0,0,2);
+        // LED: {manual, 3'b0, pattern}; reserved bits or a wrong length are
+        // rejected without a write. Automatic mode is a write with bit 4 clear.
+        test_payload[7:0]=8'h85;
+        transaction(1,5,40,1,0,0,0,-1);
+        if(led_writes!=1 || last_led!==5'b10101) $fatal(1,"LED manual write missing");
+        test_payload[7:0]=8'h15;
+        transaction(1,5,41,1,0,2,0,-1);
+        transaction(1,5,42,0,0,2,0,-1);
+        transaction(1,5,43,2,0,2,0,-1);
+        if(led_writes!=1) $fatal(1,"Invalid LED command reached the LEDs");
+        test_payload[7:0]=8'h0a;
+        transaction(1,5,44,1,0,0,0,-1);
+        if(led_writes!=2 || last_led!==5'b01010) $fatal(1,"LED automatic write missing");
+        // INFO pages carry revision, CORE_HZ and BUILD_ID in the 16-bit field.
+        info_expected[0]=16'd2; info_expected[1]=16'hd180; info_expected[2]=16'h08f0;
+        info_expected[3]=16'h0003; info_expected[4]=16'h1e2d; info_expected[5]=16'ha5c3;
+        for(page=0;page<6;page=page+1) begin
+            test_payload[7:0]=page;
+            transaction(1,6,50+page,1,0,0,0,info_expected[page]);
+        end
+        test_payload[7:0]=6;
+        transaction(1,6,56,1,0,2,0,-1);
+        transaction(1,6,57,0,0,2,0,-1);
+        // INFO and LED leave the completion counter untouched.
+        transaction(1,4,58,0,0,0,0,2);
         // Reply TX backpressure and four-entry queue, with PING kept available.
         tx_ready=0;
         request(1,1,29,0,0);

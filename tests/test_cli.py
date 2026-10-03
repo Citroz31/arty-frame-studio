@@ -158,3 +158,37 @@ def test_firmware_check_works_without_hardware(monkeypatch, capsys):
     monkeypatch.setattr(cli, "program_arty", lambda *a, **k: pytest.fail("Unexpected JTAG"))
     assert main(["firmware-check", "--project-root", str(Path(__file__).resolve().parents[1])]) == 0
     assert "sources RTL/XDC" in capsys.readouterr().out
+
+
+def test_firmware_config_command_writes_settings_and_constraints(tmp_path, capsys):
+    from arty_frame_studio.firmware_config import FirmwareBuildConfig
+
+    output, xdc = tmp_path / "fw.json", tmp_path / "fw.xdc"
+    args = ["firmware-config", "--core-mhz", "150", "--data", "jc3", "--clock", "JC1"]
+    assert main([*args, "--latch", "JC7", "--output", str(output), "--xdc", str(xdc)]) == 0
+    firmware = FirmwareBuildConfig.load(output)
+    assert (firmware.core_hz, firmware.data_pin) == (150_000_000, "JC3")
+    assert xdc.read_text() == firmware.xdc()
+    assert "cœur 150 MHz" in capsys.readouterr().out
+    assert main(["firmware-config", "--input", str(output), "--drive", "16"]) == 0
+    assert main(["firmware-config", "--data", "JB2"]) == 1
+    assert "distinctes" in capsys.readouterr().err
+
+
+def test_remote_build_requires_a_token(monkeypatch, capsys):
+    monkeypatch.delenv("ARTY_GITHUB_TOKEN", raising=False)
+    assert main(["remote-build"]) == 1
+    assert "ARTY_GITHUB_TOKEN" in capsys.readouterr().err
+
+
+def test_led_test_command_identifies_then_walks_leds(monkeypatch, capsys):
+    from arty_frame_studio import transport
+    from arty_frame_studio.transport import DemoDevice
+
+    demo = DemoDevice()
+    monkeypatch.setattr(cli, "SerialDevice", lambda port: demo)
+    monkeypatch.setattr(transport.time, "sleep", lambda _: None)
+    assert main(["led-test", "--port", "COM7"]) == 0
+    out = capsys.readouterr().out
+    assert '"revision": 2' in out and "commandes confirmées" in out
+    assert not demo.connected

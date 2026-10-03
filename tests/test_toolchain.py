@@ -473,3 +473,53 @@ def test_argument_with_shell_metacharacters_is_literal(
     candidate = Toolchain(changed, toolchain.project_root)
     candidate.program(candidate.build())
     assert not (toolchain.project_root / "injected").exists()
+
+
+def test_custom_firmware_build_uses_generated_constraints_and_parameters(
+    toolchain: Toolchain, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from arty_frame_studio.firmware_config import FirmwareBuildConfig
+
+    firmware = FirmwareBuildConfig(
+        core_hz=150_000_000, data_pin="JC3", clock_pin="JC1", latch_pin="JC7"
+    )
+    monkeypatch.setenv(
+        "FAKE_TIMING", "Info: Max frequency for clock 'core_clock': 171.20 MHz (PASS at 150.00 MHz)"
+    )
+    committed = toolchain.constraints.read_text()
+    bitstream = toolchain.build(firmware=firmware)
+    yosys, nextpnr = history()[:2]
+    for name, value in firmware.yosys_parameters().items():
+        assert f"chparam -set {name} {value} arty_top;" in yosys[-1]
+    assert nextpnr[nextpnr.index("--freq") + 1] == "150"
+    xdc = Path(nextpnr[nextpnr.index("--xdc") + 1])
+    assert xdc.parent.parent.name == "runs" and xdc.read_text() == firmware.xdc()
+    assert toolchain.constraints.read_text() == committed
+    receipt = json.loads(toolchain.receipt.read_text())
+    assert receipt["timing_requirement_mhz"] == 150
+    assert receipt["build_id"] == firmware.build_id
+    assert FirmwareBuildConfig.from_dict(receipt["firmware_config"]) == firmware
+    toolchain.program(bitstream)
+
+
+def test_custom_firmware_requires_timing_at_its_own_core_clock(
+    toolchain: Toolchain, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from arty_frame_studio.firmware_config import FirmwareBuildConfig
+
+    monkeypatch.setenv(
+        "FAKE_TIMING", "Info: Max frequency for clock 'core_clock': 175.00 MHz (PASS at 160.00 MHz)"
+    )
+    with pytest.raises(ToolchainError, match="Timing 180 MHz"):
+        toolchain.build(firmware=FirmwareBuildConfig(core_hz=180_000_000))
+    assert not toolchain.receipt.exists()
+
+
+def test_reference_build_keeps_committed_constraints_without_parameters(
+    toolchain: Toolchain,
+) -> None:
+    toolchain.build()
+    yosys, nextpnr = history()[:2]
+    assert "chparam" not in yosys[-1]
+    assert nextpnr[nextpnr.index("--xdc") + 1] == str(toolchain.constraints)
+    assert json.loads(toolchain.receipt.read_text())["build_id"] == 0

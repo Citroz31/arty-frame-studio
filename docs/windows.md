@@ -39,8 +39,12 @@ son chargement, PING et les sorties sur la carte réelle.
 5. Vérifier la **première LED monochrome**, indicateur de verrouillage PLL de
    ce firmware. Dans **Pilotage**, sélectionner **Carte · USB / UART**,
    actualiser les ports, choisir **COM7**, puis cliquer sur **Connecter**.
-   La connexion teste PING avant de permettre l'envoi de trames.
-6. Après une réponse PING valide, commencer à fréquence réduite. Les sorties
+   La connexion teste PING puis lit l'identité du firmware (INFO).
+6. Cliquer sur **Tester les LED** : les quatre LED vertes LD4 à LD7 font un
+   chenillard, s'allument ensemble, s'éteignent, puis reviennent à l'état.
+   Si elles défilent, le bon firmware tourne sur cette carte et la liaison
+   UART fonctionne dans les deux sens. Sinon, recharger le `.bit` à jour.
+7. Commencer ensuite à fréquence réduite. Les sorties
    sont **JB1/E15 : DATA**, **JB2/E16 : CLK**, **JB3/D15 : LATCH** ; relier la
    masse sur **JB5 ou JB11**. Ce sont des signaux **3,3 V**. Voir
    [le brochage et les limites physiques](hardware.md).
@@ -48,8 +52,14 @@ son chargement, PING et les sorties sur la carte réelle.
 La programmation charge uniquement la **SRAM volatile**, pas la flash.
 **Recharger le `.bit` après chaque coupure d'alimentation.** Le programme
 présent en flash, par exemple une démonstration d'origine, peut revenir au
-redémarrage. Ne pas utiliser **Compiler le FPGA** ou **Programmer la SRAM**
+redémarrage. Ne pas utiliser **Compiler localement** ou **Programmer la SRAM**
 du flux d'outils externes pour ce parcours de chargement Windows natif.
+
+Pour changer l'horloge du cœur ou les broches sans outil FPGA sur le PC :
+onglet **FPGA → Firmware personnalisé**, choisir les réglages, renseigner un
+jeton GitHub (Actions : lecture et écriture) puis **Compiler sur GitHub**.
+Le `.bit` vérifié est téléchargé dans `builds\` et proposé au chargement.
+Voir [la compilation personnalisée](toolchain.md#firmware-personnalisé-depuis-linterface).
 
 Avant le chargement natif, le firmware fourni est contrôlé : SHA256 du `.bit`,
 hashes des sources RTL/XDC et modèle de simulation, rapport de timing du cœur.

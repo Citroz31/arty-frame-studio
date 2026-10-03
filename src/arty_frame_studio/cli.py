@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
+from typing import Any
 
 from .bitstream import read_bitstream
+from .firmware_config import FirmwareBuildConfig
 from .model import FrameConfig, load_profile, save_profile
 from .prebuilt import validate_programming_image, verify_prebuilt_firmware
+from .remote_build import GitHubBuildClient, RemoteBuildTarget
 from .simulation import export_csv, export_vcd, simulate, waveform_svg
 from .toolchain import Toolchain, ToolchainConfig
-from .transport import DemoDevice, SerialDevice, TransportError, list_ports
+from .transport import DemoDevice, SerialDevice, TransportError, list_ports, run_led_test
 from .windows_jtag import list_ftdi_devices, probe_arty, program_arty
 
 
@@ -48,6 +52,37 @@ def _parser() -> argparse.ArgumentParser:
                 type=Path,
                 help="Fichier .bit existant pour xc7a100tcsg324 ; SRAM, backend expérimental",
             )
+    for name in ("info", "led-test"):
+        item = commands.add_parser(
+            name,
+            help="Lire l'identité du firmware"
+            if name == "info"
+            else "Faire défiler un motif sur LD4-LD7 pour tester la liaison",
+        )
+        item.add_argument("--port", required=True, help="COM7, /dev/ttyUSB1, etc.")
+    settings = commands.add_parser(
+        "firmware-config", help="Créer ou vérifier une configuration de firmware personnalisé"
+    )
+    settings.add_argument("--input", type=Path, help="Configuration JSON à compléter/vérifier")
+    settings.add_argument("--core-mhz", type=float, help="Horloge du cœur, ex. 150")
+    for pin in ("data", "clock", "latch"):
+        settings.add_argument(f"--{pin}", help=f"Broche {pin.upper()} : JA1..JD10")
+    settings.add_argument("--drive", type=int, choices=(4, 8, 12, 16))
+    settings.add_argument("--slew", choices=("SLOW", "FAST"))
+    settings.add_argument("--output", type=Path, help="Fichier JSON à écrire")
+    settings.add_argument("--xdc", type=Path, help="Écrire aussi les contraintes générées")
+    remote = commands.add_parser(
+        "remote-build", help="Compiler un firmware sur GitHub Actions et le télécharger"
+    )
+    remote.add_argument("--firmware-config", type=Path, help="Défaut : firmware de référence")
+    remote.add_argument("--repository", default=RemoteBuildTarget().repository)
+    remote.add_argument("--ref", default="main", help="Branche contenant firmware.yml")
+    remote.add_argument("--output-dir", type=Path, default=Path("builds"))
+    remote.add_argument(
+        "--token-env",
+        default="ARTY_GITHUB_TOKEN",
+        help="Variable d'environnement contenant le jeton (Actions : lecture/écriture)",
+    )
     profile = commands.add_parser("profile", help="Créer un profil JSON d’exemple")
     profile.add_argument("path", type=Path)
     simulation = commands.add_parser("simulate", help="Exporter le chronogramme idéal")
@@ -69,7 +104,26 @@ def _parser() -> argparse.ArgumentParser:
         item.add_argument("--project-root", type=Path, default=Path.cwd())
         if name == "program":
             item.add_argument("--bitstream", type=Path)
+        if name == "build":
+            item.add_argument(
+                "--firmware-config", type=Path, help="Horloge et broches ; défaut : référence"
+            )
     return parser
+
+
+def _firmware_settings(args: argparse.Namespace) -> FirmwareBuildConfig:
+    firmware = FirmwareBuildConfig.load(args.input) if args.input else FirmwareBuildConfig()
+    changes: dict[str, Any] = {}
+    if args.core_mhz is not None:
+        changes["core_hz"] = round(args.core_mhz * 1e6)
+    for option, field in (("data", "data_pin"), ("clock", "clock_pin"), ("latch", "latch_pin")):
+        if getattr(args, option):
+            changes[field] = getattr(args, option).upper()
+    if args.drive is not None:
+        changes["drive_ma"] = args.drive
+    if args.slew is not None:
+        changes["slew"] = args.slew
+    return replace(firmware, **changes)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -140,6 +194,46 @@ def main(argv: list[str] | None = None) -> int:
                 "Configuration SRAM terminée. Vérifiez le firmware UART avec "
                 "diagnose --port COM7 avant d'envoyer une trame."
             )
+        elif args.command in ("info", "led-test"):
+            board = SerialDevice(args.port)
+            board.connect()
+            try:
+                identity = board.identify()
+                print(json.dumps(asdict(identity), ensure_ascii=False))
+                if args.command == "led-test":
+                    print("Observer LD4 à LD7 : chenillard, toutes allumées, puis état normal.")
+                    led_result = run_led_test(board)
+                    print(
+                        f"Test LED : {led_result.commands} commandes confirmées, aller-retour "
+                        f"moyen {led_result.mean_ms:.1f} ms, maximum {led_result.max_ms:.1f} ms."
+                    )
+            finally:
+                board.close()
+        elif args.command == "firmware-config":
+            firmware = _firmware_settings(args)
+            print(f"Configuration : {firmware.summary()}")
+            for note in firmware.warnings():
+                print(f"Attention : {note}")
+            if args.output:
+                firmware.save(args.output)
+                print(f"Configuration enregistrée : {args.output}")
+            if args.xdc:
+                args.xdc.write_text(firmware.xdc(), encoding="utf-8")
+                print(f"Contraintes générées : {args.xdc}")
+        elif args.command == "remote-build":
+            firmware = (
+                FirmwareBuildConfig.load(args.firmware_config)
+                if args.firmware_config
+                else FirmwareBuildConfig()
+            )
+            token = os.environ.get(args.token_env, "")
+            if not token:
+                raise ValueError(
+                    f"Définir {args.token_env} avec un jeton GitHub (Actions : lecture/écriture)."
+                )
+            client = GitHubBuildClient(RemoteBuildTarget(args.repository, args.ref), token)
+            remote_result = client.build(firmware, args.output_dir, progress=print)
+            print(f"Firmware téléchargé et vérifié : {remote_result.bitstream}")
         elif args.command == "profile":
             save_profile(FrameConfig(), args.path)
             print(f"Profil créé : {args.path.resolve()}")
@@ -162,6 +256,8 @@ def main(argv: list[str] | None = None) -> int:
             device.connect()
             try:
                 if args.command == "send":
+                    # SEND refuse une trame calculée pour une autre horloge de cœur.
+                    device.identify()
                     status = device.send(load_profile(args.profile))
                     print(json.dumps(asdict(status), ensure_ascii=False))
                     if args.wait:
@@ -186,7 +282,13 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"{'OK' if result.ok else 'ABSENT'}\t{result.name}\t{result.detail}")
                 return 0 if all(result.ok for result in results) else 1
             if args.command == "build":
-                print(f"Bitstream : {chain.build(log=print)}")
+                firmware = (
+                    FirmwareBuildConfig.load(args.firmware_config)
+                    if args.firmware_config
+                    else FirmwareBuildConfig()
+                )
+                print(f"Configuration : {firmware.summary()}")
+                print(f"Bitstream : {chain.build(log=print, firmware=firmware)}")
             else:
                 chain.program(args.bitstream or chain.bitstream, log=print)
                 print("FPGA configuré en SRAM. Les commandes passent maintenant par USB/UART.")

@@ -1,6 +1,11 @@
 `timescale 1ns/1ps
 module frame_controller #(
-    parameter integer PACKET_TIMEOUT_CYCLES=40000000
+    parameter integer PACKET_TIMEOUT_CYCLES=40000000,
+    // INFO pages 0-5: revision, CORE_HZ low/high, capabilities, BUILD_ID low/high.
+    parameter [15:0] FIRMWARE_REVISION=16'd2,
+    parameter [31:0] CORE_HZ=32'd200000000,
+    parameter [15:0] CAPABILITIES=16'h0003,
+    parameter [31:0] BUILD_ID=32'h0
 ) (
     input wire clk, reset,
     input wire [7:0] rx_data,
@@ -11,7 +16,10 @@ module frame_controller #(
     output wire busy,
     output wire [15:0] completed,
     output wire data_rise, data_fall, clock_rise, clock_fall,
-    output wire latch_rise, latch_fall
+    output wire latch_rise, latch_fall,
+    // One-cycle LED command, at reply acceptance: {manual, pattern[3:0]}.
+    output wire led_write,
+    output wire [4:0] led_value
 );
     wire request_valid;
     wire [7:0] op, seq, length, parser_status;
@@ -28,11 +36,13 @@ module frame_controller #(
     // driving the engine. No payload-dependent validation lies on START's
     // high-fanout path to the 200 MHz engine registers.
     reg captured_valid, captured_empty, captured_send_shape;
+    reg captured_led_shape, captured_info_shape;
     reg [7:0] captured_op, captured_seq, captured_parser_status;
     reg [111:0] captured_payload;
     reg [4:0] captured_shift_amount;
     reg [31:0] captured_word_overflow;
-    reg validated_valid, send_eligible, stop_eligible;
+    reg validated_valid, send_eligible, stop_eligible, led_eligible;
+    reg [15:0] validated_info;
     reg [7:0] validated_op, validated_seq, validated_status;
     reg [111:0] validated_payload;
     reg [25:0] validated_aligned_word;
@@ -55,16 +65,34 @@ module frame_controller #(
                 1, 3, 4: if (!captured_empty) next_static_status = 2;
                 2: if (!captured_send_shape || |captured_word_overflow)
                        next_static_status = 2;
+                5: if (!captured_led_shape) next_static_status = 2;
+                6: if (!captured_info_shape) next_static_status = 2;
                 default: next_static_status = 1;
             endcase
         end
     end
+
+    function [15:0] info_word;
+        input [2:0] page;
+        begin
+            case (page)
+                0: info_word = FIRMWARE_REVISION;
+                1: info_word = CORE_HZ[15:0];
+                2: info_word = CORE_HZ[31:16];
+                3: info_word = CAPABILITIES;
+                4: info_word = BUILD_ID[15:0];
+                default: info_word = BUILD_ID[31:16];
+            endcase
+        end
+    endfunction
 
     always @(posedge clk) begin
         if (reset) begin
             captured_valid <= 0;
             captured_empty <= 0;
             captured_send_shape <= 0;
+            captured_led_shape <= 0;
+            captured_info_shape <= 0;
             captured_op <= 0;
             captured_seq <= 0;
             captured_parser_status <= 0;
@@ -74,6 +102,8 @@ module frame_controller #(
             validated_valid <= 0;
             send_eligible <= 0;
             stop_eligible <= 0;
+            led_eligible <= 0;
+            validated_info <= 0;
             validated_op <= 0;
             validated_seq <= 0;
             validated_status <= 0;
@@ -88,6 +118,9 @@ module frame_controller #(
                 && payload[39:32] >= 1 && payload[39:32] <= 26
                 && payload[55:40] != 0 && payload[71:56] != 0
                 && payload[103:88] != 0 && payload[111:104] <= 3;
+            // LED: {manual, 3'b0, pattern[3:0]}. INFO: one page byte, 0 to 5.
+            captured_led_shape <= length == 1 && payload[6:4] == 0;
+            captured_info_shape <= length == 1 && payload[7:0] <= 5;
             captured_op <= op;
             captured_seq <= seq;
             captured_parser_status <= parser_status;
@@ -103,6 +136,9 @@ module frame_controller #(
                 && !(|captured_word_overflow);
             stop_eligible <= captured_valid && captured_parser_status == 0
                 && captured_op == 3 && captured_empty;
+            led_eligible <= captured_valid && captured_parser_status == 0
+                && captured_op == 5 && captured_led_shape;
+            validated_info <= info_word(captured_payload[2:0]);
             validated_op <= captured_op;
             validated_seq <= captured_seq;
             validated_status <= next_static_status;
@@ -142,6 +178,8 @@ module frame_controller #(
 
     wire start = send_eligible && reply_capacity && !busy;
     wire stop = stop_eligible && reply_capacity;
+    assign led_write = led_eligible && reply_capacity;
+    assign led_value = {validated_payload[7], validated_payload[3:0]};
 
     always @* begin
         status = validated_status;
@@ -150,6 +188,8 @@ module frame_controller #(
         // BUSY and completion are sampled at actual acceptance, rather than
         // when the request entered the validation pipeline.
         if (send_eligible && busy) status = 3;
+        // INFO returns its page word in the 16-bit field of the common reply.
+        if (validated_op == 6 && validated_status == 0) reply_completed = validated_info;
         if (start) begin
             reply_busy = 1;
             reply_completed = 0;

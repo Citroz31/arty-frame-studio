@@ -222,3 +222,38 @@ def test_exports_describe_the_same_trace_and_svg_is_valid(tmp_path: Path) -> Non
     assert "DATA" in svg and "LATCH" in svg
     with pytest.raises(ValueError):
         waveform_svg(waveform, width=100)
+
+
+def test_core_clock_sets_frequency_ticks_and_waveform_time() -> None:
+    from arty_frame_studio.simulation import simulate
+
+    config = FrameConfig(
+        word=1, bit_count=1, divider=1, latch_ticks=3, gap_ticks=0, core_hz=150_000_000
+    )
+    assert config.frequency_hz == 150e6
+    assert config.tick_ns == pytest.approx(1e9 / 300e6)
+    assert config.frame_duration_ns == pytest.approx(6 * 1e9 / 300e6)
+    waveform = simulate(config)
+    assert waveform.duration_ns == pytest.approx(config.frame_duration_ns)
+    assert waveform.transitions[1].time_ns == pytest.approx(1e9 / 300e6)
+    assert divider_for_frequency(80e6, core_hz=150_000_000) == 2
+    assert divider_for_frequency(150e6, core_hz=150_000_000) == 1
+    assert ticks_for_ns(10, core_hz=150_000_000) == 3
+    with pytest.raises(ValueError, match="150 MHz"):
+        divider_for_frequency(160e6, core_hz=150_000_000)
+    with pytest.raises(ValueError, match="cœur"):
+        FrameConfig(core_hz=250_000_000)
+
+
+def test_version_one_profiles_load_as_reference_firmware(tmp_path: Path) -> None:
+    profile = Path(__file__).resolve().parents[1] / "examples/frame_26bits.json"
+    assert load_profile(profile).core_hz == 200_000_000
+    path = tmp_path / "custom.json"
+    save_profile(FrameConfig(core_hz=100_000_000), path)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["schema_version"] == 2 and saved["frame"]["core_hz"] == 100_000_000
+    assert load_profile(path).core_hz == 100_000_000
+    del saved["frame"]["core_hz"]
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    with pytest.raises(ValueError, match="champs"):
+        load_profile(path)

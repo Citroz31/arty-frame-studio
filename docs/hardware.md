@@ -22,10 +22,44 @@ des signaux CLK/DATA/LATCH.
 | Horloge série | `frame_clk` | E16 | JB broche 2 |
 | Latch enable | `latch_enable` | D15 | JB broche 3 |
 | Masse | — | — | JB broche 5 ou 11 |
-| LED verrouillage horloge | `led[0]` | H5 | Première LED monochrome |
-| LED émission en cours | `led[1]` | J5 | Deuxième LED monochrome |
-| LED réservée | `led[2]` | T9 | Troisième LED monochrome |
-| LED trame terminée | `led[3]` | T10 | Quatrième LED monochrome |
+| LED verrouillage horloge | `led[0]` | H5 | LD4, première LED verte |
+| LED émission en cours | `led[1]` | J5 | LD5 |
+| LED réservée | `led[2]` | T9 | LD6 |
+| LED trame terminée | `led[3]` | T10 | LD7 |
+
+Ce brochage est celui du firmware de référence. Le **test LED** de
+l'application remplace pendant 3 secondes cet affichage par un chenillard
+sur LD4 à LD7 : si les LED défilent, le bon firmware tourne sur cette carte et
+la liaison UART fonctionne dans les deux sens. Voir [le protocole](protocol.md).
+
+## Firmware personnalisé : horloge et broches
+
+L'onglet **FPGA → Firmware personnalisé** (ou `arty-frame firmware-config`)
+choisit l'horloge du cœur et les broches DATA, CLK et LATCH parmi les 32
+broches de signal des Pmod JA, JB, JC et JD, avec le courant (4 à 16 mA) et la
+vitesse des fronts. Un nouveau `.bit` est compilé, localement ou sur GitHub
+Actions ([chaîne FPGA](toolchain.md)) ; la carte annonce ensuite son horloge
+et son identifiant par INFO.
+
+| Pmod | Broches 1-4 | Broches 7-10 | Particularité |
+| --- | --- | --- | --- |
+| JA | G13, B11, A11, D12 | D13, B18, A18, K16 | 200 Ω en série |
+| JB | E15, E16, D15, C15 | J17, J18, K15, J15 | paires L11, L12, L23, L24 |
+| JC | U12, V12, V10, V11 | U14, V14, T13, U13 | paires L20, L21, L22, L23 |
+| JD | D4, D3, F4, F3 | E2, D2, H2, G2 | 200 Ω en série |
+
+L'horloge du cœur vaut 100 MHz × M / O (VCO de 800 à 1600 MHz), parmi 32
+valeurs entières de 50 à 200 MHz : par exemple 200, 187,5, 180, 175, 160, 150,
+125 ou 100 MHz. CLK vaut cette horloge divisée par N ; le pas des durées vaut
+un demi-cycle du cœur. Un cœur à 150 MHz permet ainsi une CLK de 150 MHz,
+impossible avec 200 MHz / N. Au-delà de 200 MHz, aucune marge de timing n'est
+démontrée ; ces valeurs ne sont pas proposées.
+
+L'application signale les choix électriquement risqués sans les interdire :
+JA/JD et leurs résistances série, DATA et CLK sur la même paire de JB/JC,
+sorties réparties sur plusieurs connecteurs, fronts lents, 4 mA. Un brochage
+conseillé pour les fronts rapides : **CLK sur JB1, DATA sur JB3, LATCH sur
+JB7**, chaque signal sur sa propre paire, masses JB5 et JB11 câblées.
 
 Les numéros JB1/2/3 ci-dessus sont les positions physiques du connecteur.
 Dans le fichier XDC Digilent, ces signaux sont nommés `jb[0]`, `jb[1]`,

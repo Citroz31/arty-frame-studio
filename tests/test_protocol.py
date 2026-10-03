@@ -128,3 +128,29 @@ def test_encoder_requires_exact_command_configuration():
         encode_request(Opcode.PING, 0, FrameConfig())
     with pytest.raises(ProtocolError):
         encode_request(99, 0)
+
+
+def test_led_and_info_requests_carry_one_argument_byte():
+    from arty_frame_studio.protocol import PacketDecoder, ProtocolError, led_argument
+
+    led = PacketDecoder().feed(encode_request(Opcode.LED, 3, argument=led_argument(0b1010)))[0]
+    assert led.opcode == 5 and led.payload == b"\x8a"
+    assert PacketDecoder().feed(encode_request(Opcode.LED, 4, argument=0))[0].payload == b"\x00"
+    info = PacketDecoder().feed(encode_request(Opcode.INFO, 5, argument=5))[0]
+    assert info.opcode == 6 and info.payload == b"\x05"
+    for opcode, argument in ((Opcode.LED, 0x10), (Opcode.INFO, 6), (Opcode.INFO, None)):
+        with pytest.raises(ProtocolError):
+            encode_request(opcode, 1, argument=argument)
+    with pytest.raises(ProtocolError):
+        encode_request(Opcode.PING, 1, argument=0)
+    with pytest.raises(ProtocolError):
+        led_argument(16)
+
+
+def test_info_pages_assemble_core_clock_and_build_identity():
+    from arty_frame_studio.protocol import info_from_pages
+
+    info = info_from_pages([2, 0xC200, 0x0BEB, 3, 0, 0])
+    assert info.core_hz == 200_000_000 and info.build_id == 0 and info.led_test
+    with pytest.raises(ValueError):
+        info_from_pages([2, 0, 0])

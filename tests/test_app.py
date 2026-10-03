@@ -364,3 +364,168 @@ def test_canvas_geometry_preserves_active_low_latch_polarity():
     assert len(levels) == 2
     for (_, normal_y), (_, inverted_y) in zip(normal, inverted, strict=True):
         assert normal_y + inverted_y == pytest.approx(sum(levels))
+
+
+def test_led_test_walks_virtual_and_board_leds_in_demo(tmp_path):
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.led_step = 0
+        assert studio.led_test_button.disabled
+        await studio._toggle_connection()
+        assert studio.firmware_info.led_test
+        assert "révision 2" in studio.firmware_status.value
+        assert not studio.led_test_button.disabled
+        seen = []
+        original = studio._show_leds
+
+        def record(pattern):
+            seen.append(pattern)
+            original(pattern)
+
+        studio._show_leds = record
+        await studio._led_test(None)
+        assert seen[:4] == [0b0001, 0b0010, 0b0100, 0b1000] and seen[-1] is None
+        assert studio.device.led_pattern is None
+        assert all(lamp.bgcolor == app.LED_OFF for lamp in studio.led_lamps)
+        assert any("Test LED terminé" in line for line in studio.log_lines)
+        assert not studio.page.messages
+
+    run_async(exercise())
+
+
+def test_legacy_firmware_keeps_led_test_disabled(tmp_path, monkeypatch):
+    from arty_frame_studio.transport import LEGACY_FIRMWARE
+
+    class LegacyDevice(DemoDevice):
+        def identify(self):
+            return LEGACY_FIRMWARE
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        monkeypatch.setattr(app, "DemoDevice", lambda core_hz: LegacyDevice(core_hz=core_hz))
+        await studio._toggle_connection()
+        assert studio.led_test_button.disabled
+        assert "sans test LED" in studio.firmware_status.value
+
+    run_async(exercise())
+
+
+def test_connected_firmware_clock_requantizes_the_frame(tmp_path):
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.frequency.value = "50"
+        studio._frequency_changed(None)
+        assert studio.current_config.divider == 4
+        # The demo then simulates a firmware built for a 150 MHz core.
+        studio.core_clock.value = "150000000"
+        studio._core_changed(None)
+        await studio._toggle_connection()
+        assert studio.core_clock.disabled
+        config = studio.current_config
+        assert config.core_hz == 150_000_000 and config.divider == 3
+        assert "150 MHz / 3" in studio.frequency_actual.value
+        await studio._send(None)
+        assert studio.last_sent.core_hz == 150_000_000
+        await studio._toggle_connection()
+        assert not studio.core_clock.disabled
+
+    run_async(exercise())
+
+
+def test_core_clock_choice_keeps_requested_frequency_and_durations(tmp_path):
+    studio = make_studio(tmp_path)
+    studio.core_clock.value = "100000000"
+    studio._core_changed(None)
+    config = studio.current_config
+    assert config.core_hz == 100_000_000
+    assert config.frequency_hz == 10e6 and config.divider == 10
+    assert config.latch_ticks == 4  # 20 ns on a 5 ns grid
+    assert "résolution 5 ns" in studio.wave_note.value
+
+
+def test_firmware_card_summarizes_warns_and_rejects_invalid_pins(tmp_path):
+    studio = make_studio(tmp_path)
+    assert "Firmware de référence" in studio.fw_summary.value
+    assert "L11" in studio.fw_warnings.value
+    studio.fw_pins["data_pin"].value = "JC3"
+    studio.fw_pins["clock_pin"].value = "JC1"
+    studio.fw_pins["latch_pin"].value = "JC7"
+    studio.fw_core.value = "150000000"
+    studio._firmware_changed()
+    assert "Firmware personnalisé" in studio.fw_summary.value
+    assert "CLK maximale 150 MHz" in studio.fw_summary.value
+    assert studio.fw_warnings.value == ""
+    studio.fw_pins["latch_pin"].value = "JC3"
+    studio._firmware_changed()
+    assert "invalide" in studio.fw_summary.value
+
+
+def test_firmware_configuration_save_and_load(tmp_path):
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.fw_drive.value = "12"
+        await studio._save_firmware(None)
+        studio.fw_drive.value = "4"
+        await studio._load_firmware(None)
+        assert studio._firmware_settings().drive_ma == 12
+        assert (tmp_path / "profiles" / "firmware.json").is_file()
+        assert not studio.page.messages
+
+    run_async(exercise())
+
+
+def test_local_and_remote_builds_receive_the_selected_firmware(tmp_path, monkeypatch):
+    from arty_frame_studio.firmware_config import FirmwareBuildConfig
+
+    builds = []
+
+    class Chain:
+        def build(self, log=None, firmware=None):
+            builds.append(firmware)
+            return tmp_path / "build" / "arty_frame.bit"
+
+    class Client:
+        def __init__(self, target, token):
+            assert (target.repository, target.ref, token) == ("me/fork", "main", "tok")
+
+        def build(self, firmware, directory, progress=None):
+            builds.append(firmware)
+            assert directory == tmp_path / "builds"
+            return SimpleNamespace(
+                bitstream=directory / "fw" / "arty_frame.bit", run_url="https://github.com/run"
+            )
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.fw_core.value = "100000000"
+        monkeypatch.setattr(studio, "_toolchain", lambda: Chain())
+        await studio._build(None)
+        studio.gh_repository.value = "me/fork"
+        studio.gh_token.value = "tok"
+        monkeypatch.setattr(app, "GitHubBuildClient", Client)
+        await studio._remote_build(None)
+        assert builds == [FirmwareBuildConfig(core_hz=100_000_000)] * 2
+        assert studio.windows_bitstream_path.value.endswith("arty_frame.bit")
+        assert "téléchargé et vérifié" in studio.tool_message.value
+        from arty_frame_studio.remote_build import GitHubBuildClient
+
+        monkeypatch.setattr(app, "GitHubBuildClient", GitHubBuildClient)
+        studio.gh_token.value = ""
+        await studio._remote_build(None)
+        assert "Jeton" in str(studio.page.messages[-1].content.value)
+
+    run_async(exercise())
+
+
+def test_connected_profile_for_another_core_is_converted(tmp_path):
+    async def exercise():
+        studio = make_studio(tmp_path)
+        await studio._toggle_connection()
+        studio._set_profile(FrameConfig(divider=3, latch_ticks=6, core_hz=150_000_000))
+        config = studio.current_config
+        assert config.core_hz == 200_000_000
+        assert config.divider == 4  # 50 MHz, never above the profile frequency
+        assert config.latch_ticks == 8  # 20 ns
+        assert any("converti" in line for line in studio.log_lines)
+
+    run_async(exercise())

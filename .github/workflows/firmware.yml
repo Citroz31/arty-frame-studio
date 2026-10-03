@@ -1,7 +1,29 @@
 name: Build Arty A7-100T firmware
+# A request_id names the run, so the desktop application can find the run it
+# dispatched and download its artifact.
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch' && inputs.request_id != ''
+      && format('Firmware build {0}', inputs.request_id)
+      || 'Build Arty A7-100T firmware' }}
 
 on:
   workflow_dispatch:
+    inputs:
+      firmware_config:
+        description: Configuration JSON (FirmwareBuildConfig); empty for the reference firmware
+        required: false
+        default: ''
+        type: string
+      request_id:
+        description: Request identifier used by Arty Frame Studio (lowercase hex)
+        required: false
+        default: ''
+        type: string
+      publish_prebuilt:
+        description: Commit the reference firmware into firmware/prebuilt on this branch
+        required: false
+        default: false
+        type: boolean
   push:
     branches: [main]
     paths:
@@ -9,6 +31,7 @@ on:
       - tests/rtl/**
       - scripts/bootstrap-fpga-tools.sh
       - src/arty_frame_studio/toolchain.py
+      - src/arty_frame_studio/firmware_config.py
       - src/arty_frame_studio/bitstream.py
       - .github/workflows/firmware.yml
 
@@ -20,7 +43,8 @@ defaults:
     shell: bash
 
 concurrency:
-  group: arty-firmware-${{ github.ref }}
+  # Application requests run independently; reference builds queue per branch.
+  group: arty-firmware-${{ github.ref }}-${{ inputs.request_id || 'reference' }}
   cancel-in-progress: false
 
 jobs:
@@ -30,6 +54,8 @@ jobs:
     timeout-minutes: 120
     env:
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
+    outputs:
+      artifact: ${{ steps.request.outputs.artifact }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -42,6 +68,24 @@ jobs:
       - name: Install application
         run: |
           python -m pip install -e .
+      - name: Validate the requested firmware configuration
+        id: request
+        # Inputs travel through the environment, never through the script text.
+        env:
+          FIRMWARE_CONFIG: ${{ inputs.firmware_config }}
+          REQUEST_ID: ${{ inputs.request_id }}
+        run: |
+          if [[ -n "$REQUEST_ID" && ! "$REQUEST_ID" =~ ^[0-9a-f]{8,32}$ ]]; then
+            echo "request_id must be 8-32 lowercase hexadecimal characters" >&2
+            exit 1
+          fi
+          if [[ -n "$FIRMWARE_CONFIG" ]]; then
+            printf '%s' "$FIRMWARE_CONFIG" > build/firmware-config.json
+          fi
+          python -m arty_frame_studio.cli firmware-config \
+            ${FIRMWARE_CONFIG:+--input build/firmware-config.json} \
+            --output build/firmware-config.json
+          echo "artifact=arty-a7-100t-firmware-${REQUEST_ID:-$GITHUB_SHA}" >> "$GITHUB_OUTPUT"
       - name: Download verified tools with their matching 100T chip database
         run: |
           bash scripts/bootstrap-fpga-tools.sh \
@@ -52,9 +96,10 @@ jobs:
           ARTY_APP_PYTHON=$(command -v python)
           export PATH="$RUNNER_TEMP/arty-fpga-tools/oss-cad-suite/bin:$PATH"
           "$ARTY_APP_PYTHON" firmware/sim/run_tests.py 2>&1 | tee build/rtl-tests.log
-      - name: Synthesize, route, require 200 MHz timing and write the bitstream
+      - name: Synthesize, route, require core-clock timing and write the bitstream
         run: |
           python -m arty_frame_studio.cli build --toolchain build/toolchain.ci.json \
+            --firmware-config build/firmware-config.json \
             2>&1 | tee build/firmware-build.log
       - name: Validate the resulting bitstream and record its provenance
         run: |
@@ -65,18 +110,23 @@ jobs:
           import pathlib
           import shutil
           from arty_frame_studio.bitstream import read_bitstream
+          from arty_frame_studio.firmware_config import FirmwareBuildConfig
 
           build = pathlib.Path("build")
           image = read_bitstream(build / "arty_frame.bit")
           receipt = json.loads((build / "successful-build.json").read_text())
+          firmware = FirmwareBuildConfig.from_dict(receipt["firmware_config"])
+          assert firmware == FirmwareBuildConfig.load(build / "firmware-config.json")
+          required = firmware.core_hz / 1e6
           assert receipt["part"] == "xc7a100tcsg324-1"
           assert receipt["timing_clock"] == "core_clock"
-          assert receipt["timing_requirement_mhz"] == 200
+          assert receipt["timing_requirement_mhz"] == required
           assert receipt["bitstream_sha256"] == image.sha256
+          assert receipt["build_id"] == firmware.build_id
           timing_path = pathlib.Path(receipt["run_dir"]) / "timing.json"
           core_timing = json.loads(timing_path.read_text())["fmax"]["core_clock"]
-          assert core_timing["constraint"] >= 200
-          assert core_timing["achieved"] >= 200
+          assert core_timing["constraint"] >= required - 0.005
+          assert core_timing["achieved"] >= required
           output = build / "firmware-artifact"
           output.mkdir()
           for name in ("arty_frame.bit", "successful-build.json", "build.log", "rtl-tests.log"):
@@ -91,8 +141,11 @@ jobs:
               "payload_bytes": len(image.payload),
               "tools": json.loads((build / "tool-versions.json").read_text()),
               "uart": {"baud": 115200, "data_bits": 8, "parity": "none", "stop_bits": 1},
+              "build_id": firmware.build_id,
+              "firmware_config": firmware.to_dict(),
+              "firmware_summary": firmware.summary(),
               "timing_scope": receipt["timing_scope"],
-              "timing_requirement_mhz": 200,
+              "timing_requirement_mhz": required,
               "routed_core_fmax_mhz": core_timing["achieved"],
               "hardware_validated": False,
               "source_sha256": {
@@ -105,18 +158,19 @@ jobs:
           (output / "SHA256SUMS.txt").write_text(f"{image.sha256}  arty_frame.bit\n")
           (output / "CHARGEMENT-WINDOWS.txt").write_text(
               "Arty A7-100T, xc7a100tcsg324-1. Chargement en SRAM uniquement.\n"
+              f"Configuration : {firmware.summary()}.\n"
               "Dans Arty Frame Studio : FPGA > Charger le .bit sous Windows > arty_frame.bit.\n"
               "Puis Pilotage > Carte USB/UART > COM7 > Connecter. UART 115200 8N1.\n"
-              "Verifier PING avant SEND. Recharger apres une coupure d'alimentation.\n"
+              "Verifier PING et le test LED avant SEND. Recharger apres une coupure.\n"
               "Compilation et simulations controlees ; aucun essai sur carte ici.\n"
-              "Le timing nextpnr ne certifie pas les GPIO/DDR et la liaison physique a 200 MHz.\n"
+              "Le timing nextpnr ne certifie pas les GPIO/DDR ni la liaison physique.\n"
           )
           PY
           cp build/tool-versions.json build/firmware-artifact/
       - name: Upload the firmware only after all build checks succeed
         uses: actions/upload-artifact@v4
         with:
-          name: arty-a7-100t-firmware-${{ github.sha }}
+          name: ${{ steps.request.outputs.artifact }}
           path: build/firmware-artifact/
           if-no-files-found: error
           retention-days: 30
@@ -131,7 +185,56 @@ jobs:
             build/toolchain.ci.json
             build/tool-versions.json
             build/successful-build.json
+            build/firmware-config.json
             build/runs/**/*.json
             build/runs/**/*.fasm
+            build/runs/**/*.xdc
           if-no-files-found: warn
           retention-days: 30
+
+  publish:
+    # Opt-in: replace firmware/prebuilt with the reference build of this exact
+    # commit, after the complete Python suite accepts the new bundle.
+    needs: bitstream
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.publish_prebuilt
+      && inputs.firmware_config == ''
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - name: Refuse a branch that moved since the build
+        run: |
+          if [[ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]]; then
+            echo "The branch moved after $GITHUB_SHA; dispatch the build again." >&2
+            exit 1
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.bitstream.outputs.artifact }}
+          path: build/firmware-artifact
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install the bundle and run the complete Python suite
+        run: |
+          cp build/firmware-artifact/* firmware/prebuilt/
+          python -m pip install -e '.[dev]'
+          python -m arty_frame_studio.cli firmware-check
+          # pipefail (default bash shell) stops here when any test fails.
+          python -m pytest -q 2>&1 | tail -n 8 > firmware/prebuilt/python-tests.log
+          cat firmware/prebuilt/python-tests.log
+      - name: Commit the regenerated prebuilt firmware
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add firmware/prebuilt
+          git commit -m "Publish reference firmware built from ${GITHUB_SHA::7}" \
+            -m "Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          git push origin "HEAD:${GITHUB_REF#refs/heads/}"

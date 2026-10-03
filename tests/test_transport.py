@@ -293,7 +293,7 @@ def test_status_is_repeated_once_but_stop_and_send_never_are():
     with pytest.raises(CommandTimeout):
         device.send(FrameConfig())
     assert [p.opcode for p in endpoint.requests] == [1, 4, 4, 3, 2]
-    with pytest.raises(ValueError, match="PING et STATUS"):
+    with pytest.raises(ValueError, match="PING, STATUS, LED et INFO"):
         device._exchange(Opcode.SEND, FrameConfig(), attempts=2)
 
 
@@ -382,3 +382,106 @@ def test_demo_gap_remains_busy_and_incomplete_until_end():
     assert demo.status().busy and demo.status().completed == 0
     clock.now = config.frame_duration_ns / 1e9 * 1.001
     assert not demo.status().busy and demo.status().completed == 1
+
+
+def info_handler(words, *, revision_known=True):
+    def handler(packet):
+        if packet.opcode == Opcode.INFO:
+            if not revision_known:
+                return response(packet, status=1)
+            return response(packet, completed=words[packet.payload[0]])
+        return response(packet)
+
+    return handler
+
+
+def test_identify_reads_six_info_pages_and_guards_send_core_clock():
+    words = [2, 150_000_000 & 0xFFFF, 150_000_000 >> 16, 3, 0x1E2D, 0xA5C3]
+    device, endpoint = make_serial(info_handler(words))
+    device.connect()
+    info = device.identify()
+    assert info.revision == 2 and info.core_hz == 150_000_000
+    assert info.build_id == 0xA5C31E2D and info.led_test
+    assert [p.payload for p in endpoint.requests if p.opcode == Opcode.INFO] == [
+        bytes((page,)) for page in range(6)
+    ]
+    with pytest.raises(ValueError, match="Recalculer"):
+        device.send(FrameConfig())
+    assert device.send(FrameConfig(core_hz=150_000_000)).ok
+    device.close()
+    assert device.firmware is None
+
+
+def test_legacy_firmware_is_identified_without_led_test():
+    device, endpoint = make_serial(info_handler([], revision_known=False))
+    device.connect()
+    info = device.identify()
+    assert info.revision == 1 and info.core_hz == 200_000_000 and not info.led_test
+    assert device.send(FrameConfig()).ok
+    assert len([p for p in endpoint.requests if p.opcode == Opcode.INFO]) == 1
+
+
+def test_led_command_encodes_manual_pattern_and_automatic_mode():
+    lost = {"count": 1}
+
+    def handler(packet):
+        if packet.opcode == Opcode.LED and lost["count"]:
+            lost["count"] -= 1
+            return b""
+        return response(packet)
+
+    device, endpoint = make_serial(handler)
+    device.connect()
+    assert device.led(0b0101).ok
+    assert device.led(None).ok
+    led = [p.payload for p in endpoint.requests if p.opcode == Opcode.LED]
+    # The first LED reply is lost: the same idempotent pattern is sent again.
+    assert led == [b"\x85", b"\x85", b"\x00"]
+    with pytest.raises(ValueError):
+        device.led(16)
+
+
+def test_demo_simulates_revision_two_firmware_and_virtual_leds():
+    demo = DemoDevice(core_hz=100_000_000)
+    demo.connect()
+    assert demo.identify().core_hz == 100_000_000
+    demo.led(0b1000)
+    assert demo.led_pattern == 0b1000
+    demo.led(None)
+    assert demo.led_pattern is None
+    with pytest.raises(ValueError, match="Recalculer"):
+        demo.send(FrameConfig())
+    assert demo.send(FrameConfig(core_hz=100_000_000)).busy
+
+
+def test_led_test_walks_the_pattern_and_always_restores_status():
+    from arty_frame_studio.transport import LED_TEST_SEQUENCE, run_led_test
+
+    demo = DemoDevice()
+    demo.connect()
+    seen = []
+    result = run_led_test(demo, sleep=lambda _: None, on_step=seen.append)
+    assert seen == [*LED_TEST_SEQUENCE, None]
+    assert result.commands == len(LED_TEST_SEQUENCE) and demo.led_pattern is None
+
+    class Failing(DemoDevice):
+        def led(self, pattern):
+            if pattern == 0b0100:
+                raise TransportError("lost")
+            return super().led(pattern)
+
+    broken = Failing()
+    broken.connect()
+    with pytest.raises(TransportError, match="lost"):
+        run_led_test(broken, sleep=lambda _: None)
+    assert broken.led_pattern is None
+
+
+def test_led_test_refuses_legacy_firmware_without_sending_led():
+    from arty_frame_studio.transport import run_led_test
+
+    device, endpoint = make_serial(info_handler([], revision_known=False))
+    device.connect()
+    with pytest.raises(TransportError, match="révision 1"):
+        run_led_test(device, sleep=lambda _: None)
+    assert not [p for p in endpoint.requests if p.opcode == Opcode.LED]

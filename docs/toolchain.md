@@ -129,6 +129,62 @@ programmation. Le flux natif utilise :
 .venv\Scripts\arty-frame.exe jtag-program --bitstream firmware\prebuilt\arty_frame.bit
 ```
 
+## Firmware personnalisé depuis l'interface
+
+L'onglet **FPGA → Firmware personnalisé** produit une configuration validée
+(`FirmwareBuildConfig`) : horloge du cœur, broches DATA/CLK/LATCH, courant et
+fronts. La configuration par défaut reproduit exactement le firmware de
+référence et le XDC du dépôt, qu'un test compare octet par octet.
+
+Pour une autre configuration, le build écrit un XDC généré dans son dossier
+`build/runs/<id>/`, passe `CORE_HZ`, `PLL_MULT`, `PLL_OUT_DIV` et `BUILD_ID`
+à `arty_top` par `chparam` de Yosys, demande `--freq` à l'horloge choisie et
+exige le timing à cette horloge. Les sources du dépôt ne sont pas modifiées.
+Le reçu `successful-build.json` mémorise la configuration ; `program`
+vérifie la même configuration. Une incohérence entre `CORE_HZ` et le PLL
+arrête l'élaboration du RTL.
+
+Deux façons de compiler :
+
+| Bouton | Où | Prérequis |
+| --- | --- | --- |
+| **Compiler localement** | ce PC | chaîne libre configurée (`toolchain.json`, Linux/WSL) |
+| **Compiler sur GitHub** | GitHub Actions, outils épinglés | jeton GitHub, dépôt avec ce workflow |
+
+La compilation GitHub déclenche `firmware.yml` avec la configuration en
+entrée, suit l'exécution, télécharge l'artefact dans `builds/` et vérifie le
+`.bit` (conteneur, IDCODE, SHA256 du manifeste, configuration identique,
+Fmax au moins égale à l'horloge). Le chemin est ensuite proposé à
+« Charger le .bit sous Windows ». Une exécution complète dure environ trois
+minutes. En ligne de commande :
+
+```bash
+arty-frame firmware-config --core-mhz 150 --clock JB1 --data JB3 --latch JB7 --output fw.json
+arty-frame build --toolchain toolchain.json --firmware-config fw.json     # local
+ARTY_GITHUB_TOKEN=… arty-frame remote-build --firmware-config fw.json      # GitHub
+```
+
+Le jeton est un **fine-grained personal access token** limité au dépôt, avec
+la permission **Actions : Read and write** (GitHub → Settings → Developer
+settings → Personal access tokens). L'application le garde en mémoire, le lit
+éventuellement dans `ARTY_GITHUB_TOKEN`, et ne l'envoie qu'à `api.github.com`.
+Pour un fork, activer Actions sur le fork et y indiquer son dépôt.
+
+Le workflow reçoit la configuration par variable d'environnement, jamais
+interpolée dans un script, et la valide avec le même code Python. Chaque
+demande porte un identifiant qui nomme l'exécution et son artefact.
+
+### Publier le firmware de référence
+
+`firmware/prebuilt/` doit correspondre exactement aux sources RTL et XDC :
+les tests le vérifient. Après une modification du RTL, lancer le workflow à
+la main sur la branche avec **publish_prebuilt** coché (configuration vide).
+Après le build, un second job remplace `firmware/prebuilt/`, exécute toute la
+suite Python sur ce nouveau contenu, puis le committe sur la branche. Il
+refuse de publier si la branche a avancé pendant le build. Ce commit est fait
+avec le jeton du workflow : relancer ensuite les vérifications Python/RTL
+sur la branche.
+
 ## Adaptations des primitives et du mapping
 
 Le PLL utilise **`PLLE2_ADV`**, dont le paramètre
@@ -155,7 +211,8 @@ distribuées insuffisamment couvertes par ce flux.
 Le XDC impose **10 ns sur clk100 et 5 ns sur core_clock** ; nextpnr reçoit
 également `--freq 200`. Le build exige le rapport final après routage
 `Max frequency for clock 'core_clock': … (PASS at 200.00 MHz)`, avec Fmax
-au moins 200 MHz et une contrainte au moins aussi stricte. Un rapport de
+au moins 200 MHz et une contrainte au moins aussi stricte. Un firmware
+personnalisé applique la même règle à son horloge de cœur. Un rapport de
 placement provisoire n'est pas une preuve de fermeture du timing.
 `--timing-allow-fail` est interdit. Un rapport final absent ou en échec
 bloque la conversion en bitstream.

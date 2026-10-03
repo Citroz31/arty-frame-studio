@@ -18,7 +18,15 @@ import flet as ft  # type: ignore[import-untyped]
 import flet.canvas as cv  # type: ignore[import-untyped]
 
 from .bitstream import read_bitstream
+from .firmware_config import (
+    DRIVES_MA,
+    PMOD_PINS,
+    SLEWS,
+    FirmwareBuildConfig,
+    pll_settings,
+)
 from .model import (
+    REFERENCE_HZ,
     FrameConfig,
     divider_for_frequency,
     load_profile,
@@ -27,10 +35,11 @@ from .model import (
     ticks_for_ns,
 )
 from .prebuilt import validate_programming_image
-from .protocol import DeviceStatus
+from .protocol import DeviceStatus, FirmwareInfo
+from .remote_build import GitHubBuildClient, RemoteBuildTarget
 from .simulation import Waveform, export_csv, export_vcd, simulate, waveform_svg
 from .toolchain import Toolchain, ToolchainConfig
-from .transport import CommandTimeout, DemoDevice, SerialDevice, list_ports
+from .transport import CommandTimeout, DemoDevice, SerialDevice, list_ports, run_led_test
 from .windows_jtag import probe_arty, program_arty
 
 BG = "#0C1423"
@@ -44,15 +53,38 @@ GREEN = "#79CFB0"
 RED = "#FF8E91"
 CHART_HEIGHT = 332
 SIGNALS = (("DATA", "data", "#2563EB"), ("CLK", "clk", "#B45309"), ("LATCH", "latch", "#9333EA"))
+LED_ON = "#4ADE80"
+LED_OFF = "#1E2B3F"
 
 
-def ticks_from_ns(value: str, *, allow_zero: bool = False) -> int:
-    """Round a finite nonnegative duration to the hardware's 2.5 ns grid."""
+def ticks_from_ns(value: str, *, allow_zero: bool = False, core_hz: int = REFERENCE_HZ) -> int:
+    """Round a finite nonnegative duration to the firmware's half-core-cycle grid."""
     try:
         ns = float(value.strip().replace(",", "."))
     except ValueError as exc:
         raise ValueError("La durée doit être un nombre en nanosecondes.") from exc
-    return ticks_for_ns(ns, allow_zero=allow_zero)
+    return ticks_for_ns(ns, allow_zero=allow_zero, core_hz=core_hz)
+
+
+def core_clock_options() -> list[Any]:
+    return [
+        ft.dropdown.Option(
+            str(setting.core_hz),
+            f"{setting.core_hz / 1e6:g} MHz · pas {setting.tick_ns:.4g} ns",
+        )
+        for setting in pll_settings()
+    ]
+
+
+def pin_options() -> list[Any]:
+    return [
+        ft.dropdown.Option(
+            name,
+            f"{name} · {pin.package_pin}"
+            + (" · 200 Ω" if not pin.high_speed else f" · paire {pin.pair}"),
+        )
+        for name, pin in PMOD_PINS.items()
+    ]
 
 
 def format_duration(ns: float) -> str:
@@ -203,6 +235,11 @@ class Studio:
         self.waveform: Waveform | None = None
         self.last_sent: FrameConfig | None = None
         self.command_uncertain = False
+        # Horloge du firmware visé : lue par INFO une fois connecté, choisie
+        # dans l'interface pour la démo et la simulation.
+        self.core_hz = REFERENCE_HZ
+        self.firmware_info: FirmwareInfo | None = None
+        self.led_step = 0.25
         self.previous_base = "hex"
         self.loop: asyncio.AbstractEventLoop | None = None
         self.worker_messages: list[str] = []
@@ -271,6 +308,17 @@ class Studio:
         )
         self.connection_status = ft.Text("Déconnecté", color=MUTED)
         self.hardware_status = ft.Text("Aucune émission", size=12, color=MUTED)
+        self.firmware_status = ft.Text("Firmware non identifié", size=12, color=MUTED)
+        self.led_test_button = ft.OutlinedButton(
+            "Tester les LED",
+            icon=ft.Icons.LIGHTBULB_OUTLINE,
+            tooltip="Chenillard sur LD4-LD7 : chaque motif est une commande confirmée",
+            on_click=self._led_test,
+            disabled=True,
+        )
+        self.led_lamps = [
+            ft.Container(width=16, height=16, border_radius=8, bgcolor=LED_OFF) for _ in range(4)
+        ]
         self.word = self._field("Valeur de la trame", "2AAAAAA", width=340)
         self.word.text_style = ft.TextStyle(font_family="monospace", color=TEXT)
         self.base = ft.Dropdown(
@@ -285,12 +333,19 @@ class Studio:
             on_change=self._base_changed,
         )
         self.bit_count = self._field("Nombre de bits", "26", width=145, helper="1 à 26 bits")
+        self.core_clock = ft.Dropdown(
+            label="Horloge du cœur FPGA",
+            value=str(REFERENCE_HZ),
+            width=230,
+            options=core_clock_options(),
+            on_change=self._core_changed,
+        )
         self.frequency = self._field(
             "Fréquence demandée (MHz)",
             "10",
             width=215,
             on_change=self._frequency_changed,
-            helper="200 / N MHz",
+            helper="Cœur / N",
         )
         self.divider = self._field(
             "Diviseur N",
@@ -370,7 +425,7 @@ class Studio:
             on_click=self._doctor,
         )
         self.build_button = ft.ElevatedButton(
-            "Compiler le FPGA",
+            "Compiler localement",
             icon=ft.Icons.BUILD,
             on_click=self._build,
         )
@@ -379,6 +434,71 @@ class Studio:
             icon=ft.Icons.MEMORY,
             on_click=self._program,
             style=ft.ButtonStyle(bgcolor=AMBER, color=BG),
+        )
+        reference = FirmwareBuildConfig()
+        self.fw_core = ft.Dropdown(
+            label="Horloge du cœur",
+            value=str(reference.core_hz),
+            width=230,
+            options=core_clock_options(),
+            on_change=self._firmware_changed,
+        )
+        self.fw_pins = {
+            field: ft.Dropdown(
+                label=label,
+                value=getattr(reference, field),
+                width=200,
+                options=pin_options(),
+                on_change=self._firmware_changed,
+            )
+            for field, label in (
+                ("data_pin", "Broche DATA"),
+                ("clock_pin", "Broche CLK"),
+                ("latch_pin", "Broche LATCH"),
+            )
+        }
+        self.fw_drive = ft.Dropdown(
+            label="Courant",
+            value=str(reference.drive_ma),
+            width=120,
+            options=[ft.dropdown.Option(str(value), f"{value} mA") for value in DRIVES_MA],
+            on_change=self._firmware_changed,
+        )
+        self.fw_slew = ft.Dropdown(
+            label="Fronts",
+            value=reference.slew,
+            width=120,
+            options=[ft.dropdown.Option(value) for value in SLEWS],
+            on_change=self._firmware_changed,
+        )
+        self.fw_summary = ft.Text(size=12, color=BLUE, selectable=True)
+        self.fw_warnings = ft.Text(size=12, color=AMBER, selectable=True)
+        self.fw_config_path = self._field(
+            "Configuration firmware (JSON)",
+            str(self.project_root / "profiles" / "firmware.json"),
+            width=650,
+            on_change=lambda _: None,
+        )
+        self.gh_repository = self._field(
+            "Dépôt GitHub", RemoteBuildTarget().repository, width=300, on_change=lambda _: None
+        )
+        self.gh_ref = self._field("Branche", "main", width=160, on_change=lambda _: None)
+        self.gh_token = ft.TextField(
+            label="Jeton GitHub (Actions : lecture et écriture)",
+            value=os.environ.get("ARTY_GITHUB_TOKEN", ""),
+            password=True,
+            can_reveal_password=True,
+            width=420,
+            dense=True,
+            border_color=LINE,
+            focused_border_color=AMBER,
+            text_style=ft.TextStyle(color=TEXT),
+            helper_text="Conservé en mémoire seulement ; envoyé uniquement à api.github.com.",
+        )
+        self.remote_build_button = ft.ElevatedButton(
+            "Compiler sur GitHub",
+            icon=ft.Icons.CLOUD_UPLOAD,
+            on_click=self._remote_build,
         )
         self.ftdi_dll_path = self._field(
             "DLL FTDI D2XX (facultatif)",
@@ -423,6 +543,7 @@ class Studio:
             on_change=lambda _: None,
         )
         self.log_lines: list[str] = []
+        self._refresh_firmware_summary()
 
     def layout(self) -> ft.Control:
         connection = self._card(
@@ -432,9 +553,22 @@ class Studio:
             ),
             ft.Row([self.mode, self.port, self.refresh_button, self.connect_button], wrap=True),
             ft.Row([self.connection_status, self.hardware_status], wrap=True, spacing=24),
+            self.firmware_status,
+            ft.Row(
+                [
+                    self.led_test_button,
+                    ft.Text("LD4-LD7", size=12, color=MUTED),
+                    *self.led_lamps,
+                ],
+                wrap=True,
+                spacing=10,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
             ft.Text(
                 "Mode carte : chargez d'abord le bitstream UART du projet par JTAG. "
-                "La détection d'un port COM ne confirme pas la présence du firmware.",
+                "La détection d'un port COM ne confirme pas la présence du firmware. "
+                "Le test LED fait défiler un motif sur les quatre LED vertes de la carte : "
+                "il confirme le chargement, la liaison UART et le firmware en un coup d'œil.",
                 size=12,
                 color=MUTED,
             ),
@@ -454,7 +588,7 @@ class Studio:
                 "Horloge et séquencement",
                 "CLK en rafales · repos bas · échantillonnage au front montant",
             ),
-            ft.Row([self.frequency, self.divider, self.repeat], wrap=True),
+            ft.Row([self.core_clock, self.frequency, self.divider, self.repeat], wrap=True),
             self.frequency_actual,
             ft.Row([self.latch_ns, self.gap_ns], wrap=True),
             self.timing_summary,
@@ -584,8 +718,41 @@ class Studio:
                         selectable=True,
                     ),
                     ft.Row([self.toolchain_path], wrap=True),
-                    ft.Row([self.doctor_button, self.build_button], wrap=True),
+                    ft.Row([self.doctor_button], wrap=True),
                     self.doctor_results,
+                ),
+                self._card(
+                    self._heading(
+                        "Firmware personnalisé",
+                        "Horloge du cœur et broches DATA / CLK / LATCH sur les Pmod JA-JD",
+                    ),
+                    ft.Row([self.fw_core, self.fw_drive, self.fw_slew], wrap=True),
+                    ft.Row(list(self.fw_pins.values()), wrap=True),
+                    self.fw_summary,
+                    self.fw_warnings,
+                    ft.Row([self.fw_config_path], wrap=True),
+                    ft.Row(
+                        [
+                            ft.OutlinedButton(
+                                "Charger", icon=ft.Icons.FOLDER_OPEN, on_click=self._load_firmware
+                            ),
+                            ft.OutlinedButton(
+                                "Enregistrer", icon=ft.Icons.SAVE, on_click=self._save_firmware
+                            ),
+                        ],
+                        wrap=True,
+                    ),
+                    ft.Text(
+                        "Compiler localement utilise la chaîne libre configurée ci-dessus "
+                        "(Linux/WSL). Sans chaîne locale, GitHub Actions compile ce firmware "
+                        "avec les outils épinglés du dépôt puis l'application télécharge et "
+                        "vérifie le .bit, prêt pour « Charger le .bit sous Windows ». "
+                        "Une nouvelle compilation est nécessaire pour changer de broches.",
+                        size=12,
+                        color=MUTED,
+                    ),
+                    ft.Row([self.gh_repository, self.gh_ref, self.gh_token], wrap=True),
+                    ft.Row([self.build_button, self.remote_build_button], wrap=True),
                 ),
                 self._card(
                     self._heading(
@@ -680,16 +847,17 @@ class Studio:
         # The divider is authoritative, while the requested frequency must also
         # remain valid after edits to another field.
         requested_hz = float((self.frequency.value or "").replace(",", ".")) * 1e6
-        divider_for_frequency(requested_hz)
+        divider_for_frequency(requested_hz, self.core_hz)
         return FrameConfig(
             word=parse_word(self.word.value or "", self.base.value or "hex", bits),
             bit_count=bits,
             divider=int(self.divider.value or ""),
-            latch_ticks=ticks_from_ns(self.latch_ns.value or ""),
-            gap_ticks=ticks_from_ns(self.gap_ns.value or "", allow_zero=True),
+            latch_ticks=ticks_from_ns(self.latch_ns.value or "", core_hz=self.core_hz),
+            gap_ticks=ticks_from_ns(self.gap_ns.value or "", allow_zero=True, core_hz=self.core_hz),
             repeat_count=int(self.repeat.value or ""),
             lsb_first=bool(self.lsb.value),
             latch_active_low=bool(self.latch_low.value),
+            core_hz=self.core_hz,
         )
 
     def _update(self) -> None:
@@ -715,7 +883,7 @@ class Studio:
             self.wave_canvas.visible = True
             self.frequency_actual.value = (
                 f"Fréquence réalisée : {config.frequency_hz / 1e6:.7g} MHz · "
-                f"200 MHz / {config.divider}"
+                f"{config.core_hz / 1e6:g} MHz / {config.divider}"
             )
             self.binary_preview.value = f"{config.word:0{config.bit_count}b}"
             emitted = (
@@ -725,13 +893,15 @@ class Studio:
                 f"Ordre sur DATA → {emitted} · {'LSB' if config.lsb_first else 'MSB'} en premier"
             )
             self.timing_summary.value = (
-                f"LATCH {config.latch_ticks * 2.5:g} ns · Pause {config.gap_ticks * 2.5:g} ns · "
+                f"LATCH {config.latch_ticks * config.tick_ns:.6g} ns · "
+                f"Pause {config.gap_ticks * config.tick_ns:.6g} ns · "
                 f"Période de trame {format_duration(config.frame_duration_ns)} · "
                 f"Durée totale {format_duration(config.total_duration_ns)}"
             )
             self.wave_note.value = (
                 f"{waveform.frames_simulated} trame(s) affichée(s) sur {config.repeat_count} · "
-                f"fenêtre {format_duration(waveform.duration_ns)} · résolution 2,5 ns"
+                f"fenêtre {format_duration(waveform.duration_ns)} · "
+                f"résolution {config.tick_ns:.4g} ns"
                 + (" · aperçu limité aux 4 premières trames" if waveform.truncated else "")
             )
             self.validation.value = ""
@@ -752,7 +922,7 @@ class Studio:
     def _frequency_changed(self, _: Any) -> None:
         try:
             hz = float((self.frequency.value or "").replace(",", ".")) * 1e6
-            self.divider.value = str(divider_for_frequency(hz))
+            self.divider.value = str(divider_for_frequency(hz, self.core_hz))
         except (ValueError, OverflowError) as exc:
             self.current_config = None
             self.waveform = None
@@ -769,10 +939,23 @@ class Studio:
         try:
             divider = int(self.divider.value or "")
             if divider > 0:
-                self.frequency.value = f"{200 / divider:.9g}"
+                self.frequency.value = f"{self.core_hz / 1e6 / divider:.9g}"
         except ValueError:
             pass
         self._changed()
+
+    def _core_changed(self, _: Any) -> None:
+        try:
+            self._apply_core(int(self.core_clock.value or REFERENCE_HZ))
+        except ValueError as exc:
+            self._error("Horloge du cœur", exc)
+
+    def _apply_core(self, core_hz: int) -> None:
+        """Change de base de temps en conservant la fréquence et les durées en ns."""
+        self.core_hz = core_hz
+        self.core_clock.value = str(core_hz)
+        self.divider.helper_text = f"{core_hz / 1e6:g} MHz / N · 1 à 65 535"
+        self._frequency_changed(None)
 
     def _base_changed(self, _: Any) -> None:
         try:
@@ -818,11 +1001,18 @@ class Studio:
             self.program_button,
             self.jtag_probe_button,
             self.jtag_program_button,
+            self.remote_build_button,
         ):
             control.disabled = self.tool_pending
         self.program_button.disabled = self.tool_pending or self.serial_pending
         self.jtag_probe_button.disabled = self.tool_pending or self.serial_pending
         self.jtag_program_button.disabled = self.tool_pending or self.serial_pending
+        led_capable = self.firmware_info is not None and self.firmware_info.led_test
+        self.led_test_button.disabled = (
+            not connected or not led_capable or self.serial_pending or self.tool_pending
+        )
+        # Une carte connectée impose l'horloge annoncée par son firmware.
+        self.core_clock.disabled = connected
 
     def _log(self, message: str, color: str = MUTED) -> None:
         for line in str(message).splitlines():
@@ -877,6 +1067,7 @@ class Studio:
                     self.device = None
                     self.device_status = None
                     self.last_sent = None
+                    self._firmware_identified(None)
                     self.connection_status.value = "Déconnecté"
                     self.connection_status.color = MUTED
                     self.hardware_status.value = "Aucune émission"
@@ -891,15 +1082,19 @@ class Studio:
                         device = SerialDevice(self.port.value, baudrate=115200)
                         self._log(f"Test du firmware UART sur {self.port.value} · PING uniquement.")
                     else:
-                        device = DemoDevice()
+                        device = DemoDevice(core_hz=self.core_hz)
                     try:
                         status = await asyncio.to_thread(device.connect)
+                        # INFO donne l'horloge du cœur ; un firmware de révision 1
+                        # répond « commande inconnue » et reste à 200 MHz.
+                        info = await asyncio.to_thread(device.identify)
                     except Exception:
                         await asyncio.to_thread(device.close)
                         raise
                     self.device = device
                     self.last_sent = None
                     self.command_uncertain = False
+                    self._firmware_identified(info)
                     self._status_received(status)
                     label = (
                         "Démo locale · aucun signal physique"
@@ -923,6 +1118,78 @@ class Studio:
             self._error("Connexion", exc)
         finally:
             self.serial_pending = False
+            self._buttons()
+            self._update()
+
+    def _firmware_identified(self, info: FirmwareInfo | None) -> None:
+        self.firmware_info = info
+        if info is None:
+            self.firmware_status.value = "Firmware non identifié"
+            self.firmware_status.color = MUTED
+            self._show_leds(None)
+            return
+        build = "référence" if info.build_id == 0 else f"0x{info.build_id:08X}"
+        try:
+            local = self._firmware_settings()
+        except ValueError:
+            local = None
+        if info.build_id and local is not None and local.build_id == info.build_id:
+            build += f" ({local.summary()})"
+        self.firmware_status.value = (
+            f"Firmware révision {info.revision} · cœur {info.core_hz / 1e6:g} MHz · build {build}"
+            + ("" if info.led_test else " · sans test LED : recharger le firmware fourni à jour")
+        )
+        self.firmware_status.color = GREEN if info.led_test else AMBER
+        self._log(self.firmware_status.value, self.firmware_status.color)
+        if info.core_hz != self.core_hz:
+            self._log(
+                f"Base de temps passée à {info.core_hz / 1e6:g} MHz, celle du firmware : "
+                "fréquence et durées sont requantifiées.",
+                AMBER,
+            )
+            self._apply_core(info.core_hz)
+
+    def _show_leds(self, pattern: int | None) -> None:
+        for index, lamp in enumerate(self.led_lamps):
+            lamp.bgcolor = LED_ON if pattern is not None and pattern >> index & 1 else LED_OFF
+        self._update()
+
+    def _led_step(self, pattern: int | None) -> None:
+        # Appelé depuis le thread du test : l'affichage reste sur la boucle Flet.
+        if self.loop is not None and not self.closing:
+            self.loop.call_soon_threadsafe(self._show_leds, pattern)
+        elif self.loop is None:
+            self._show_leds(pattern)
+
+    async def _led_test(self, _: Any = None) -> None:
+        if self.serial_pending or self.tool_pending:
+            return
+        self.serial_pending = True
+        self._buttons()
+        self._update()
+        try:
+            async with self.serial_lock:
+                device = self.device
+                if device is None or not device.connected:
+                    raise ValueError("Connectez la carte avant le test LED.")
+                self._log(
+                    "Test LED : observer LD4 à LD7 (chenillard, toutes allumées, puis état).",
+                    BLUE,
+                )
+                result = await asyncio.to_thread(
+                    run_led_test, device, step=self.led_step, on_step=self._led_step
+                )
+                self._log(
+                    f"Test LED terminé · {result.commands} commandes confirmées · aller-retour "
+                    f"moyen {result.mean_ms:.1f} ms (max {result.max_ms:.1f} ms). Si les LED "
+                    "de la carte n'ont pas défilé, le port répond mais pas cette carte.",
+                    GREEN,
+                )
+        except Exception as exc:
+            self._error("Test LED", exc)
+        finally:
+            self.serial_pending = False
+            self._show_leds(None)
             self._buttons()
             self._update()
 
@@ -1062,14 +1329,33 @@ class Studio:
             self._update()
 
     def _set_profile(self, config: FrameConfig) -> None:
+        connected = self.device is not None and self.device.connected
+        achievable = {setting.core_hz for setting in pll_settings()}
+        if not connected and config.core_hz != self.core_hz and config.core_hz in achievable:
+            # Sans carte, l'interface adopte l'horloge prévue par le profil.
+            self.core_hz = config.core_hz
+            self.core_clock.value = str(config.core_hz)
         self.base.value = "hex"
         self.previous_base = "hex"
         self.word.value = f"{config.word:X}"
         self.bit_count.value = str(config.bit_count)
-        self.divider.value = str(config.divider)
         self.frequency.value = f"{config.frequency_hz / 1e6:.9g}"
-        self.latch_ns.value = f"{config.latch_ticks * 2.5:g}"
-        self.gap_ns.value = f"{config.gap_ticks * 2.5:g}"
+        self.latch_ns.value = f"{config.latch_ticks * config.tick_ns:.9g}"
+        self.gap_ns.value = f"{config.gap_ticks * config.tick_ns:.9g}"
+        if config.core_hz == self.core_hz:
+            self.divider.value = str(config.divider)
+        else:
+            # Profil prévu pour une autre horloge : fréquence et durées en ns
+            # sont conservées puis requantifiées pour le firmware courant.
+            self._log(
+                f"Profil prévu pour un cœur à {config.core_hz / 1e6:g} MHz, converti pour "
+                f"{self.core_hz / 1e6:g} MHz ; vérifier la fréquence et les durées obtenues.",
+                AMBER,
+            )
+            try:
+                self.divider.value = str(divider_for_frequency(config.frequency_hz, self.core_hz))
+            except ValueError:
+                self.divider.value = "1"
         self.repeat.value = str(config.repeat_count)
         self.lsb.value = config.lsb_first
         self.latch_low.value = config.latch_active_low
@@ -1255,16 +1541,111 @@ class Studio:
             self._log("La détection JTAG ne confirme pas que le firmware UART est chargé.", BLUE)
             self._update()
 
+    def _firmware_settings(self) -> FirmwareBuildConfig:
+        try:
+            core_hz = int(self.fw_core.value or "")
+            drive = int(self.fw_drive.value or "")
+        except ValueError as exc:
+            raise ValueError("Choisir l'horloge du cœur et le courant de sortie.") from exc
+        return FirmwareBuildConfig(
+            core_hz=core_hz,
+            data_pin=self.fw_pins["data_pin"].value or "",
+            clock_pin=self.fw_pins["clock_pin"].value or "",
+            latch_pin=self.fw_pins["latch_pin"].value or "",
+            drive_ma=drive,
+            slew=self.fw_slew.value or "",
+        )
+
+    def _refresh_firmware_summary(self) -> None:
+        try:
+            firmware = self._firmware_settings()
+        except ValueError as exc:
+            self.fw_summary.value = f"Configuration invalide : {exc}"
+            self.fw_summary.color = RED
+            self.fw_warnings.value = ""
+            return
+        self.fw_summary.value = (
+            f"{'Firmware de référence' if firmware.is_reference else 'Firmware personnalisé'} · "
+            f"{firmware.summary()} · CLK maximale {firmware.core_hz / 1e6:g} MHz"
+        )
+        self.fw_summary.color = BLUE
+        self.fw_warnings.value = "\n".join(f"Attention : {note}" for note in firmware.warnings())
+
+    def _firmware_changed(self, _: Any = None) -> None:
+        self._refresh_firmware_summary()
+        self._update()
+
+    def _set_firmware(self, firmware: FirmwareBuildConfig) -> None:
+        self.fw_core.value = str(firmware.core_hz)
+        for field, control in self.fw_pins.items():
+            control.value = getattr(firmware, field)
+        self.fw_drive.value = str(firmware.drive_ma)
+        self.fw_slew.value = firmware.slew
+        self._firmware_changed()
+
+    async def _load_firmware(self, _: Any) -> None:
+        try:
+            path = self._path(self.fw_config_path.value)
+            firmware = await asyncio.to_thread(FirmwareBuildConfig.load, path)
+            self._set_firmware(firmware)
+            self._log(f"Configuration firmware chargée : {path}")
+        except Exception as exc:
+            self._error("Chargement de la configuration firmware", exc)
+
+    async def _save_firmware(self, _: Any) -> None:
+        try:
+            firmware = self._firmware_settings()
+            path = self._path(self.fw_config_path.value)
+            await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
+            await asyncio.to_thread(firmware.save, path)
+            self._log(f"Configuration firmware enregistrée : {path}", GREEN)
+        except Exception as exc:
+            self._error("Enregistrement de la configuration firmware", exc)
+
     async def _build(self, _: Any) -> None:
         if self.tool_pending:
             return
+        try:
+            firmware = self._firmware_settings()
+        except ValueError as exc:
+            self._error("Compilation FPGA", exc)
+            return
+        self._log(f"Compilation locale : {firmware.summary()}.")
         result = await self._tool_action(
             "Compilation FPGA",
-            lambda: self._toolchain().build(log=self._worker_log),
+            lambda: self._toolchain().build(log=self._worker_log, firmware=firmware),
         )
         if result is not None:
             self.bitstream_path.value = str(result)
-            self.tool_message.value = f"Bitstream créé : {result}"
+            self.tool_message.value = f"Bitstream créé : {result} · {firmware.summary()}"
+            self._update()
+
+    async def _remote_build(self, _: Any) -> None:
+        if self.tool_pending:
+            return
+        try:
+            firmware = self._firmware_settings()
+            target = RemoteBuildTarget(
+                (self.gh_repository.value or "").strip(), (self.gh_ref.value or "").strip()
+            )
+            client = GitHubBuildClient(target, self.gh_token.value or "")
+        except ValueError as exc:
+            self._error("Compilation GitHub", exc)
+            return
+        destination = self.project_root / "builds"
+        result = await self._tool_action(
+            "Compilation GitHub",
+            lambda: client.build(firmware, destination, progress=self._worker_log),
+        )
+        if result is not None:
+            self.windows_bitstream_path.value = str(result.bitstream)
+            self.tool_message.value = f"Firmware téléchargé et vérifié : {result.bitstream}"
+            self._log(self.tool_message.value, GREEN)
+            self._log(
+                "Charger ce .bit sous Windows, puis connecter la carte et lancer le test LED. "
+                f"Exécution GitHub : {result.run_url}",
+                BLUE,
+            )
             self._update()
 
     async def _jtag_program(self, _: Any) -> None:

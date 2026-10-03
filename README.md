@@ -7,23 +7,33 @@ FPGA utilise Yosys, openXC7/nextpnr et Project X-Ray. La programmation SRAM peut
 utiliser openFPGALoader ou le backend Windows FTDI D2XX du projet.
 Vivado n’est pas utilisé par le projet.
 
-Le PC envoie les paramètres par UART ; le FPGA produit les fronts. La fréquence
-réalisable est **200 MHz / N**, N entier de 1 à 65535, soit environ 3,052 kHz à
-200 MHz. L’application retient la fréquence réalisable la plus élevée **sans
-dépasser** la demande (150 MHz donne 100 MHz) et affiche la valeur obtenue. Les durées latch et
-pause sont quantifiées à **2,5 ns**. CLK est émise en rafales, idle bas ; le
-destinataire échantillonne DATA au front montant. DATA change au front descendant.
+Le PC envoie les paramètres par UART ; le FPGA produit les fronts. Avec le
+firmware de référence, la fréquence réalisable est **200 MHz / N**, N entier
+de 1 à 65535, soit environ 3,052 kHz à 200 MHz. L’application retient la
+fréquence réalisable la plus élevée **sans dépasser** la demande (150 MHz
+donne 100 MHz) et affiche la valeur obtenue. Les durées latch et pause sont
+quantifiées à **2,5 ns**. CLK est émise en rafales, idle bas ; le destinataire
+échantillonne DATA au front montant. DATA change au front descendant.
 
-Le firmware fourni a été remplacé par la version corrigée : **RX sur A9,
-TX sur D10**, entrées ODDR enregistrées. Remplacer aussi votre ancienne copie
-du `.bit`, qui inversait les broches UART et ne pouvait pas répondre à PING.
-L'application refuse ce fichier obsolète et vérifie le manifeste du firmware
-fourni avant son chargement. Voir [le firmware](firmware/prebuilt/README.md).
+Depuis l'onglet **FPGA → Firmware personnalisé**, un nouveau firmware peut
+être compilé avec une autre **horloge de cœur** (32 valeurs de 50 à 200 MHz,
+par exemple 150 MHz pour une CLK de 150 MHz) et d'autres **broches DATA, CLK
+et LATCH** sur les Pmod JA à JD. La compilation se fait localement ou sur
+**GitHub Actions**, sans outil FPGA sur le PC ; le `.bit` vérifié est
+téléchargé puis chargé sous Windows. La carte annonce ensuite son horloge et
+son identifiant de build ; l'application adapte la base de temps.
+
+Le bouton **Tester les LED** fait défiler un chenillard sur les LED vertes
+LD4 à LD7 : il confirme d'un coup d'œil que le bon firmware tourne sur la
+carte et que la liaison UART fonctionne dans les deux sens.
 
 Le [firmware précompilé pour le 100T](firmware/prebuilt/arty_frame.bit) est
 fourni avec son [manifeste](firmware/prebuilt/firmware-manifest.json) et ses
-rapports. La synthèse et le routage libres ont réussi : **Fmax 218,05 MHz,
-contrainte 200 MHz respectée** sur les chemins modélisés de `core_clock`.
+rapports : SHA256, sources exactes, versions des outils et Fmax après routage,
+qui doit atteindre 200 MHz sur les chemins modélisés de `core_clock`. Il est
+régénéré par le workflow de compilation dès que le RTL change ; l'application
+et les tests refusent un `.bit` qui ne correspond plus aux sources. L'ancien
+fichier aux broches UART inversées est refusé même renommé.
 
 **Le firmware et ses sorties à 200 MHz n'ont pas encore été testés sur carte.**
 Le rapport nextpnr ne certifie pas l'interface DDR ni la liaison Pmod externe.
@@ -140,6 +150,10 @@ et `docs/` le protocole et la procédure de compilation.
 arty-frame simulate --profile examples/frame_26bits.json --output exports/trame
 arty-frame send --profile examples/frame_26bits.json --demo --wait
 arty-frame ports
+arty-frame info --port COM7
+arty-frame led-test --port COM7
+arty-frame firmware-config --core-mhz 150 --clock JB1 --data JB3 --latch JB7 --output fw.json
+ARTY_GITHUB_TOKEN=… arty-frame remote-build --firmware-config fw.json
 arty-frame diagnose --port COM7 --timeout 2
 arty-frame jtag-devices
 arty-frame jtag-diagnose
@@ -148,7 +162,7 @@ arty-frame send --profile examples/frame_26bits.json --port /dev/ttyUSB1 --wait
 arty-frame status --port /dev/ttyUSB1
 arty-frame stop --port /dev/ttyUSB1
 arty-frame doctor --toolchain toolchain.json
-arty-frame build --toolchain toolchain.json
+arty-frame build --toolchain toolchain.json --firmware-config fw.json
 arty-frame program --toolchain toolchain.json
 ```
 

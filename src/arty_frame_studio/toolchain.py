@@ -20,6 +20,8 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import IO, Any, Literal
 
+from .firmware_config import FirmwareBuildConfig
+
 TARGET_PART = "xc7a100tcsg324-1"
 TARGET_BOARD = "arty_a7_100t"
 Command = str | tuple[str, ...]
@@ -199,10 +201,14 @@ class Toolchain:
         finally:
             lock.unlink(missing_ok=True)
 
-    def _input_digest(self) -> str:
+    def _input_digest(self, firmware: FirmwareBuildConfig | None = None) -> str:
         digest = hashlib.sha256()
         settings = asdict(self.config)
         digest.update(json.dumps(settings, sort_keys=True, default=str).encode())
+        if firmware is not None and not firmware.is_reference:
+            # The reference build keeps its historical digest; a custom build
+            # also covers the configuration that generated its XDC/parameters.
+            digest.update(firmware.canonical_json().encode())
         for path in [*self._sources(), self.constraints]:
             digest.update(str(path.relative_to(self.project_root)).encode())
             digest.update(path.read_bytes())
@@ -405,9 +411,9 @@ class Toolchain:
             )
 
     @staticmethod
-    def _check_core_timing(report: str) -> None:
+    def _check_core_timing(report: str, required_mhz: float = 200.0) -> None:
         # nextpnr reports routed Fmax per clock. Require the synthesized BUFG
-        # net named core_clock and a 200 MHz (or tighter) requirement explicitly.
+        # net named core_clock and the configured (or tighter) requirement.
         pattern = (
             r"Max frequency for clock ['\"]([^'\"]+)['\"]:\s*([0-9.]+)\s*MHz"
             r"\s*\((PASS|FAIL) at\s*([0-9.]+)\s*MHz\)"
@@ -423,18 +429,27 @@ class Toolchain:
             not core_results
             or any(verdict == "FAIL" for _, verdict, _ in final_results.values())
             or any(
-                float(actual) < 200 or float(target) < 200 or verdict != "PASS"
+                float(actual) < required_mhz
+                or float(target) < required_mhz - 0.005
+                or verdict != "PASS"
                 for actual, verdict, target in core_results
             )
         ):
             raise ToolchainError(
-                "Timing 200 MHz non confirmé pour core_clock dans le rapport nextpnr. "
-                "Cette version doit propager/contraindre l'horloge PLL et afficher "
-                "« Max frequency for clock 'core_clock': ... (PASS at 200.00 MHz) ». "
+                f"Timing {required_mhz:g} MHz non confirmé pour core_clock dans le rapport "
+                "nextpnr. Cette version doit propager/contraindre l'horloge PLL et afficher "
+                f"« Max frequency for clock 'core_clock': ... (PASS at {required_mhz:.2f} MHz) ». "
                 "Aucun bitstream n'est autorisé."
             )
 
-    def build(self, log: Log | None = None) -> Path:
+    def build(self, log: Log | None = None, firmware: FirmwareBuildConfig | None = None) -> Path:
+        """Compile the reference firmware, or a validated custom configuration.
+
+        A custom configuration writes its XDC into the run directory and sets
+        arty_top parameters with Yosys ``chparam``; the committed sources stay
+        untouched. The receipt records the configuration used.
+        """
+        firmware = firmware or FirmwareBuildConfig()
         with self._exclusive():
             # Revoke any former receipt before checking dependencies or invoking tools.
             self.receipt.unlink(missing_ok=True)
@@ -450,7 +465,11 @@ class Toolchain:
             run_dir = self.build_dir / "runs" / uuid.uuid4().hex
             run_dir.mkdir(parents=True)
             journal_path = self.build_dir / "build.log"
-            source_digest = self._input_digest()
+            source_digest = self._input_digest(firmware)
+            constraints = self.constraints
+            if not firmware.is_reference:
+                constraints = run_dir / "arty_frame.xdc"
+                constraints.write_text(firmware.xdc(), encoding="utf-8")
             netlist = run_dir / "arty_frame.json"
             fasm = run_dir / "arty_frame.fasm"
             frames = run_dir / "arty_frame.frames"
@@ -461,13 +480,23 @@ class Toolchain:
                 def quote(path: Path) -> str:
                     return '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
+                parameters = (
+                    ""
+                    if firmware.is_reference
+                    else "".join(
+                        f"chparam -set {name} {value} arty_top; "
+                        for name, value in firmware.yosys_parameters().items()
+                    )
+                )
                 script = (
                     # Yosys 66306a8ca's interactive ABC pool waits for an echo
                     # that Readline truncates with long temporary paths. A
                     # basename selects the batch ABC invocation instead.
                     "scratchpad -set abc.exe yosys-abc; read_verilog "
                     + " ".join(quote(path) for path in self._sources())
-                    + "; synth_xilinx -family xc7 -flatten -nodram "
+                    + "; "
+                    + parameters
+                    + "synth_xilinx -family xc7 -flatten -nodram "
                     + ("-abc9 " if self.config.yosys_mapping == "abc9" else "")
                     + "-top arty_top; write_json "
                     + quote(netlist)
@@ -500,7 +529,7 @@ class Toolchain:
                     "--json",
                     str(place_route_netlist),
                     "--freq",
-                    "200",
+                    f"{firmware.core_hz / 1e6:g}",
                 ]
                 if self.config.nextpnr_backend == "himbaechel":
                     place_route.extend(
@@ -508,7 +537,7 @@ class Toolchain:
                             "--device",
                             self.config.part,
                             "-o",
-                            f"xdc={self.constraints}",
+                            f"xdc={constraints}",
                             "-o",
                             f"fasm={fasm}",
                             "--report",
@@ -518,7 +547,7 @@ class Toolchain:
                         ]
                     )
                 else:
-                    place_route.extend(["--xdc", str(self.constraints), "--fasm", str(fasm)])
+                    place_route.extend(["--xdc", str(constraints), "--fasm", str(fasm)])
                 report = self._run(place_route, log, journal)
                 self._require_output(fasm)
                 if self.config.nextpnr_backend == "himbaechel":
@@ -529,7 +558,7 @@ class Toolchain:
                     journal.flush()
                     if log:
                         log(verification)
-                self._check_core_timing(report)
+                self._check_core_timing(report, firmware.core_hz / 1e6)
                 self._run(
                     [
                         *self._args("fasm2frames"),
@@ -560,7 +589,7 @@ class Toolchain:
                     journal,
                 )
                 self._require_output(bitstream)
-                if self._input_digest() != source_digest:
+                if self._input_digest(firmware) != source_digest:
                     raise ToolchainError(
                         "Les sources/configurations ont changé pendant la compilation."
                     )
@@ -572,9 +601,11 @@ class Toolchain:
                     "input_sha256": source_digest,
                     "bitstream_sha256": self._file_digest(self.bitstream),
                     "timing_clock": "core_clock",
-                    "timing_requirement_mhz": 200,
+                    "timing_requirement_mhz": firmware.core_hz / 1e6,
                     "timing_scope": "nextpnr register paths; excludes physical GPIO/DDR validation",
                     "run_dir": str(run_dir),
+                    "build_id": firmware.build_id,
+                    "firmware_config": firmware.to_dict(),
                 }
                 temporary_receipt = run_dir / "successful-build.json"
                 temporary_receipt.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
@@ -592,15 +623,20 @@ class Toolchain:
                 )
             try:
                 receipt: Any = json.loads(self.receipt.read_text(encoding="utf-8"))
+                firmware = (
+                    FirmwareBuildConfig.from_dict(receipt["firmware_config"])
+                    if isinstance(receipt, dict) and "firmware_config" in receipt
+                    else FirmwareBuildConfig()
+                )
                 valid = (
                     isinstance(receipt, dict)
                     and receipt.get("version") == 1
                     and receipt.get("part") == self.config.part
-                    and receipt.get("input_sha256") == self._input_digest()
+                    and receipt.get("input_sha256") == self._input_digest(firmware)
                     and receipt.get("bitstream_sha256") == self._file_digest(path)
-                    and receipt.get("timing_requirement_mhz") == 200
+                    and receipt.get("timing_requirement_mhz") == firmware.core_hz / 1e6
                 )
-            except (OSError, ValueError):
+            except (OSError, ValueError, TypeError):
                 valid = False
             if not valid:
                 raise ToolchainError(

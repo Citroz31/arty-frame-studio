@@ -22,7 +22,8 @@ module ODDR #(
         $fatal(1,"Primitive model supports only SAME_EDGE ASYNC");
 endmodule
 // Same public parameter/port interface as Yosys' xc7 PLLE2_ADV declaration.
-// Only the fixed CLKIN1, INTERNAL, DRP-disabled board configuration is modeled.
+// Only CLKIN1, INTERNAL, DIVCLK_DIVIDE=1 and DRP disabled are modeled, with
+// an integer CLKFBOUT_MULT/CLKOUT0_DIVIDE pair inside the -1 VCO range.
 module PLLE2_ADV #(
     parameter BANDWIDTH="OPTIMIZED", parameter COMPENSATION="ZHOLD",
     parameter STARTUP_WAIT="FALSE",
@@ -67,11 +68,13 @@ module PLLE2_ADV #(
     assign DO=0;
     initial begin
         if(COMPENSATION!="INTERNAL" || CLKIN1_PERIOD<=0.0
-            || DIVCLK_DIVIDE!=1 || CLKFBOUT_MULT!=10 || CLKOUT0_DIVIDE!=5
+            || DIVCLK_DIVIDE!=1 || CLKOUT0_DIVIDE<1 || CLKOUT0_DIVIDE>128
+            || 1000.0*CLKFBOUT_MULT/CLKIN1_PERIOD<800.0
+            || 1000.0*CLKFBOUT_MULT/CLKIN1_PERIOD>1600.0
             || CLKFBOUT_PHASE!=0.0 || CLKOUT0_PHASE!=0.0
             || CLKOUT0_DUTY_CYCLE!=0.5 || IS_CLKINSEL_INVERTED
             || IS_PWRDWN_INVERTED || IS_RST_INVERTED)
-            $fatal(1,"PLL model supports only the board's fixed 100-to-200 MHz INTERNAL mode");
+            $fatal(1,"PLL model supports only INTERNAL mode with VCO 800-1600 MHz");
         #0;
         if(CLKINSEL!==1'b1 || CLKIN2!==1'b0 || DCLK!==1'b0
             || DEN!==1'b0 || DWE!==1'b0 || DI!==16'b0 || DADDR!==7'b0)

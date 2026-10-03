@@ -21,7 +21,8 @@ module tb_top;
     integer reset_checks=0;
     reg [2:0] expected;
 
-    arty_top board(.clk100(clk100),.reset_n(reset_n),.uart_rx(host_serial),
+    // A 2 ms LED hold keeps the pattern visible past one 12-byte UART reply.
+    arty_top #(.LED_HOLD_CYCLES(400000)) board(.clk100(clk100),.reset_n(reset_n),.uart_rx(host_serial),
         .uart_tx(board_serial),.data_out(data_pin),.frame_clk(clock_pin),
         .latch_enable(latch_pin),.led(led));
     always @(posedge board.core_clock or negedge board.core_clock)
@@ -161,6 +162,26 @@ module tb_top;
         request(4,33,0);
         check_response(24,4,33,0,0,1);
 
+        // LED test through the production UART: the pattern replaces the
+        // status LEDs, expires back to {completed, 0, busy, locked}, and an
+        // automatic-mode command restores the status display at once.
+        payload=0; payload[7:0]=8'h86;
+        request(5,38,1);
+        check_response(36,5,38,0,0,1);
+        if(led!==4'b0110) $fatal(1,"LED pattern not shown: %b",led);
+        wait(led===4'b1001);
+        request(5,39,1);
+        check_response(48,5,39,0,0,1);
+        if(led!==4'b0110) $fatal(1,"Second LED pattern not shown: %b",led);
+        payload[7:0]=8'h00;
+        request(5,40,1);
+        check_response(60,5,40,0,0,1);
+        if(led!==4'b1001) $fatal(1,"Automatic LED mode did not restore status: %b",led);
+        // INFO page 1: low half of the 200 MHz core clock frequency.
+        payload[7:0]=1;
+        request(6,41,1);
+        check_response(72,6,41,0,0,16'hc200);
+
         // Repeated long frames leave enough time to interrupt DATA/CLK and
         // LATCH independently. Commands still arrive over the production UART.
         payload=0;
@@ -177,8 +198,8 @@ module tb_top;
         request(1,37,0);
         check_response(0,1,37,0,0,0);
         if(reset_checks!=2) $fatal(1,"Missing asynchronous reset cases");
-        $display("PASS tb_top: UART PING/SEND/STATUS, 200 MHz modeled burst, %0d stopped-clock asynchronous resets and UART recovery",reset_checks);
+        $display("PASS tb_top: UART PING/SEND/STATUS/LED/INFO, 200 MHz modeled burst, %0d stopped-clock asynchronous resets and UART recovery",reset_checks);
         $finish;
     end
-    initial begin #30000000; $fatal(1,"Timeout"); end
+    initial begin #60000000; $fatal(1,"Timeout"); end
 endmodule

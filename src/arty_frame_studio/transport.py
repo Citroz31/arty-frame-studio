@@ -8,15 +8,21 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from .model import FrameConfig
+from .model import REFERENCE_HZ, FrameConfig, check_core_hz
 from .protocol import (
+    CAPABILITY_INFO,
+    CAPABILITY_LED,
+    INFO_PAGES,
     DeviceStatus,
+    FirmwareInfo,
     Opcode,
     PacketDecoder,
     ProtocolError,
     StatusCode,
     decode_response,
     encode_request,
+    info_from_pages,
+    led_argument,
 )
 
 
@@ -95,9 +101,12 @@ def list_ports() -> list[PortInfo]:
     return sorted(ports, key=lambda port: port.device)
 
 
-# PING et STATUS ne modifient pas la carte : une réponse perdue peut être
-# redemandée. SEND et STOP ne sont jamais répétés automatiquement.
-_REPEATABLE = (Opcode.PING, Opcode.STATUS)
+# PING, STATUS et INFO ne modifient pas la carte, et répéter un même motif LED
+# donne le même état : une réponse perdue peut être redemandée. SEND et STOP ne
+# sont jamais répétés automatiquement.
+_REPEATABLE = (Opcode.PING, Opcode.STATUS, Opcode.LED, Opcode.INFO)
+# Firmware antérieur à INFO : référence à 200 MHz, sans test LED.
+LEGACY_FIRMWARE = FirmwareInfo(revision=1, core_hz=REFERENCE_HZ, capabilities=0, build_id=0)
 CONNECT_PING_ATTEMPTS = 2
 STATUS_ATTEMPTS = 2
 
@@ -105,8 +114,8 @@ STATUS_ATTEMPTS = 2
 class SerialDevice:
     """Une requête à la fois, confirmation avec numéro de séquence et opcode.
 
-    Seuls PING (à la connexion) et STATUS sont redemandés une fois après un
-    délai dépassé ; SEND et STOP ne le sont jamais. ``serial_factory`` reçoit
+    PING (à la connexion), STATUS, LED et INFO sont redemandés une fois après
+    un délai dépassé ; SEND et STOP ne le sont jamais. ``serial_factory`` reçoit
     ``port=None`` et retourne un port non ouvert, ouvert ensuite par ``open()`` :
     il permet de vérifier le protocole sans matériel.
     """
@@ -137,6 +146,8 @@ class SerialDevice:
         self._lock = threading.RLock()
         self._decoder = PacketDecoder()
         self._sequence = 0
+        # Lu par info() ; SEND refuse une trame calculée pour une autre horloge.
+        self.firmware: FirmwareInfo | None = None
 
     @property
     def connected(self) -> bool:
@@ -198,7 +209,44 @@ class SerialDevice:
         return self._exchange(Opcode.PING)
 
     def send(self, config: FrameConfig) -> DeviceStatus:
+        expected = (self.firmware or LEGACY_FIRMWARE).core_hz
+        if isinstance(config, FrameConfig) and config.core_hz != expected:
+            raise ValueError(
+                f"Trame calculée pour un cœur à {config.core_hz / 1e6:g} MHz ; le firmware "
+                f"connecté fonctionne à {expected / 1e6:g} MHz. Recalculer la trame."
+            )
         return self._exchange(Opcode.SEND, config)
+
+    def led(self, pattern: int | None) -> DeviceStatus:
+        """Affiche ``pattern`` (bit 0 = LD4) quelques secondes, ou ``None`` : état."""
+        return self._exchange(Opcode.LED, argument=led_argument(pattern), attempts=2)
+
+    def info(self) -> FirmwareInfo:
+        """Lit l'identité du firmware ; DeviceError UNKNOWN_OPCODE avant la révision 2."""
+        with self._lock:
+            words = [
+                self._exchange(Opcode.INFO, argument=page, attempts=2).completed
+                for page in range(INFO_PAGES)
+            ]
+            info = info_from_pages(words)
+            if not info.capabilities & CAPABILITY_INFO:
+                raise TransportError("Réponse INFO incohérente : capacité INFO absente.")
+            try:
+                check_core_hz(info.core_hz)
+            except ValueError as exc:
+                raise TransportError(f"Horloge de cœur annoncée invalide : {exc}") from exc
+            self.firmware = info
+            return info
+
+    def identify(self) -> FirmwareInfo:
+        """INFO si le firmware le connaît, sinon l'identité du firmware historique."""
+        try:
+            return self.info()
+        except DeviceError as exc:
+            if exc.device_status.status != StatusCode.UNKNOWN_OPCODE:
+                raise
+            self.firmware = LEGACY_FIRMWARE
+            return LEGACY_FIRMWARE
 
     def stop(self) -> DeviceStatus:
         return self._exchange(Opcode.STOP)
@@ -208,6 +256,7 @@ class SerialDevice:
 
     def close(self) -> None:
         with self._lock:
+            self.firmware = None
             connection, self._serial = self._serial, None
             if connection is not None:
                 try:
@@ -217,17 +266,24 @@ class SerialDevice:
                     pass
 
     def _exchange(
-        self, opcode: Opcode, config: FrameConfig | None = None, *, attempts: int = 1
+        self,
+        opcode: Opcode,
+        config: FrameConfig | None = None,
+        *,
+        argument: int | None = None,
+        attempts: int = 1,
     ) -> DeviceStatus:
         if type(attempts) is not int or attempts < 1:
             raise ValueError("Le nombre de tentatives doit être un entier positif.")
         if attempts > 1 and opcode not in _REPEATABLE:
-            raise ValueError("Seuls PING et STATUS peuvent être redemandés automatiquement.")
+            raise ValueError(
+                "Seuls PING, STATUS, LED et INFO peuvent être redemandés automatiquement."
+            )
         with self._lock:
             timeouts: list[CommandTimeout] = []
             for attempt in range(attempts):
                 try:
-                    return self._transaction(opcode, config)
+                    return self._transaction(opcode, config, argument)
                 except CommandTimeout as exc:
                     if attempts == 1:
                         raise
@@ -254,12 +310,14 @@ class SerialDevice:
                         ) from exc
             raise AssertionError("Une transaction doit réussir ou lever une exception.")
 
-    def _transaction(self, opcode: Opcode, config: FrameConfig | None) -> DeviceStatus:
+    def _transaction(
+        self, opcode: Opcode, config: FrameConfig | None, argument: int | None
+    ) -> DeviceStatus:
         with self._lock:
             if not self.connected:
                 raise TransportError("La carte n'est pas connectée.")
             sequence = self._sequence
-            request = encode_request(opcode, sequence, config)
+            request = encode_request(opcode, sequence, config, argument=argument)
             self._sequence = (sequence + 1) & 0xFF
             crc_errors_before = self._decoder.crc_errors
             unmatched = 0
@@ -319,9 +377,20 @@ class DemoDevice:
 
     Le nombre de trames terminées inclut le latch et l'intervalle. Les temps ne
     sont pas ralentis : une émission courte peut finir avant le prochain poll.
+    La démo simule un firmware de révision 2 à l'horloge ``core_hz`` ; le motif
+    des LED virtuelles est exposé par ``led_pattern`` (``None`` : état).
     """
 
-    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self, *, clock: Callable[[], float] = time.monotonic, core_hz: int = REFERENCE_HZ
+    ) -> None:
+        self.firmware = FirmwareInfo(
+            revision=2,
+            core_hz=core_hz,
+            capabilities=CAPABILITY_LED | CAPABILITY_INFO,
+            build_id=0,
+        )
+        self.led_pattern: int | None = None
         self._clock = clock
         self._lock = threading.RLock()
         self._connected = False
@@ -350,6 +419,11 @@ class DemoDevice:
             self._require_connected()
             if not isinstance(config, FrameConfig):
                 raise ValueError("La configuration de trame est invalide.")
+            if config.core_hz != self.firmware.core_hz:
+                raise ValueError(
+                    f"Trame calculée pour un cœur à {config.core_hz / 1e6:g} MHz ; la démo "
+                    f"simule {self.firmware.core_hz / 1e6:g} MHz. Recalculer la trame."
+                )
             self._update()
             if self._busy:
                 raise DeviceError(DeviceStatus(StatusCode.BUSY, True, self._completed))
@@ -370,8 +444,24 @@ class DemoDevice:
     def status(self) -> DeviceStatus:
         return self.ping()
 
+    def led(self, pattern: int | None) -> DeviceStatus:
+        with self._lock:
+            self._require_connected()
+            led_argument(pattern)
+            self.led_pattern = pattern
+            return self._snapshot()
+
+    def info(self) -> FirmwareInfo:
+        with self._lock:
+            self._require_connected()
+            return self.firmware
+
+    def identify(self) -> FirmwareInfo:
+        return self.info()
+
     def close(self) -> None:
         with self._lock:
+            self.led_pattern = None
             self._update()
             self._busy = False
             self._started_at = None
@@ -396,3 +486,54 @@ class DemoDevice:
     def _snapshot(self) -> DeviceStatus:
         self._update()
         return DeviceStatus(StatusCode.OK, self._busy, self._completed)
+
+
+@dataclass(frozen=True)
+class LedTestResult:
+    commands: int
+    mean_ms: float
+    max_ms: float
+
+
+# Chenillard LD4 → LD7, toutes allumées, toutes éteintes, puis retour à l'état.
+LED_TEST_SEQUENCE: tuple[int, ...] = (0b0001, 0b0010, 0b0100, 0b1000) * 2 + (0b1111, 0b0000)
+
+
+def run_led_test(
+    device: SerialDevice | DemoDevice,
+    *,
+    step: float = 0.25,
+    sleep: Callable[[float], None] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    on_step: Callable[[int | None], None] | None = None,
+) -> LedTestResult:
+    """Fait défiler un motif visible sur LD4..LD7 et mesure chaque aller-retour UART.
+
+    Chaque motif est une commande confirmée : l'œil vérifie le chemin PC → FPGA →
+    LED, la réponse vérifie le retour. Les LED reviennent toujours à l'état.
+    """
+    info = device.firmware if device.firmware is not None else device.identify()
+    if not info.led_test:
+        raise TransportError(
+            "Ce firmware ne connaît pas la commande LED (révision 1). Charger le firmware "
+            "fourni à jour ; PING suffit à tester la liaison avec l'ancien firmware."
+        )
+    pause = sleep or time.sleep
+    durations = []
+    try:
+        for pattern in LED_TEST_SEQUENCE:
+            started = clock()
+            device.led(pattern)
+            durations.append(clock() - started)
+            if on_step:
+                on_step(pattern)
+            pause(step)
+    finally:
+        try:
+            device.led(None)
+        finally:
+            if on_step:
+                on_step(None)
+    return LedTestResult(
+        len(durations), 1000 * sum(durations) / len(durations), 1000 * max(durations)
+    )

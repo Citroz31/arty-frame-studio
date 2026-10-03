@@ -1,4 +1,8 @@
-"""Chronogrammes numériques idéaux, exprimés exactement en demi-ticks de 2,5 ns."""
+"""Chronogrammes numériques idéaux, exprimés exactement en ticks matériels.
+
+Un tick vaut un demi-cycle de l'horloge de cœur : 2,5 ns pour le firmware de
+référence à 200 MHz, ``FrameConfig.tick_ns`` pour un firmware personnalisé.
+"""
 
 from __future__ import annotations
 
@@ -16,10 +20,11 @@ class Transition:
     data: int
     clk: int
     latch: int
+    tick_ns: float = TICK_NS
 
     @property
     def time_ns(self) -> float:
-        return self.time_ticks * TICK_NS
+        return self.time_ticks * self.tick_ns
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +37,7 @@ class Waveform:
 
     @property
     def duration_ns(self) -> float:
-        return self.duration_ticks * TICK_NS
+        return self.duration_ticks * self.config.tick_ns
 
 
 def simulate(config: FrameConfig, max_frames: int = 4) -> Waveform:
@@ -44,7 +49,7 @@ def simulate(config: FrameConfig, max_frames: int = 4) -> Waveform:
     time = 0
 
     def record(data: int, clk: int, latch: int) -> None:
-        point = Transition(time, data, clk, latch)
+        point = Transition(time, data, clk, latch, config.tick_ns)
         if points and points[-1].time_ticks == time:
             points[-1] = point
         else:
@@ -95,7 +100,8 @@ def export_vcd(waveform: Waveform, path: str | Path) -> None:
     ]
     previous: tuple[int, int, int] | None = None
     for transition in waveform.transitions:
-        lines.append(f"#{transition.time_ticks * 2500}")
+        # Picosecond timestamps are exact at 200 MHz (2500 ps per tick).
+        lines.append(f"#{round(transition.time_ns * 1000)}")
         levels = (transition.data, transition.clk, transition.latch)
         for index, symbol in enumerate(("!", '"', "#")):
             if previous is None or levels[index] != previous[index]:
@@ -135,7 +141,7 @@ def waveform_svg(waveform: Waveform, width: int = 1200) -> str:
         anchor = "start" if index == 0 else "end" if index == 10 else "middle"
         pieces.append(
             f'<text x="{xpos:.2f}" y="287" text-anchor="{anchor}" font-size="11">'
-            f"{tick * TICK_NS / scale:.3g}</text>"
+            f"{tick * config.tick_ns / scale:.3g}</text>"
         )
     for row, (name, color) in enumerate(
         (("DATA", "#2563eb"), ("CLK", "#0891b2"), ("LATCH", "#d97706"))
