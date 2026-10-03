@@ -147,6 +147,7 @@ jobs:
               "timing_scope": receipt["timing_scope"],
               "timing_requirement_mhz": required,
               "routed_core_fmax_mhz": core_timing["achieved"],
+              "nextpnr_seed": receipt["nextpnr_seed"],
               "hardware_validated": False,
               "source_sha256": {
                   str(path): hashlib.sha256(path.read_bytes()).hexdigest()

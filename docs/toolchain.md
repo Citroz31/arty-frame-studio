@@ -217,6 +217,14 @@ placement provisoire n'est pas une preuve de fermeture du timing.
 `--timing-allow-fail` est interdit. Un rapport final absent ou en échec
 bloque la conversion en bitstream.
 
+Les chemins du cœur sont proches de 5 ns : le seul placement peut faire
+varier la Fmax d'environ 10 %. Le build essaie donc les graines de placement
+de `nextpnr_seeds` (par défaut 1 à 8) jusqu'au premier routage qui respecte
+le timing ; un échec de timing passe à la graine suivante, toute autre erreur
+de nextpnr arrête le build. La graine retenue figure dans le reçu et dans le
+manifeste. Le timing exigé reste le même : la graine ne change que le
+placement, jamais la contrainte.
+
 Ce contrôle couvre les chemins modélisés par nextpnr. Il **ne certifie pas
 l'interface DDR ni la liaison Pmod externe** : fronts, skew, câbles et marges
 setup/hold du récepteur doivent être mesurés. Le firmware n'a pas été testé

@@ -52,6 +52,9 @@ class ToolchainConfig:
     prjxray_db: Path | None = None
     part: str = TARGET_PART
     build_dir: Path = Path("build")
+    # Placement seeds tried in order until the routed timing passes. The core
+    # paths sit close to 5 ns, so placement alone can move Fmax by ~10 %.
+    nextpnr_seeds: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8)
 
     def __post_init__(self) -> None:
         if self.part != TARGET_PART:
@@ -71,6 +74,13 @@ class ToolchainConfig:
                 raise ValueError("--timing-allow-fail est interdit : le timing doit réussir.")
             if name == "openfpgaloader" and len(args) != 1:
                 raise ValueError("openfpgaloader accepte uniquement le chemin de l'exécutable.")
+        if (
+            not isinstance(self.nextpnr_seeds, tuple)
+            or not 1 <= len(self.nextpnr_seeds) <= 32
+            or any(type(seed) is not int or not 0 <= seed < 2**31 for seed in self.nextpnr_seeds)
+            or len(set(self.nextpnr_seeds)) != len(self.nextpnr_seeds)
+        ):
+            raise ValueError("nextpnr_seeds : 1 à 32 entiers distincts, positifs ou nuls.")
         for name in ("chipdb", "prjxray_db", "build_dir"):
             value = getattr(self, name)
             if name == "build_dir" and value is None:
@@ -113,6 +123,8 @@ class ToolchainConfig:
                     if not candidate.is_absolute():
                         args[index] = str((path.parent / candidate).resolve())
             data[name] = args[0] if isinstance(value, str) else tuple(args)
+        if isinstance(data.get("nextpnr_seeds"), list):
+            data["nextpnr_seeds"] = tuple(data["nextpnr_seeds"])
         for name in ("chipdb", "prjxray_db", "build_dir"):
             if name in data and data[name] is not None:
                 if not isinstance(data[name], str) or not data[name].strip():
@@ -231,6 +243,20 @@ class Toolchain:
         stdout_path: Path | None = None,
         env: dict[str, str] | None = None,
     ) -> str:
+        code, output = self._execute(args, log, journal, stdout_path=stdout_path, env=env)
+        if code != 0:
+            raise ToolchainError(f"{args[0]} a échoué (code {code}). Voir {journal.name}.")
+        return output
+
+    def _execute(
+        self,
+        args: list[str],
+        log: Log | None,
+        journal: IO[str],
+        *,
+        stdout_path: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> tuple[int, str]:
         command_line = "$ " + shlex.join(args)
         journal.write(command_line + "\n")
         journal.flush()
@@ -280,9 +306,7 @@ class Toolchain:
             code = process.wait()
         journal.write(f"[exit {code}]\n")
         journal.flush()
-        if code != 0:
-            raise ToolchainError(f"{args[0]} a échoué (code {code}). Voir {journal.name}.")
-        return "".join(captured)
+        return code, "".join(captured)
 
     @staticmethod
     def _require_output(path: Path) -> None:
@@ -442,6 +466,49 @@ class Toolchain:
                 "Aucun bitstream n'est autorisé."
             )
 
+    def _place_and_route(
+        self,
+        command: list[str],
+        fasm: Path,
+        firmware: FirmwareBuildConfig,
+        log: Log | None,
+        journal: IO[str],
+    ) -> int:
+        """Try each configured seed; return the first whose routed timing passes.
+
+        nextpnr exits with an error when the routed timing fails; that case, or
+        a report that does not pass, moves to the next seed. Any other failure
+        stops the build. The last timing error is reported when all seeds fail.
+        """
+        required = firmware.core_hz / 1e6
+        seeds = self.config.nextpnr_seeds
+        for attempt, seed in enumerate(seeds, start=1):
+            code, report = self._execute([*command, "--seed", str(seed)], log, journal)
+            timing_reported = "Max frequency for clock" in report
+            if code != 0 and not timing_reported:
+                raise ToolchainError(f"{command[0]} a échoué (code {code}). Voir {journal.name}.")
+            if code == 0:
+                # A clean exit without FASM is a tool failure, not a timing miss.
+                self._require_output(fasm)
+            try:
+                self._check_core_timing(report, required)
+            except ToolchainError:
+                if attempt == len(seeds):
+                    raise
+                note = (
+                    f"[nextpnr] graine {seed} : timing {required:g} MHz non atteint ; "
+                    f"essai {attempt + 1}/{len(seeds)}."
+                )
+                journal.write(note + "\n")
+                journal.flush()
+                if log:
+                    log(note)
+                continue
+            if code != 0:
+                raise ToolchainError(f"{command[0]} a échoué (code {code}). Voir {journal.name}.")
+            return seed
+        raise AssertionError("La liste des graines nextpnr ne peut pas être vide.")
+
     def build(self, log: Log | None = None, firmware: FirmwareBuildConfig | None = None) -> Path:
         """Compile the reference firmware, or a validated custom configuration.
 
@@ -548,7 +615,7 @@ class Toolchain:
                     )
                 else:
                     place_route.extend(["--xdc", str(constraints), "--fasm", str(fasm)])
-                report = self._run(place_route, log, journal)
+                seed = self._place_and_route(place_route, fasm, firmware, log, journal)
                 self._require_output(fasm)
                 if self.config.nextpnr_backend == "himbaechel":
                     self._require_output(run_dir / "routed.json")
@@ -558,7 +625,6 @@ class Toolchain:
                     journal.flush()
                     if log:
                         log(verification)
-                self._check_core_timing(report, firmware.core_hz / 1e6)
                 self._run(
                     [
                         *self._args("fasm2frames"),
@@ -606,6 +672,7 @@ class Toolchain:
                     "run_dir": str(run_dir),
                     "build_id": firmware.build_id,
                     "firmware_config": firmware.to_dict(),
+                    "nextpnr_seed": seed,
                 }
                 temporary_receipt = run_dir / "successful-build.json"
                 temporary_receipt.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")

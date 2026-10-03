@@ -76,7 +76,12 @@ elif name == "nextpnr-xilinx":
         Path(args[args.index("--write") + 1]).write_text(json.dumps(routed))
     default_timing = "Info: Max frequency for clock 'core_clock': "
     default_timing += "210.52 MHz (PASS at 200.00 MHz)"
-    print(os.environ.get("FAKE_TIMING", default_timing))
+    seed = args[args.index("--seed") + 1] if "--seed" in args else "none"
+    timing = os.environ.get("FAKE_TIMING", default_timing)
+    timing = os.environ.get(f"FAKE_TIMING_SEED_{seed}", timing)
+    print(timing)
+    if os.environ.get("FAKE_TIMING_EXIT") and "FAIL" in timing:
+        sys.exit(1)
 elif name == "fasm2frames":
     print("0x00000000 0x00000001")
     print("diagnostic only", file=sys.stderr)
@@ -300,7 +305,11 @@ def test_missing_or_failed_core_timing_blocks_bit_generation(
     with pytest.raises(ToolchainError, match="Timing 200 MHz"):
         toolchain.build()
     assert not toolchain.receipt.exists()
-    assert [call[0] for call in history()] == ["yosys", "nextpnr-xilinx"]
+    # Every configured placement seed is tried before the build is refused.
+    seeds = toolchain.config.nextpnr_seeds
+    calls = history()
+    assert [call[0] for call in calls] == ["yosys", *["nextpnr-xilinx"] * len(seeds)]
+    assert [call[call.index("--seed") + 1] for call in calls[1:]] == [str(s) for s in seeds]
 
 
 @pytest.mark.parametrize("stage", ["yosys", "nextpnr-xilinx", "fasm2frames", "xc7frames2bit"])
@@ -523,3 +532,43 @@ def test_reference_build_keeps_committed_constraints_without_parameters(
     assert "chparam" not in yosys[-1]
     assert nextpnr[nextpnr.index("--xdc") + 1] == str(toolchain.constraints)
     assert json.loads(toolchain.receipt.read_text())["build_id"] == 0
+
+
+def test_placement_seed_sweep_keeps_the_first_seed_that_meets_timing(
+    toolchain: Toolchain, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    failing = "ERROR: Max frequency for clock 'core_clock': 192.09 MHz (FAIL at 200.00 MHz)"
+    monkeypatch.setenv("FAKE_TIMING", failing)
+    monkeypatch.setenv("FAKE_TIMING_EXIT", "1")  # real nextpnr exits 1 on a timing miss
+    monkeypatch.setenv(
+        "FAKE_TIMING_SEED_3",
+        "Info: Max frequency for clock 'core_clock': 214.00 MHz (PASS at 200.00 MHz)",
+    )
+    logs: list[str] = []
+    assert toolchain.build(log=logs.append).is_file()
+    calls = history()
+    assert [call[call.index("--seed") + 1] for call in calls if call[0] == "nextpnr-xilinx"] == [
+        "1",
+        "2",
+        "3",
+    ]
+    assert json.loads(toolchain.receipt.read_text())["nextpnr_seed"] == 3
+    assert sum("graine" in line for line in logs) == 2
+    assert (
+        "graine 2 : timing 200 MHz non atteint" in (toolchain.build_dir / "build.log").read_text()
+    )
+
+
+def test_nextpnr_crash_is_not_retried_with_another_seed(
+    toolchain: Toolchain, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_FAIL", "nextpnr-xilinx")
+    with pytest.raises(ToolchainError, match="code 23"):
+        toolchain.build()
+    assert [call[0] for call in history()] == ["yosys", "nextpnr-xilinx"]
+
+
+@pytest.mark.parametrize("seeds", [[], [1, 1], [-1], ["1"], list(range(33))])
+def test_invalid_seed_lists_are_rejected(seeds: list[object]) -> None:
+    with pytest.raises(ValueError, match="nextpnr_seeds"):
+        ToolchainConfig(nextpnr_seeds=tuple(seeds))  # type: ignore[arg-type]

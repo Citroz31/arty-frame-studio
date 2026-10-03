@@ -115,6 +115,9 @@ class GitHubBuildClient:
             with self._open(request, timeout=60) as response:
                 content = response.read(MAX_ARTIFACT_BYTES + 1)
         except urllib.error.HTTPError as exc:
+            # Close the error body now: an unclosed one triggers a
+            # ResourceWarning at garbage collection on recent Pythons.
+            exc.close()
             hint = {
                 401: " Jeton refusé ou expiré.",
                 403: " Droits insuffisants : Actions en écriture sur ce dépôt.",
