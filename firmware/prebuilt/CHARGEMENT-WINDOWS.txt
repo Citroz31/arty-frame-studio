@@ -1,6 +1,7 @@
 Arty A7-100T, xc7a100tcsg324-1. Chargement en SRAM uniquement.
+Configuration : cœur 200 MHz, DATA JB1 (E15), CLK JB2 (E16), LATCH JB3 (D15), LVCMOS33 8 mA FAST, build 0x00000000.
 Dans Arty Frame Studio : FPGA > Charger le .bit sous Windows > arty_frame.bit.
 Puis Pilotage > Carte USB/UART > COM7 > Connecter. UART 115200 8N1.
-Verifier PING avant SEND. Recharger apres une coupure d'alimentation.
+Verifier PING et le test LED avant SEND. Recharger apres une coupure.
 Compilation et simulations controlees ; aucun essai sur carte ici.
-Le timing nextpnr ne certifie pas les GPIO/DDR et la liaison physique a 200 MHz.
+Le timing nextpnr ne certifie pas les GPIO/DDR ni la liaison physique.

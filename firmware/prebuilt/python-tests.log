@@ -1,6 +1,7 @@
-Host software validation after the 2026-10-03 review.
-Command: PYTHONPATH=src python -m pytest -q
-324 passed in 12.05s
-Ruff check, Ruff format and mypy: passed.
-The build/rtl logs alongside this file are the original GitHub Actions firmware artifacts.
-No physical hardware validation.
+........................................................................ [ 18%]
+........................................................................ [ 37%]
+........................................................................ [ 56%]
+........................................................................ [ 74%]
+........................................................................ [ 93%]
+.........................                                                [100%]
+385 passed in 14.02s

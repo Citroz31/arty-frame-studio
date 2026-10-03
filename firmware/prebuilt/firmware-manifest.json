@@ -1,9 +1,9 @@
 {
-  "source_commit": "7fa89e95099d3db9968eb42c0e77aa4ec8a2fccf",
-  "workflow_run": "https://github.com/Citroz31/arty-frame-studio/actions/runs/37113537280",
+  "source_commit": "d588999403b7e9b4da954b160d5d79e2ed5f63d2",
+  "workflow_run": "https://github.com/Citroz31/arty-frame-studio/actions/runs/37142507552",
   "part": "xc7a100tcsg324-1",
   "idcode": "0x03631093",
-  "sha256": "4d4f8831154475354e5385581bd08ab296dcdd16b1d4f683ab8f52a51cf4975d",
+  "sha256": "859ad3674bcd2505c6f510436a5f123c3004f208be9fde969338a82e8f47effb",
   "payload_bytes": 3825788,
   "tools": {
     "oss_cad_suite": {
@@ -43,18 +43,32 @@
     "parity": "none",
     "stop_bits": 1
   },
+  "build_id": 0,
+  "firmware_config": {
+    "schema_version": 1,
+    "firmware": {
+      "core_hz": 200000000,
+      "data_pin": "JB1",
+      "clock_pin": "JB2",
+      "latch_pin": "JB3",
+      "drive_ma": 8,
+      "slew": "FAST"
+    }
+  },
+  "firmware_summary": "c\u0153ur 200 MHz, DATA JB1 (E15), CLK JB2 (E16), LATCH JB3 (D15), LVCMOS33 8 mA FAST, build 0x00000000",
   "timing_scope": "nextpnr register paths; excludes physical GPIO/DDR validation",
-  "timing_requirement_mhz": 200,
-  "routed_core_fmax_mhz": 218.05494689941406,
+  "timing_requirement_mhz": 200.0,
+  "routed_core_fmax_mhz": 206.14306640625,
+  "nextpnr_seed": 4,
   "hardware_validated": false,
   "source_sha256": {
-    "firmware/constraints/arty_a7_100t.xdc": "4ce99f6f566a7bb54b80d5a8d023e0bcb1582de17a0c358841a08ffd0692f95f",
-    "firmware/rtl/arty_top.v": "060a4b3207dc283aad1315f749b7bb0a33113ffa797b648a59d119ffb4ac5e6b",
-    "firmware/rtl/frame_controller.v": "d779ea51194634ed2cd63a202f0f63563eb746745416fa928b112c1b76dd28c7",
+    "firmware/constraints/arty_a7_100t.xdc": "f9ef2861af004291d081500ec96e9ab1982b5d65d68111615b05f256a7437785",
+    "firmware/rtl/arty_top.v": "751bd4376233474b4d0e86f792079d7c00919873c9a549a924466318967f89ad",
+    "firmware/rtl/frame_controller.v": "323b6fd3559dc48854bb927450e9b83bfb2aa6ce3514e4d162edfa65b748702e",
     "firmware/rtl/frame_engine.v": "fe3526aeea5581b61b2e6dd4a68ec242373c578cc2394a707e0aad3fead25b0b",
     "firmware/rtl/packet_rx.v": "5d0c44fa0e867ae519f7e78f88a6f5e2be61c73b5250d79f6b34ca11270d6587",
     "firmware/rtl/uart_rx.v": "8d609b14214787654cf21e86f13445192b880703d99bbcc9a89ba451e85ba616",
     "firmware/rtl/uart_tx.v": "c88696f9cdb6b7b16c44604ab33fd0934b7bfbfe58a2d23aa8be8fbc13478acd",
-    "firmware/sim/xilinx_primitives_sim.v": "a3719e2675197d204e8f25df32cd32550c5faa8d911469456fba70398a3d8c87"
+    "firmware/sim/xilinx_primitives_sim.v": "80b59137a39d06eaf9063710445d4238e014235d8c35a7697ca7a8b4cc56b1e9"
   }
 }
