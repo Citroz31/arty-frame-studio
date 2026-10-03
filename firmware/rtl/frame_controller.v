@@ -169,9 +169,12 @@ module frame_controller #(
     wire take_reply = !sending && !preparing && reply_count != 0;
     // reply_count covers committed entries only. An accepted reply reserves
     // one slot until its registered write is committed on the next edge.
-    // A simultaneous pop makes that slot available at actual acceptance.
-    wire reply_capacity = (reply_count < 4
-        && !(write_pending && reply_count == 3)) || take_reply;
+    // reply_room is that free-slot test, registered one cycle ahead from the
+    // exact next occupancy: START/STOP/LED then depend on three flip-flops,
+    // not on the reply transmitter state, before their wide enable fanout.
+    // A pop in the same cycle is not counted as room: conservative only.
+    reg reply_room;
+    wire reply_capacity = reply_room;
     wire accept_request = validated_valid && reply_capacity;
     reg [7:0] status, reply_busy;
     reg [15:0] reply_completed;
@@ -247,6 +250,7 @@ module frame_controller #(
             read_pointer <= 0;
             write_pointer <= 0;
             reply_count <= 0;
+            reply_room <= 1;
             write_pending <= 0;
             pending_address <= 0;
             pending_reply <= 0;
@@ -262,6 +266,9 @@ module frame_controller #(
                 2'b01: reply_count <= reply_count-1'b1;
                 default: reply_count <= reply_count;
             endcase
+            // Next occupancy = committed + pending write - pop + new request.
+            reply_room <= {1'b0, reply_count} + write_pending + accept_request
+                - take_reply < 4;
             // Snapshot the reply at the same edge that executes START/STOP.
             // Only the write enable is conditional; unconditional data and
             // address registers keep queue-capacity logic off their enables.
