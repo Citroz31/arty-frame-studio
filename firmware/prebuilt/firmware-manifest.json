@@ -1,9 +1,9 @@
 {
-  "source_commit": "2bb48169e502263fd815ce640d57bdf1e9f9975f",
-  "workflow_run": "https://github.com/Citroz31/arty-frame-studio/actions/runs/37210299828",
+  "source_commit": "dbe680347c195c94bc26d02c145862e264aa5c35",
+  "workflow_run": "https://github.com/Citroz31/arty-frame-studio/actions/runs/37210822783",
   "part": "xc7a100tcsg324-1",
   "idcode": "0x03631093",
-  "sha256": "b5dea4c618c98871b51d8bb4c202f4da6102063dbabad8dd2149326fbc6e4453",
+  "sha256": "02c208aa8cbe79599f605e2f14d667a8f4a77361e56637832449e359f2edb57e",
   "payload_bytes": 3825788,
   "tools": {
     "oss_cad_suite": {
@@ -58,8 +58,8 @@
   "firmware_summary": "c\u0153ur 200 MHz, DATA JB1 (E15), CLK JB2 (E16), LATCH JB3 (D15), LVCMOS33 8 mA FAST, build 0x00000000",
   "timing_scope": "nextpnr register paths; excludes physical GPIO/DDR validation",
   "timing_requirement_mhz": 200.0,
-  "routed_core_fmax_mhz": 200.04000854492188,
-  "nextpnr_seed": 4,
+  "routed_core_fmax_mhz": 210.79258728027344,
+  "nextpnr_seed": 8,
   "hardware_validated": false,
   "source_sha256": {
     "firmware/constraints/arty_a7_100t.xdc": "f9ef2861af004291d081500ec96e9ab1982b5d65d68111615b05f256a7437785",
