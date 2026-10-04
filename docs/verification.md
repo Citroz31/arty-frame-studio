@@ -10,9 +10,16 @@ carte.
 
 ## Logiciel et simulation
 
-Les **486 tests Python passent** : paramètres et profils, chronogrammes,
+Les **605 tests Python passent** : paramètres et profils, chronogrammes,
 protocole UART, transport, interface, CLI et protections du flux FPGA.
 Ruff, formatage et mypy vérifient le code Python.
+
+La [revue de la saisie binaire](review-saisie-binaire.md) ajoute les contrôles
+du nombre de bits automatique, des conversions sans changement de longueur,
+du copier-coller, des profils à la fréquence minimale et de STOP malgré une
+saisie invalide. Les 224 chargements de profils couvrent les 32 horloges
+proposées et les diviseurs limites ; les essais Flet/Chromium confirment la
+saisie et l'envoi en démo sur quatre et huit bits.
 
 Ils couvrent aussi le refus du `.bit` obsolète, la cohérence fichier/manifeste/
 sources/timing, les fréquences juste sous les 65 534 seuils réalisables et

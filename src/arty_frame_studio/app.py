@@ -27,12 +27,16 @@ from .firmware_config import (
 )
 from .model import (
     CONTINUOUS,
+    MAX_BITS,
     MAX_COUNTER,
     REFERENCE_HZ,
     FrameConfig,
+    binary_bit_count,
     divider_for_frequency,
+    format_word,
     free_clock_ticks,
     load_profile,
+    parse_binary_frame,
     parse_word,
     save_profile,
     ticks_for_ns,
@@ -293,7 +297,9 @@ class Studio:
         self.known_firmwares = {0: FirmwareBuildConfig()}
         self.browse_target: ft.TextField | None = None
         self.led_step = 0.25
-        self.previous_base = "hex"
+        # Notation par défaut : binaire, la longueur saisie fixe le nombre de bits.
+        self.previous_base = "bin"
+        self.last_valid_bit_count = FrameConfig().bit_count
         self.loop: asyncio.AbstractEventLoop | None = None
         self.worker_messages: list[str] = []
         self.log_flush_handle: asyncio.TimerHandle | None = None
@@ -381,11 +387,17 @@ class Studio:
             ft.Container(width=16, height=16, border_radius=8, bgcolor=LED_OFF) for _ in range(4)
         ]
         self.led_note = ft.Text(size=11, color=MUTED)
-        self.word = self._field("Valeur de la trame", "2AAAAAA", width=340)
+        default = FrameConfig()
+        self.word = self._field(
+            "Valeur de la trame",
+            format_word(default.word, default.bit_count, "bin"),
+            width=340,
+            on_change=self._word_changed,
+        )
         self.word.text_style = ft.TextStyle(font_family="monospace", color=TEXT)
         self.base = ft.Dropdown(
             label="Notation",
-            value="hex",
+            value="bin",
             width=180,
             options=[
                 ft.dropdown.Option("bin", "Binaire"),
@@ -394,7 +406,8 @@ class Studio:
             ],
             on_change=self._base_changed,
         )
-        self.bit_count = self._field("Nombre de bits", "26", width=145, helper="1 à 26 bits")
+        self.bit_count = self._field("Nombre de bits", str(default.bit_count), width=145)
+        self._sync_bit_count_field()
         self.core_clock = ft.Dropdown(
             label="Horloge du cœur FPGA",
             value=str(REFERENCE_HZ),
@@ -699,8 +712,16 @@ class Studio:
             "https://github.com/Citroz31/arty-frame-studio/blob/main/docs/guide-utilisateur-sipo-spi.md"
         )
 
-    def _config(self) -> FrameConfig:
+    def _frame_value(self) -> tuple[int, int]:
+        """Valeur et nombre de bits saisis ; en binaire, la longueur saisie fait foi."""
+        base = self.base.value or "bin"
+        if base == "bin":
+            return parse_binary_frame(self.word.value or "")
         bits = int(self.bit_count.value or "")
+        return parse_word(self.word.value or "", base, bits), bits
+
+    def _config(self) -> FrameConfig:
+        word, bits = self._frame_value()
         # The divider is authoritative, while the requested frequency must also
         # remain valid after edits to another field.
         requested_hz = float((self.frequency.value or "").replace(",", ".")) * 1e6
@@ -725,7 +746,7 @@ class Studio:
                 self.gap_ns.value or "", allow_zero=True, core_hz=self.core_hz
             )
         return FrameConfig(
-            word=parse_word(self.word.value or "", self.base.value or "hex", bits),
+            word=word,
             bit_count=bits,
             divider=divider,
             latch_ticks=latch_ticks,
@@ -751,6 +772,7 @@ class Studio:
             self._update()
 
     def _changed(self, _: Any = None) -> None:
+        self._sync_bit_count_field()
         self.quantization_note.value = (
             f"Durées arrondies au pas de {1e9 / (2 * self.core_hz):.6g} ns · "
             f"cœur {self.core_hz / 1e6:g} MHz."
@@ -840,25 +862,16 @@ class Studio:
         try:
             hz = float((self.frequency.value or "").replace(",", ".")) * 1e6
             self.divider.value = str(divider_for_frequency(hz, self.core_hz))
-        except (ValueError, OverflowError) as exc:
-            self.current_config = None
-            self.waveform = None
-            self.wave_canvas.shapes = []
-            self.wave_canvas.visible = False
-            self.validation.value = f"Fréquence invalide : {exc}"
-            self.validation.visible = True
-            self.frequency_actual.value = "Fréquence demandée à corriger"
-            self.latch_ns.helper_text = self.gap_ns.helper_text = None
-            self._buttons()
-            self._update()
-            return
+        except (ValueError, OverflowError):
+            # La validation commune efface aussi les anciens aperçus et durées.
+            pass
         self._changed()
 
     def _divider_changed(self, _: Any) -> None:
         try:
             divider = int(self.divider.value or "")
             if divider > 0:
-                self.frequency.value = f"{self.core_hz / 1e6 / divider:.9g}"
+                self.frequency.value = f"{self.core_hz / divider / 1e6:.17g}"
         except ValueError:
             pass
         self._changed()
@@ -876,22 +889,72 @@ class Studio:
         self.divider.helper_text = f"{core_hz / 1e6:g} MHz / N · 1 à 65 535"
         self._frequency_changed(None)
 
+    def _sync_bit_count_field(self) -> None:
+        """En binaire, le nombre de bits suit la saisie et n'est pas modifiable."""
+        binary = (self.base.value or "bin") == "bin"
+        self.bit_count.disabled = binary
+        self.bit_count.helper_text = "Automatique · 26 bits max" if binary else "1 à 26 bits"
+        if binary:
+            # Même les rafraîchissements sans événement de saisie doivent
+            # montrer la longueur réelle, y compris 0 ou plus de 26 bits.
+            self.bit_count.value = str(binary_bit_count(self.word.value or ""))
+            try:
+                _, bits = parse_binary_frame(self.word.value or "")
+            except ValueError:
+                pass
+            else:
+                self.last_valid_bit_count = bits
+        else:
+            try:
+                bits = int(self.bit_count.value or "")
+            except ValueError:
+                pass
+            else:
+                if 1 <= bits <= MAX_BITS:
+                    self.last_valid_bit_count = bits
+        self.word.helper_text = (
+            "Un chiffre = un bit, MSB à gauche · espaces et _ ignorés"
+            if binary
+            else "Nombre de bits à régler à droite, zéros de tête compris"
+        )
+
+    def _word_changed(self, _: Any = None) -> None:
+        self._changed()
+
     def _base_changed(self, _: Any) -> None:
+        base = self.base.value or "bin"
+        normalized = "".join(
+            char for char in self.word.value or "" if char != "_" and not char.isspace()
+        )
+        prefix = {"bin": "0b", "hex": "0x"}.get(self.previous_base)
+        if not normalized or normalized.lower() == prefix:
+            # Un champ vide peut changer de notation sans inventer de bits.
+            # Un préfixe seul reste vide, même si « 0b » serait valide en hex.
+            self.word.value = ""
+            self.bit_count.value = str(self.last_valid_bit_count) if base != "bin" else "0"
+            self.previous_base = base
+            self._changed()
+            return
         try:
-            word = parse_word(
-                self.word.value or "", self.previous_base, int(self.bit_count.value or "")
-            )
-            base = self.base.value
-            self.word.value = (
-                f"{word:0{int(self.bit_count.value or '')}b}"
-                if base == "bin"
-                else f"{word:X}"
-                if base == "hex"
-                else str(word)
-            )
+            if self.previous_base == "bin":
+                word, bits = parse_binary_frame(self.word.value or "")
+            else:
+                bits = int(self.bit_count.value or "")
+                word = parse_word(self.word.value or "", self.previous_base, bits)
+            # Vers le binaire, les zéros de tête conservent la longueur choisie.
+            self.word.value = format_word(word, bits, base)
+            self.bit_count.value = str(bits)
         except (ValueError, TypeError):
-            pass
-        self.previous_base = self.base.value or "hex"
+            # Une saisie invalide dans sa notation ne doit jamais être
+            # réinterprétée comme une nouvelle valeur valide dans une autre.
+            self.base.value = self.previous_base
+            self._changed()
+            self.validation.value += (
+                " Corrigez la trame ou effacez-la avant de changer de notation."
+            )
+            self._update()
+            return
+        self.previous_base = base
         self._changed()
 
     def _buttons(self) -> None:
@@ -1425,11 +1488,13 @@ class Studio:
             # Sans carte, l'interface adopte l'horloge prévue par le profil.
             self.core_hz = config.core_hz
             self.core_clock.value = str(config.core_hz)
-        self.base.value = "hex"
-        self.previous_base = "hex"
-        self.word.value = f"{config.word:X}"
+        # Le profil s'affiche dans la notation choisie ; en binaire, sur toute
+        # sa longueur, zéros de tête compris.
+        base = self.base.value or "bin"
+        self.previous_base = base
+        self.word.value = format_word(config.word, config.bit_count, base)
         self.bit_count.value = str(config.bit_count)
-        self.frequency.value = f"{config.frequency_hz / 1e6:.9g}"
+        self.frequency.value = f"{config.frequency_hz / 1e6:.17g}"
         # En CLK libre, le champ LATCH porte l'impulsion visible (k périodes).
         self.latch_ns.value = f"{config.latch_active_ticks * config.tick_ns:.9g}"
         self.gap_ns.value = f"{config.gap_ticks * config.tick_ns:.9g}"

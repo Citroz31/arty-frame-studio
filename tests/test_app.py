@@ -78,6 +78,17 @@ def test_invalid_frequency_stays_invalid_when_other_fields_change(tmp_path):
     assert studio.validation.value
 
 
+def test_invalid_frequency_clears_every_previous_preview(tmp_path):
+    studio = make_studio(tmp_path)
+    assert studio.binary_preview.value != "—" and studio.timing_summary.value
+    studio.frequency.value = "nan"
+    studio._frequency_changed(None)
+    assert studio.current_config is None and studio.waveform is None
+    assert studio.binary_preview.value == "—"
+    assert not studio.order_preview.value and not studio.timing_summary.value
+    assert not studio.wave_canvas.visible and not studio.wave_canvas.shapes
+
+
 def test_profile_updates_all_editors(tmp_path):
     studio = make_studio(tmp_path)
     config = FrameConfig(5, 3, 8, 3, 0, 2, True, True)
@@ -831,5 +842,244 @@ def test_port_discovery_prefers_usb_ftdi_and_preserves_manual_selection(tmp_path
         ports.clear()
         await studio._refresh_ports()
         assert not studio.port.value
+
+    run_async(exercise())
+
+
+def test_binary_is_the_default_notation_with_an_automatic_bit_count(tmp_path):
+    studio = make_studio(tmp_path)
+    default = FrameConfig()
+    assert studio.base.value == "bin"
+    assert studio.word.value == f"{default.word:026b}"
+    assert studio.bit_count.value == "26" and studio.bit_count.disabled
+    assert studio.current_config == default
+    # Typing and removing digits changes the frame length at once.
+    for text, bits in (("1", 1), ("101", 3), ("1010 0101", 8), ("0001", 4), ("10", 2)):
+        studio.word.value = text
+        studio._word_changed()
+        assert studio.bit_count.value == str(bits)
+        assert studio.current_config.bit_count == bits
+    assert studio.current_config.word == 0b10
+    studio.word.value = "1010 0101"
+    studio._word_changed()
+    assert studio.current_config.word == 0xA5 and studio.binary_preview.value == "10100101"
+
+
+def test_binary_entry_beyond_26_bits_is_refused_without_sending(tmp_path):
+    studio = make_studio(tmp_path)
+    studio.word.value = "1" * 27
+    studio._word_changed()
+    assert studio.bit_count.value == "27"
+    assert studio.current_config is None and studio.send_button.disabled
+    assert "26 bits maximum" in studio.validation.value
+    studio.word.value = "1" * 26
+    studio._word_changed()
+    assert studio.current_config.bit_count == 26 and not studio.validation.visible
+    for text, message in (("", "au moins un bit"), ("1021", "seulement 0 et 1")):
+        studio.word.value = text
+        studio._word_changed()
+        assert studio.current_config is None and message in studio.validation.value
+
+
+def test_notation_changes_keep_the_value_and_its_length(tmp_path):
+    studio = make_studio(tmp_path)
+    studio.word.value = "00010100101"  # 11 bits, leading zeros included
+    studio._word_changed()
+    studio.base.value = "hex"
+    studio._base_changed(None)
+    assert studio.word.value == "A5" and studio.bit_count.value == "11"
+    assert not studio.bit_count.disabled
+    assert studio.current_config.bit_count == 11 and studio.current_config.word == 0xA5
+    # In hexadecimal the bit count stays a manual setting.
+    studio.bit_count.value = "12"
+    studio._changed()
+    studio.base.value = "dec"
+    studio._base_changed(None)
+    assert studio.word.value == "165" and studio.bit_count.value == "12"
+    studio.base.value = "bin"
+    studio._base_changed(None)
+    assert studio.word.value == "000010100101" and studio.bit_count.disabled
+    assert studio.current_config.bit_count == 12
+
+
+def test_profiles_are_shown_in_the_selected_notation(tmp_path):
+    studio = make_studio(tmp_path)
+    profile = FrameConfig(word=0xA5, bit_count=8, divider=20)
+    studio._set_profile(profile)
+    assert studio.word.value == "10100101" and studio.bit_count.value == "8"
+    assert studio._config() == profile
+    studio.base.value = "hex"
+    studio._base_changed(None)
+    studio._set_profile(FrameConfig(word=0x5, bit_count=12))
+    assert studio.word.value == "5" and studio.bit_count.value == "12"
+    assert studio._config().bit_count == 12
+
+
+@pytest.mark.parametrize(
+    "base,text,bits,destination",
+    [
+        ("bin", "0002", 4, "hex"),
+        ("bin", "0x", 2, "hex"),
+        ("bin", "1" * 27, 27, "dec"),
+        ("hex", "10", 0, "bin"),
+        ("hex", "10", 27, "bin"),
+        ("hex", "0010", 1, "bin"),
+        ("dec", "0b10", 26, "bin"),
+        ("dec", "0b", 26, "hex"),
+        ("dec", "000A", 26, "hex"),
+    ],
+)
+def test_invalid_frame_cannot_be_reinterpreted_by_changing_notation(
+    tmp_path, base, text, bits, destination
+):
+    studio = make_studio(tmp_path)
+    studio.base.value = base
+    studio._base_changed(None)
+    studio.word.value = text
+    studio.bit_count.value = str(bits)
+    studio._word_changed()
+    assert studio.current_config is None
+    studio.base.value = destination
+    studio._base_changed(None)
+    assert studio.base.value == studio.previous_base == base
+    assert studio.word.value == text and studio.bit_count.value == str(bits)
+    assert studio.current_config is None and studio.send_button.disabled
+    assert "avant de changer de notation" in studio.validation.value
+
+
+@pytest.mark.parametrize(
+    "source,destination,text",
+    [
+        ("bin", "hex", ""),
+        ("bin", "dec", " _ "),
+        ("bin", "hex", "0b"),
+        ("bin", "hex", "0\tb"),
+        ("bin", "hex", "\u00a0_\u202f"),
+        ("hex", "bin", "0x"),
+        ("hex", "dec", " _ "),
+    ],
+)
+def test_empty_frame_can_change_notation_without_inventing_bits(
+    tmp_path, source, destination, text
+):
+    studio = make_studio(tmp_path)
+    studio._set_profile(FrameConfig(word=1, bit_count=8))
+    studio.base.value = source
+    studio._base_changed(None)
+    studio.word.value = text
+    studio._word_changed()
+    studio.base.value = destination
+    studio._base_changed(None)
+    assert studio.base.value == studio.previous_base == destination
+    assert studio.word.value == "" and studio.current_config is None
+    assert studio.bit_count.value == ("0" if destination == "bin" else "8")
+    assert studio.bit_count.disabled == (destination == "bin")
+
+
+def test_empty_frame_restores_a_valid_manual_width_after_invalid_edits(tmp_path):
+    studio = make_studio(tmp_path)
+    studio.word.value = "00101"
+    studio._word_changed()
+    studio.base.value = "hex"
+    studio._base_changed(None)
+    studio.bit_count.value = "0"
+    studio.word.value = ""
+    studio._changed()
+    studio.base.value = "bin"
+    studio._base_changed(None)
+    assert studio.bit_count.value == "0" and studio.word.value == ""
+    studio.base.value = "dec"
+    studio._base_changed(None)
+    assert studio.bit_count.value == "5" and not studio.bit_count.disabled
+    assert studio.current_config is None
+
+
+def test_hexadecimal_0b_is_a_value_rather_than_an_empty_binary_prefix(tmp_path):
+    studio = make_studio(tmp_path)
+    studio._set_profile(FrameConfig(word=1, bit_count=8))
+    studio.base.value = "hex"
+    studio._base_changed(None)
+    studio.word.value = "0B"
+    studio._word_changed()
+    assert studio.current_config.word == 11
+    studio.base.value = "bin"
+    studio._base_changed(None)
+    assert studio.word.value == "00001011" and studio.current_config.word == 11
+    assert studio.current_config.bit_count == 8
+    studio.base.value = "hex"
+    studio._base_changed(None)
+    assert studio.word.value == "B" and studio.current_config.word == 11
+
+
+def test_binary_width_is_synchronized_by_every_refresh(tmp_path):
+    studio = make_studio(tmp_path)
+    for text, bits in (("00101", 5), ("", 0), ("1" * 27, 27)):
+        studio.word.value = text
+        studio._changed()
+        assert studio.bit_count.value == str(bits) and studio.bit_count.disabled
+
+
+def test_pasted_binary_groups_ignore_all_whitespace(tmp_path):
+    studio = make_studio(tmp_path)
+    studio.word.value = "0b00\t101\n0\u00a01\u202f1"
+    studio._word_changed()
+    assert studio.bit_count.value == "8" and studio.binary_preview.value == "00101011"
+    assert studio.current_config == FrameConfig(word=0b00101011, bit_count=8)
+    studio.base.value = "hex"
+    studio._base_changed(None)
+    assert studio.word.value == "2B" and studio.current_config.bit_count == 8
+
+
+@pytest.mark.parametrize("core_hz", [100_000_000, 150_000_000, 200_000_000])
+def test_minimum_frequency_profiles_and_dividers_stay_valid(tmp_path, core_hz):
+    studio = make_studio(tmp_path)
+    profile = FrameConfig(core_hz=core_hz, divider=65535)
+    studio._set_profile(profile)
+    assert studio.current_config == profile
+    studio.frequency.value = "nan"
+    studio._frequency_changed(None)
+    studio._divider_changed(None)
+    assert studio.current_config == profile
+
+
+@pytest.mark.parametrize("base", ["bin", "hex", "dec"])
+def test_profile_round_trip_and_send_keep_selected_notation_and_leading_bits(tmp_path, base):
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.base.value = base
+        studio._base_changed(None)
+        profile = FrameConfig(word=5, bit_count=12, lsb_first=True)
+        studio._set_profile(profile)
+        await studio._save_profile(None)
+        studio.word.value = ""
+        studio._word_changed()
+        await studio._load_profile(None)
+        assert studio.base.value == base and studio.bit_count.value == "12"
+        assert studio.current_config == profile
+        await studio._toggle_connection()
+        await studio._send(None)
+        assert studio.last_sent == profile
+        assert not studio.page.messages
+
+    run_async(exercise())
+
+
+@pytest.mark.parametrize("invalid_word", ["", "1" * 27, "0002"])
+def test_invalid_binary_draft_keeps_stop_available_for_an_active_emission(tmp_path, invalid_word):
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.continuous.value = True
+        studio._continuous_changed()
+        await studio._toggle_connection()
+        await studio._send(None)
+        active = studio.last_sent
+        assert studio.device_status.busy
+        studio.word.value = invalid_word
+        studio._word_changed()
+        assert studio.current_config is None and studio.send_button.disabled
+        assert not studio.stop_button.disabled
+        assert studio.last_sent == active and studio.device_status.busy
+        await studio._stop(None)
+        assert not studio.device_status.busy and not studio.page.messages
 
     run_async(exercise())

@@ -22,9 +22,16 @@ Le guide détaille l'installation Windows, le chargement du firmware, le câblag
 et les chronogrammes. Deux boutons chargent directement un **exemple SIPO**
 ou une **CLK seule à 10 MHz**, sans lancer d'émission.
 
+Le [récapitulatif des apports de Claude](docs/recapitulatif-claude.md) liste
+chaque commit et ce qu'il apporte.
+
 La [revue de la CLK continue](docs/review-clk-continue.md) intègre le firmware
 révision 4 de Claude et renforce les contrôles de l'interface, l'arrêt en CLI,
 les aperçus et la traçabilité des compilations.
+
+La [revue de la saisie binaire](docs/review-saisie-binaire.md) conserve le
+nombre de bits automatique, sécurise les conversions, améliore le
+copier-coller et préserve la longueur et la fréquence des profils.
 
 Depuis l'onglet **FPGA → Personnaliser le firmware**, un nouveau firmware peut
 être compilé avec une autre **horloge de cœur** (32 valeurs de 50 à 200 MHz,
@@ -106,8 +113,11 @@ ou `--project-root` pour les commandes FPGA de la CLI.
 ## Utilisation
 
 1. Ouvrir l’application et sélectionner le mode démonstration pour découvrir le
-   pilotage sans carte. Saisir la valeur en binaire, hexadécimal ou décimal,
-   choisir 1 à 26 bits et régler la fréquence.
+   pilotage sans carte. Saisir la valeur, en binaire par défaut : chaque chiffre
+   est un bit, **zéros de tête compris**, et le nombre de bits suit la saisie
+   (1 à 26). En hexadécimal ou décimal, le nombre de bits se règle à la main.
+   Changer de notation convertit une valeur valide en conservant sa longueur.
+   Régler ensuite la fréquence.
 2. Définir l’ordre MSB/LSB, la polarité du latch, sa durée, la pause après trame et
    le nombre de répétitions, ou activer **Répéter jusqu'à Arrêter** :
    la carte répète alors la trame sans fin (firmware révision 3). **CLK libre entre les trames**
@@ -135,7 +145,10 @@ ou `--project-root` pour les commandes FPGA de la CLI.
 
 La programmation proposée charge la **SRAM volatile** : il faut reprogrammer
 après une coupure d’alimentation. Une programmation de la flash n’est pas effectuée.
-Les profils sauvegardent les paramètres dans un JSON versionné.
+Les profils sauvegardent les paramètres, dont la valeur et le nombre de bits,
+dans un JSON versionné. Charger un profil ou un exemple conserve la notation
+sélectionnée ; en binaire, tous les bits du profil sont affichés, zéros de tête
+compris. La notation d'affichage n'est pas enregistrée dans le fichier.
 
 Pour une **CLK indéfinie sans interruption**, activer les **deux options**,
 puis cliquer sur **Démarrer CLK continue**. Le firmware doit annoncer les

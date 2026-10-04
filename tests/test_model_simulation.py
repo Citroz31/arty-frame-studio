@@ -10,8 +10,11 @@ import pytest
 
 from arty_frame_studio.model import (
     FrameConfig,
+    binary_bit_count,
     divider_for_frequency,
+    format_word,
     load_profile,
+    parse_binary_frame,
     parse_word,
     save_profile,
     ticks_for_ns,
@@ -106,6 +109,21 @@ def test_unachievable_frequency_is_rejected(frequency: float) -> None:
 )
 def test_parse_valid_words(text: str, base: str, bits: int, value: int) -> None:
     assert parse_word(text, base, bits) == value
+
+
+@pytest.mark.parametrize("separator", [" ", "\t", "\r\n", "\u00a0", "\u202f", "_"])
+@pytest.mark.parametrize(
+    "text,base,bits,value",
+    [
+        ("0B00{separator}101", "bin", 5, 5),
+        ("0X0{separator}A5", "hex", 8, 165),
+        ("1{separator}65", "dec", 8, 165),
+    ],
+)
+def test_word_groups_accept_whitespace_and_underscores(
+    separator: str, text: str, base: str, bits: int, value: int
+) -> None:
+    assert parse_word(text.format(separator=separator), base, bits) == value
 
 
 @pytest.mark.parametrize(
@@ -401,3 +419,103 @@ def test_free_clock_preview_reduces_complete_frames_without_exceeding_budget():
     assert waveform.frames_simulated == 2 and not waveform.partial_last_frame
     assert waveform.truncated and len(waveform.transitions) <= MAX_FREE_CLOCK_TRANSITIONS
     assert waveform.duration_ticks == 2 * config.frame_duration_ticks
+
+
+@pytest.mark.parametrize(
+    "text,value,bits",
+    [
+        ("0", 0, 1),
+        ("1", 1, 1),
+        ("0101", 5, 4),
+        ("1010 0101", 0xA5, 8),
+        ("0b10_10", 10, 4),
+        (" 0B00\t10\r\n_01 ", 9, 6),
+        ("0b00\u00a010\u202f01", 9, 6),
+        ("1" * 26, (1 << 26) - 1, 26),
+        ("0" * 26, 0, 26),
+    ],
+)
+def test_binary_frames_take_their_length_from_the_digits(text: str, value: int, bits: int) -> None:
+    assert parse_binary_frame(text) == (value, bits)
+    assert binary_bit_count(text) == bits
+
+
+@pytest.mark.parametrize(
+    "text,message",
+    [
+        ("", "au moins un bit"),
+        ("0b", "au moins un bit"),
+        ("\t _ 0B_\r\n", "au moins un bit"),
+        ("1021", "seulement 0 et 1"),
+        ("0x10", "seulement 0 et 1"),
+        ("0b0b1", "seulement 0 et 1"),
+        ("-01", "seulement 0 et 1"),
+        ("\uff10\uff11", "seulement 0 et 1"),
+        ("1" * 27, "27 bits saisis : 26 bits maximum"),
+        ("0b" + "0" * 27, "27 bits saisis : 26 bits maximum"),
+    ],
+)
+def test_invalid_binary_frames_are_explained(text: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        parse_binary_frame(text)
+
+
+def test_words_are_formatted_for_each_notation() -> None:
+    assert format_word(0xA5, 8, "bin") == "10100101"
+    assert format_word(0xA5, 12, "bin") == "000010100101"
+    assert format_word(0xA5, 8, "hex") == "A5"
+    assert format_word(0xA5, 8, "dec") == "165"
+    with pytest.raises(ValueError):
+        format_word(1, 1, "oct")
+
+
+@pytest.mark.parametrize("base", ["bin", "hex", "dec"])
+@pytest.mark.parametrize(
+    "word,bits",
+    [(0, 1), (0, 26), (1, 26), (5, 8), ((1 << 26) - 1, 26)],
+)
+def test_formatted_words_preserve_value_and_binary_frame_length(
+    word: int, bits: int, base: str
+) -> None:
+    formatted = format_word(word, bits, base)
+    assert parse_word(formatted, base, bits) == word
+    if base == "bin":
+        assert parse_binary_frame(formatted) == (word, bits)
+
+
+@pytest.mark.parametrize("base", ["bin", "hex", "dec"])
+@pytest.mark.parametrize(
+    "word,bits",
+    [(-1, 3), (8, 3), (1 << 26, 26), (True, 3), (1.0, 3), (0, 0), (0, 27), (0, True), (0, 3.0)],
+)
+def test_format_word_rejects_invalid_frame_values(word: int, bits: int, base: str) -> None:
+    with pytest.raises(ValueError):
+        format_word(word, bits, base)
+
+
+def test_binary_length_survives_profile_roundtrip_and_simulation(tmp_path: Path) -> None:
+    word, bits = parse_binary_frame("0b0001_0010")
+    config = FrameConfig(word=word, bit_count=bits)
+    path = tmp_path / "binary.json"
+    save_profile(config, path)
+    restored = load_profile(path)
+    assert format_word(restored.word, restored.bit_count, "bin") == "00010010"
+    assert tuple(point.data for point in simulate(restored).transitions if point.clk) == (
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+    )
+
+
+@pytest.mark.parametrize("text", [None, 1, True, b"01"])
+def test_parsers_require_text(text: str) -> None:
+    for parse in (binary_bit_count, parse_binary_frame):
+        with pytest.raises(ValueError, match="texte"):
+            parse(text)
+    with pytest.raises(ValueError, match="texte"):
+        parse_word(text, "bin", 2)

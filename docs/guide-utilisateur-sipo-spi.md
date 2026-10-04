@@ -148,6 +148,46 @@ composant ; elles ne doivent pas être branchées directement.
 
 ## 5. Envoyer `0xA5` à 10 MHz, une seule fois
 
+### Saisir la trame : binaire par défaut
+
+Dans **Pilotage → Trame série**, la notation proposée est **Binaire** : vous
+tapez directement les bits, dans l'ordre où ils s'écrivent, le bit de poids fort
+(MSB) à gauche.
+
+- **Chaque chiffre est un bit.** Le champ **Nombre de bits** se met à jour à
+  chaque chiffre ajouté ou retiré ; il n'est pas modifiable dans cette notation.
+  Saisir au moins un bit : une valeur vide ne peut pas être envoyée.
+- **Les zéros de tête comptent** : `00000101` est une trame de 8 bits, alors
+  que `101` n'en fait que 3. Tapez tous les bits attendus par le récepteur.
+- **Espaces et `_` servent seulement à grouper** : `1010 0101` ou `1010_0101`
+  donnent les mêmes 8 bits. Le préfixe `0b` est accepté et ne compte pas.
+- **26 bits maximum par trame.** Au 27ᵉ chiffre, le message « 27 bits saisis :
+  26 bits maximum par trame » apparaît et l'envoi est désactivé jusqu'à ce
+  que vous retiriez un chiffre. Un caractère autre que 0, 1, espace ou `_`
+  est également signalé, sauf le préfixe `0b` au début.
+
+Les notations **Hexadécimal** et **Décimal** restent disponibles. Le champ
+**Nombre de bits** redevient alors réglable à la main, de 1 à 26 : la valeur
+doit y tenir, et les bits manquants à gauche sont des zéros. Le nombre de
+chiffres hexadécimaux ou décimaux ne fixe pas la longueur. Changer de
+notation convertit une valeur valide **sans changer la longueur** :
+`00010100101` (11 bits) devient `A5` en hexadécimal ou `165` en décimal,
+toujours avec 11 bits, puis de nouveau `00010100101` en binaire.
+Corriger une saisie invalide avant de changer de notation ; effacer le champ
+permet de choisir une autre notation avant de saisir une nouvelle valeur.
+
+Charger un profil ou un exemple conserve la notation sélectionnée et applique
+le nombre de bits du profil. En binaire, la valeur affiche tous ces bits,
+zéros de tête compris ; en hexadécimal ou décimal, sa longueur reste indiquée
+dans **Nombre de bits**. Le fichier JSON enregistre la valeur et la longueur,
+pas la notation d'affichage.
+
+L'option **LSB en premier** ne change pas la saisie : elle inverse l'ordre
+d'émission. La ligne **Ordre sur DATA**, sous la valeur, montre les bits dans
+l'ordre réellement envoyé.
+
+### Paramètres de l'exemple
+
 Vous pouvez saisir les paramètres ci-dessous ou charger le profil fourni :
 **[frame_sipo_8bits_10mhz.json](../examples/frame_sipo_8bits_10mhz.json)**.
 Dans **Pilotage → Profils de trame**, parcourir jusqu'à ce fichier puis cliquer
@@ -159,9 +199,9 @@ la carte et le câblage sont prêts.
 
 | Paramètre de Pilotage | Valeur | Sens |
 | --- | --- | --- |
-| Notation | Hexadécimal | `A5` est une valeur hexadécimale. |
-| Valeur de la trame | `A5` | Équivalent à 165 en décimal. |
-| Nombre de bits | **8** | Huit bits, y compris les zéros. |
+| Notation | **Binaire** (par défaut) | Les bits se tapent tels quels. |
+| Valeur de la trame | `10100101` (ou `1010 0101`) | `0xA5`, soit 165 en décimal. |
+| Nombre de bits | **8**, calculé automatiquement | Huit chiffres saisis, zéros compris. |
 | LSB en premier | **Désactivé** | Bit de poids fort d'abord : `1 0 1 0 0 1 0 1`. |
 | Fréquence demandée | **10 MHz** | Une période de CLK vaut 100 ns. |
 | Diviseur N | **20** | Cœur 200 MHz ÷ 20 = 10 MHz. |
@@ -176,6 +216,9 @@ La **fréquence obtenue** affichée doit être 10 MHz. Pour les autres valeurs,
 le diviseur entier peut imposer une fréquence plus basse que la demande.
 Avec le firmware fourni, les durées sont arrondies par pas de 2,5 ns ; 20 ns
 et 100 ns sont donc représentables exactement.
+
+En hexadécimal, saisir `A5` ou `0xA5` et régler **Nombre de bits** sur **8**
+donne la même trame. En décimal, saisir `165` avec **8** bits.
 
 Cliquer sur **Actualiser le chronogramme**, puis sur **Envoyer la trame**.
 Le FPGA présente le premier bit avant le premier front montant. La référence
@@ -296,8 +339,9 @@ sans nouvelle compilation et sans supposer un signal CS.
 
 Cliquer sur **Envoyer la trame** : CLK devient périodique à 10 MHz, puis continue
 jusqu'à **Arrêter**, un reset ou une coupure d'alimentation. **Elle ne tourne
-pas avant l'envoi**, lorsqu'aucune séquence n'est active. Le compteur représente
-ici des cycles du moteur de trame, pas directement le nombre de périodes CLK.
+pas avant l'envoi**, lorsqu'aucune séquence n'est active. Le compteur affiché
+compte des **trames** : ici, chacune dure deux périodes de CLK (un bit et une
+période de LATCH). Il reboucle à 65 536 et ne mesure pas une durée.
 
 ### Arrêter avant de déconnecter
 
@@ -370,6 +414,9 @@ simulation à une capture réelle de CLK, DATA et LATCH.
 | Le mot est faux avec CLK libre | Revenir au mode en rafales ; compter les fronts et vérifier le type de capture du latch. |
 | Le mot est correct lentement mais faux à 10 MHz | Vérifier les limites du datasheet, les fils et les temps setup/hold à l'oscilloscope ; réduire la fréquence. |
 | Envoyer est désactivé | Vérifier les paramètres et l'état : connecter, arrêter une émission active ou résoudre une commande non confirmée. |
+| « 26 bits maximum par trame » | Retirer des chiffres de la valeur binaire ; espaces et `_` ne comptent pas. |
+| Nombre de bits impossible à modifier | En binaire, il suit la saisie : ajouter ou retirer des chiffres, y compris des zéros de tête. Passer en hexadécimal ou décimal pour le régler à la main. |
+| Le récepteur reçoit des bits décalés | Vérifier que tous les zéros de tête sont saisis : la longueur de la trame est celle de la saisie binaire. |
 | La carte continue après fermeture | Reconnecter puis Arrêter ; RESET ou coupure si la liaison ne fonctionne plus. |
 
 En cas d'erreur persistante, ouvrir **Journal**, exporter le fichier et conserver
