@@ -30,9 +30,12 @@ from .model import (
     MAX_COUNTER,
     REFERENCE_HZ,
     FrameConfig,
+    binary_bit_count,
     divider_for_frequency,
+    format_word,
     free_clock_ticks,
     load_profile,
+    parse_binary_frame,
     parse_word,
     save_profile,
     ticks_for_ns,
@@ -293,7 +296,8 @@ class Studio:
         self.known_firmwares = {0: FirmwareBuildConfig()}
         self.browse_target: ft.TextField | None = None
         self.led_step = 0.25
-        self.previous_base = "hex"
+        # Notation par défaut : binaire, la longueur saisie fixe le nombre de bits.
+        self.previous_base = "bin"
         self.loop: asyncio.AbstractEventLoop | None = None
         self.worker_messages: list[str] = []
         self.log_flush_handle: asyncio.TimerHandle | None = None
@@ -381,11 +385,17 @@ class Studio:
             ft.Container(width=16, height=16, border_radius=8, bgcolor=LED_OFF) for _ in range(4)
         ]
         self.led_note = ft.Text(size=11, color=MUTED)
-        self.word = self._field("Valeur de la trame", "2AAAAAA", width=340)
+        default = FrameConfig()
+        self.word = self._field(
+            "Valeur de la trame",
+            format_word(default.word, default.bit_count, "bin"),
+            width=340,
+            on_change=self._word_changed,
+        )
         self.word.text_style = ft.TextStyle(font_family="monospace", color=TEXT)
         self.base = ft.Dropdown(
             label="Notation",
-            value="hex",
+            value="bin",
             width=180,
             options=[
                 ft.dropdown.Option("bin", "Binaire"),
@@ -394,7 +404,8 @@ class Studio:
             ],
             on_change=self._base_changed,
         )
-        self.bit_count = self._field("Nombre de bits", "26", width=145, helper="1 à 26 bits")
+        self.bit_count = self._field("Nombre de bits", str(default.bit_count), width=145)
+        self._sync_bit_count_field()
         self.core_clock = ft.Dropdown(
             label="Horloge du cœur FPGA",
             value=str(REFERENCE_HZ),
@@ -699,8 +710,16 @@ class Studio:
             "https://github.com/Citroz31/arty-frame-studio/blob/main/docs/guide-utilisateur-sipo-spi.md"
         )
 
-    def _config(self) -> FrameConfig:
+    def _frame_value(self) -> tuple[int, int]:
+        """Valeur et nombre de bits saisis ; en binaire, la longueur saisie fait foi."""
+        base = self.base.value or "bin"
+        if base == "bin":
+            return parse_binary_frame(self.word.value or "")
         bits = int(self.bit_count.value or "")
+        return parse_word(self.word.value or "", base, bits), bits
+
+    def _config(self) -> FrameConfig:
+        word, bits = self._frame_value()
         # The divider is authoritative, while the requested frequency must also
         # remain valid after edits to another field.
         requested_hz = float((self.frequency.value or "").replace(",", ".")) * 1e6
@@ -725,7 +744,7 @@ class Studio:
                 self.gap_ns.value or "", allow_zero=True, core_hz=self.core_hz
             )
         return FrameConfig(
-            word=parse_word(self.word.value or "", self.base.value or "hex", bits),
+            word=word,
             bit_count=bits,
             divider=divider,
             latch_ticks=latch_ticks,
@@ -876,22 +895,41 @@ class Studio:
         self.divider.helper_text = f"{core_hz / 1e6:g} MHz / N · 1 à 65 535"
         self._frequency_changed(None)
 
+    def _sync_bit_count_field(self) -> None:
+        """En binaire, le nombre de bits suit la saisie et n'est pas modifiable."""
+        binary = (self.base.value or "bin") == "bin"
+        self.bit_count.disabled = binary
+        self.bit_count.helper_text = "Automatique · 26 bits max" if binary else "1 à 26 bits"
+        self.word.helper_text = (
+            "Un chiffre = un bit, MSB à gauche · espaces et _ ignorés"
+            if binary
+            else "Nombre de bits à régler à droite, zéros de tête compris"
+        )
+
+    def _word_changed(self, _: Any = None) -> None:
+        if (self.base.value or "bin") == "bin":
+            # Chaque chiffre saisi ou retiré, zéros de tête compris, change la
+            # longueur de la trame ; au-delà de 26, la validation l'indique.
+            self.bit_count.value = str(binary_bit_count(self.word.value or ""))
+        self._changed()
+
     def _base_changed(self, _: Any) -> None:
+        base = self.base.value or "bin"
         try:
-            word = parse_word(
-                self.word.value or "", self.previous_base, int(self.bit_count.value or "")
-            )
-            base = self.base.value
-            self.word.value = (
-                f"{word:0{int(self.bit_count.value or '')}b}"
-                if base == "bin"
-                else f"{word:X}"
-                if base == "hex"
-                else str(word)
-            )
+            if self.previous_base == "bin":
+                word, bits = parse_binary_frame(self.word.value or "")
+            else:
+                bits = int(self.bit_count.value or "")
+                word = parse_word(self.word.value or "", self.previous_base, bits)
+            # Vers le binaire, les zéros de tête conservent la longueur choisie.
+            self.word.value = format_word(word, bits, base)
+            self.bit_count.value = str(bits)
         except (ValueError, TypeError):
-            pass
-        self.previous_base = self.base.value or "hex"
+            # Saisie invalide : la laisser telle quelle pour correction.
+            if base == "bin":
+                self.bit_count.value = str(binary_bit_count(self.word.value or ""))
+        self.previous_base = base
+        self._sync_bit_count_field()
         self._changed()
 
     def _buttons(self) -> None:
@@ -1425,9 +1463,11 @@ class Studio:
             # Sans carte, l'interface adopte l'horloge prévue par le profil.
             self.core_hz = config.core_hz
             self.core_clock.value = str(config.core_hz)
-        self.base.value = "hex"
-        self.previous_base = "hex"
-        self.word.value = f"{config.word:X}"
+        # Le profil s'affiche dans la notation choisie ; en binaire, sur toute
+        # sa longueur, zéros de tête compris.
+        base = self.base.value or "bin"
+        self.previous_base = base
+        self.word.value = format_word(config.word, config.bit_count, base)
         self.bit_count.value = str(config.bit_count)
         self.frequency.value = f"{config.frequency_hz / 1e6:.9g}"
         # En CLK libre, le champ LATCH porte l'impulsion visible (k périodes).

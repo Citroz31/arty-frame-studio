@@ -106,8 +106,10 @@ ou `--project-root` pour les commandes FPGA de la CLI.
 ## Utilisation
 
 1. Ouvrir l’application et sélectionner le mode démonstration pour découvrir le
-   pilotage sans carte. Saisir la valeur en binaire, hexadécimal ou décimal,
-   choisir 1 à 26 bits et régler la fréquence.
+   pilotage sans carte. Saisir la valeur, en binaire par défaut : chaque chiffre
+   est un bit et le nombre de bits suit la saisie (26 au plus). En hexadécimal
+   ou décimal, le nombre de bits se règle à la main. Régler ensuite la
+   fréquence.
 2. Définir l’ordre MSB/LSB, la polarité du latch, sa durée, la pause après trame et
    le nombre de répétitions, ou activer **Répéter jusqu'à Arrêter** :
    la carte répète alors la trame sans fin (firmware révision 3). **CLK libre entre les trames**

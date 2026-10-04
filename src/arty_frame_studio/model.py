@@ -215,17 +215,53 @@ def with_free_clock(config: FrameConfig) -> FrameConfig:
     return replace(config, free_clock=True, latch_ticks=latch, gap_ticks=gap)
 
 
+def _digits(text: str, base: str) -> str:
+    """Saisie sans séparateurs (espaces, ``_``) ni préfixe ``0b``/``0x``."""
+    normalized = text.strip().replace("_", "").replace(" ", "")
+    prefix = {"bin": "0b", "hex": "0x"}.get(base)
+    if prefix and normalized.lower().startswith(prefix):
+        normalized = normalized[2:]
+    return normalized
+
+
+def binary_bit_count(text: str) -> int:
+    """Nombre de bits d'une saisie binaire : chaque chiffre compte, zéros de tête compris."""
+    return len(_digits(text, "bin"))
+
+
+def parse_binary_frame(text: str) -> tuple[int, int]:
+    """Valeur et longueur d'une trame saisie en binaire, de 1 à 26 bits.
+
+    La longueur est celle de la saisie : ``0101`` est une trame de 4 bits.
+    """
+    digits = _digits(text, "bin")
+    if not digits:
+        raise ValueError("Saisir au moins un bit (0 ou 1).")
+    if any(char not in "01" for char in digits):
+        raise ValueError("Binaire : seulement 0 et 1 ; espaces et _ peuvent séparer les groupes.")
+    if len(digits) > MAX_BITS:
+        raise ValueError(f"{len(digits)} bits saisis : {MAX_BITS} bits maximum par trame.")
+    return int(digits, 2), len(digits)
+
+
+def format_word(word: int, bit_count: int, base: str) -> str:
+    """Texte de saisie d'une valeur ; le binaire garde tous les bits de la trame."""
+    if base == "bin":
+        return f"{word:0{bit_count}b}"
+    if base == "hex":
+        return f"{word:X}"
+    if base == "dec":
+        return str(word)
+    raise ValueError("Base attendue : bin, hex ou dec.")
+
+
 def parse_word(text: str, base: str, bit_count: int) -> int:
     bases = {"bin": 2, "hex": 16, "dec": 10}
     if base not in bases:
         raise ValueError("Base attendue : bin, hex ou dec.")
     if type(bit_count) is not int or not 1 <= bit_count <= MAX_BITS:
         raise ValueError("Longueur entre 1 et 26 bits requise.")
-    normalized = text.strip().replace("_", "").replace(" ", "")
-    prefixes = {"bin": "0b", "hex": "0x"}
-    prefix = prefixes.get(base)
-    if prefix and normalized.lower().startswith(prefix):
-        normalized = normalized[2:]
+    normalized = _digits(text, base)
     digits = {"bin": "01", "hex": "0123456789abcdef", "dec": "0123456789"}[base]
     if not normalized or any(char.lower() not in digits for char in normalized):
         raise ValueError("Valeur invalide pour la base sélectionnée.")

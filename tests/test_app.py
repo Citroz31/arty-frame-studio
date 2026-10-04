@@ -833,3 +833,72 @@ def test_port_discovery_prefers_usb_ftdi_and_preserves_manual_selection(tmp_path
         assert not studio.port.value
 
     run_async(exercise())
+
+
+def test_binary_is_the_default_notation_with_an_automatic_bit_count(tmp_path):
+    studio = make_studio(tmp_path)
+    default = FrameConfig()
+    assert studio.base.value == "bin"
+    assert studio.word.value == f"{default.word:026b}"
+    assert studio.bit_count.value == "26" and studio.bit_count.disabled
+    assert studio.current_config == default
+    # Typing and removing digits changes the frame length at once.
+    for text, bits in (("1", 1), ("101", 3), ("1010 0101", 8), ("0001", 4), ("10", 2)):
+        studio.word.value = text
+        studio._word_changed()
+        assert studio.bit_count.value == str(bits)
+        assert studio.current_config.bit_count == bits
+    assert studio.current_config.word == 0b10
+    studio.word.value = "1010 0101"
+    studio._word_changed()
+    assert studio.current_config.word == 0xA5 and studio.binary_preview.value == "10100101"
+
+
+def test_binary_entry_beyond_26_bits_is_refused_without_sending(tmp_path):
+    studio = make_studio(tmp_path)
+    studio.word.value = "1" * 27
+    studio._word_changed()
+    assert studio.bit_count.value == "27"
+    assert studio.current_config is None and studio.send_button.disabled
+    assert "26 bits maximum" in studio.validation.value
+    studio.word.value = "1" * 26
+    studio._word_changed()
+    assert studio.current_config.bit_count == 26 and not studio.validation.visible
+    for text, message in (("", "au moins un bit"), ("1021", "seulement 0 et 1")):
+        studio.word.value = text
+        studio._word_changed()
+        assert studio.current_config is None and message in studio.validation.value
+
+
+def test_notation_changes_keep_the_value_and_its_length(tmp_path):
+    studio = make_studio(tmp_path)
+    studio.word.value = "00010100101"  # 11 bits, leading zeros included
+    studio._word_changed()
+    studio.base.value = "hex"
+    studio._base_changed(None)
+    assert studio.word.value == "A5" and studio.bit_count.value == "11"
+    assert not studio.bit_count.disabled
+    assert studio.current_config.bit_count == 11 and studio.current_config.word == 0xA5
+    # In hexadecimal the bit count stays a manual setting.
+    studio.bit_count.value = "12"
+    studio._changed()
+    studio.base.value = "dec"
+    studio._base_changed(None)
+    assert studio.word.value == "165" and studio.bit_count.value == "12"
+    studio.base.value = "bin"
+    studio._base_changed(None)
+    assert studio.word.value == "000010100101" and studio.bit_count.disabled
+    assert studio.current_config.bit_count == 12
+
+
+def test_profiles_are_shown_in_the_selected_notation(tmp_path):
+    studio = make_studio(tmp_path)
+    profile = FrameConfig(word=0xA5, bit_count=8, divider=20)
+    studio._set_profile(profile)
+    assert studio.word.value == "10100101" and studio.bit_count.value == "8"
+    assert studio._config() == profile
+    studio.base.value = "hex"
+    studio._base_changed(None)
+    studio._set_profile(FrameConfig(word=0x5, bit_count=12))
+    assert studio.word.value == "5" and studio.bit_count.value == "12"
+    assert studio._config().bit_count == 12
