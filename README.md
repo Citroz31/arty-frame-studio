@@ -22,6 +22,9 @@ Le guide détaille l'installation Windows, le chargement du firmware, le câblag
 et les chronogrammes. Deux boutons chargent directement un **exemple SIPO**
 ou une **CLK seule à 10 MHz**, sans lancer d'émission.
 
+Le [récapitulatif des apports de Claude](docs/recapitulatif-claude.md) liste
+chaque commit et ce qu'il apporte.
+
 La [revue de la CLK continue](docs/review-clk-continue.md) intègre le firmware
 révision 4 de Claude et renforce les contrôles de l'interface, l'arrêt en CLI,
 les aperçus et la traçabilité des compilations.
