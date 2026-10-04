@@ -14,13 +14,38 @@ from typing import Any
 
 from .bitstream import read_bitstream
 from .firmware_config import FirmwareBuildConfig
-from .model import CONTINUOUS, FrameConfig, load_profile, save_profile
+from .model import CONTINUOUS, FrameConfig, load_profile, save_profile, with_free_clock
 from .prebuilt import validate_programming_image, verify_prebuilt_firmware
 from .remote_build import GitHubBuildClient, RemoteBuildTarget
 from .simulation import export_csv, export_vcd, simulate, waveform_svg
 from .toolchain import Toolchain, ToolchainConfig
-from .transport import DemoDevice, SerialDevice, TransportError, list_ports, run_led_test
+from .transport import (
+    DemoDevice,
+    DeviceError,
+    SerialDevice,
+    TransportError,
+    check_firmware_accepts,
+    list_ports,
+    run_led_test,
+)
 from .windows_jtag import list_ftdi_devices, probe_arty, program_arty
+
+FREE_CLOCK_HELP = (
+    "CLK libre pendant LATCH et pause (firmware révision 4) ; LATCH et pause du "
+    "profil arrondis à des périodes entières de CLK"
+)
+
+
+def _free_clock(config: FrameConfig) -> FrameConfig:
+    result = with_free_clock(config)
+    if result != config:
+        print(
+            f"CLK libre : LATCH {result.latch_periods} période(s), pause "
+            f"{result.gap_periods} période(s) de CLK (latch_ticks={result.latch_ticks}, "
+            f"gap_ticks={result.gap_ticks}).",
+            file=sys.stderr,
+        )
+    return result
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -90,6 +115,7 @@ def _parser() -> argparse.ArgumentParser:
     simulation.add_argument("--profile", type=Path)
     simulation.add_argument("--output", type=Path, default=Path("exports/chronogramme"))
     simulation.add_argument("--max-frames", type=int, default=4)
+    simulation.add_argument("--free-clock", action="store_true", help=FREE_CLOCK_HELP)
     send = commands.add_parser("send", help="Transmettre un profil à la carte ou à la démo")
     send.add_argument("--profile", type=Path, required=True)
     connection = send.add_mutually_exclusive_group(required=True)
@@ -101,6 +127,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Répéter la trame sans fin jusqu'à STOP (repeat_count 0, firmware révision 3)",
     )
+    send.add_argument("--free-clock", action="store_true", help=FREE_CLOCK_HELP)
     send.add_argument(
         "--duration",
         type=float,
@@ -251,6 +278,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Profil créé : {args.path.resolve()}")
         elif args.command == "simulate":
             config = load_profile(args.profile) if args.profile else FrameConfig()
+            if args.free_clock:
+                config = _free_clock(config)
             waveform = simulate(config, max_frames=args.max_frames)
             args.output.parent.mkdir(parents=True, exist_ok=True)
             svg = args.output.with_suffix(".svg")
@@ -258,8 +287,11 @@ def main(argv: list[str] | None = None) -> int:
             export_csv(waveform, args.output.with_suffix(".csv"))
             export_vcd(waveform, args.output.with_suffix(".vcd"))
             total = "continu" if config.continuous else str(config.repeat_count)
+            shown = f"{waveform.frames_simulated} trame(s) complète(s)"
+            if waveform.partial_last_frame:
+                shown += " + 1 partielle"
             print(
-                f"Simulation idéale : {waveform.frames_simulated}/{total} trame(s), "
+                f"Simulation idéale : {shown} sur {total}, "
                 f"{waveform.duration_ns:g} ns. Exports : {args.output.resolve()}.[svg,csv,vcd]"
             )
             if waveform.truncated:
@@ -270,26 +302,53 @@ def main(argv: list[str] | None = None) -> int:
                 config = load_profile(args.profile)
                 if args.continuous:
                     config = replace(config, repeat_count=CONTINUOUS)
+                if args.free_clock:
+                    config = _free_clock(config)
                 if args.duration is not None and not (
                     math.isfinite(args.duration) and args.duration > 0
                 ):
                     raise ValueError("--duration attend un nombre de secondes positif.")
-            device = DemoDevice() if getattr(args, "demo", False) else SerialDevice(args.port)
+            device = (
+                DemoDevice(core_hz=config.core_hz)
+                if getattr(args, "demo", False)
+                else SerialDevice(args.port)
+            )
             device.connect()
+            must_stop = False
+            stop_attempted = False
+            stop_confirmed = False
             try:
                 if args.command == "send":
                     # SEND refuse une trame calculée pour une autre horloge de
                     # cœur, ou continue pour un firmware qui ne la gère pas.
-                    device.identify()
-                    status = device.send(config)
+                    check_firmware_accepts(config, device.identify())
+                    # Une absence de réponse à SEND laisse l'exécution inconnue.
+                    # Ne jamais répéter SEND ; demander une seule fois STOP lors
+                    # d'une erreur ou interruption avant de fermer le port.
+                    must_stop = True
+                    try:
+                        status = device.send(config)
+                    except DeviceError:
+                        # Un refus explicite n'a pas démarré notre séquence.
+                        must_stop = False
+                        raise
+                    must_stop = status.busy
                     print(json.dumps(asdict(status), ensure_ascii=False))
                     if args.duration is not None:
                         deadline = time.monotonic() + args.duration
                         while status.busy and time.monotonic() < deadline:
                             time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+                            if time.monotonic() >= deadline:
+                                # Ne pas lancer STATUS à l'échéance : un timeout
+                                # UART supplémentaire retarderait inutilement STOP.
+                                break
                             status = device.status()
+                            must_stop = status.busy
                         if status.busy:
+                            stop_attempted = True
+                            must_stop = False
                             status = device.stop()
+                            stop_confirmed = True
                             print(
                                 f"STOP après {args.duration:g} s : {status.completed} trame(s)"
                                 + (" (compteur modulo 65536)." if config.continuous else ".")
@@ -302,21 +361,56 @@ def main(argv: list[str] | None = None) -> int:
                         while status.busy:
                             time.sleep(0.05)
                             status = device.status()
+                            must_stop = status.busy
                         print(f"Terminé : {status.completed} trame(s).")
                     elif config.continuous:
-                        print(
-                            "Émission continue en cours sur la carte ; elle s'arrête avec la "
-                            "commande stop (ou une coupure/un reset).",
-                            file=sys.stderr,
-                        )
+                        if args.demo:
+                            print(
+                                "Démo locale : la simulation sera fermée à la fin de cette "
+                                "commande. Utiliser --wait ou --duration pour la maintenir.",
+                                file=sys.stderr,
+                            )
+                        else:
+                            print(
+                                "Émission continue en cours sur la carte ; elle s'arrête avec "
+                                "la commande stop (ou une coupure/un reset).",
+                                file=sys.stderr,
+                            )
+                        must_stop = False
+                    else:
+                        # Sans attente, l'émission finie continue sur le FPGA.
+                        must_stop = False
                 else:
                     status = device.stop() if args.command == "stop" else device.status()
                     print(json.dumps(asdict(status), ensure_ascii=False))
             except KeyboardInterrupt:
-                device.stop()
-                print("Émission interrompue par STOP.", file=sys.stderr)
+                if must_stop and not stop_attempted:
+                    stop_attempted = True
+                    must_stop = False
+                    try:
+                        device.stop()
+                        stop_confirmed = True
+                    except (OSError, ValueError, RuntimeError) as exc:
+                        print(f"Confirmation STOP non reçue : {exc}", file=sys.stderr)
+                print(
+                    "Émission interrompue par STOP."
+                    if stop_confirmed
+                    else "Commande interrompue ; vérifier l'état de la carte si nécessaire.",
+                    file=sys.stderr,
+                )
                 return 130
             finally:
+                if must_stop and not stop_attempted:
+                    stop_attempted = True
+                    try:
+                        device.stop()
+                        print("STOP confirmé après l'échec de la commande.", file=sys.stderr)
+                    except (OSError, ValueError, RuntimeError) as exc:
+                        print(
+                            f"Confirmation STOP non reçue : {exc}. "
+                            "L'émission peut encore être active ; vérifier la carte.",
+                            file=sys.stderr,
+                        )
                 device.close()
         else:
             chain = Toolchain(ToolchainConfig.from_json(args.toolchain), args.project_root)

@@ -2,10 +2,11 @@
 module frame_controller #(
     parameter integer PACKET_TIMEOUT_CYCLES=40000000,
     // INFO pages 0-5: revision, CORE_HZ low/high, capabilities, BUILD_ID low/high.
-    // Capabilities: bit 0 LED, bit 1 INFO, bit 2 continuous SEND (repeat 0).
-    parameter [15:0] FIRMWARE_REVISION=16'd3,
+    // Capabilities: bit 0 LED, bit 1 INFO, bit 2 continuous SEND (repeat 0),
+    // bit 3 free-running CLK (SEND flags bit 2).
+    parameter [15:0] FIRMWARE_REVISION=16'd4,
     parameter [31:0] CORE_HZ=32'd200000000,
-    parameter [15:0] CAPABILITIES=16'h0007,
+    parameter [15:0] CAPABILITIES=16'h000F,
     parameter [31:0] BUILD_ID=32'h0
 ) (
     input wire clk, reset,
@@ -116,10 +117,12 @@ module frame_controller #(
             captured_valid <= request_valid;
             captured_empty <= length == 0;
             // repeat_count (payload[103:88]) 0 selects continuous emission.
+            // Flags: bit 0 LSB first, bit 1 LATCH active low, bit 2 free
+            // CLK. Free-CLK period alignment is the host's responsibility.
             captured_send_shape <= length == 14
                 && payload[39:32] >= 1 && payload[39:32] <= 26
                 && payload[55:40] != 0 && payload[71:56] != 0
-                && payload[111:104] <= 3;
+                && payload[111:104] <= 7;
             // LED: {manual, 3'b0, pattern[3:0]}. INFO: one page byte, 0 to 5.
             captured_led_shape <= length == 1 && payload[6:4] == 0;
             captured_info_shape <= length == 1 && payload[7:0] <= 5;
@@ -208,7 +211,7 @@ module frame_controller #(
         .word_in({6'b0, validated_aligned_word}), .bits_in(validated_payload[36:32]),
         .divider_in(validated_payload[55:40]), .latch_ticks_in(validated_payload[71:56]),
         .gap_ticks_in(validated_payload[87:72]), .repeat_in(validated_payload[103:88]),
-        .flags_in(validated_payload[105:104]), .busy(busy), .completed(completed),
+        .flags_in(validated_payload[106:104]), .busy(busy), .completed(completed),
         .data_rise(data_rise), .data_fall(data_fall),
         .clock_rise(clock_rise), .clock_fall(clock_fall),
         .latch_rise(latch_rise), .latch_fall(latch_fall)

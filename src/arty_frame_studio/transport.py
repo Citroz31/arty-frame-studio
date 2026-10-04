@@ -11,6 +11,7 @@ from typing import Any
 from .model import REFERENCE_HZ, FrameConfig, check_core_hz
 from .protocol import (
     CAPABILITY_CONTINUOUS,
+    CAPABILITY_FREE_CLOCK,
     CAPABILITY_INFO,
     CAPABILITY_LED,
     INFO_PAGES,
@@ -385,6 +386,13 @@ def check_firmware_accepts(config: FrameConfig, firmware: FirmwareInfo) -> None:
             "continue. Charger le firmware fourni (révision 3 ou plus) ou choisir un "
             "nombre de répétitions."
         )
+    if config.free_clock and not firmware.free_clock:
+        # Une révision 3 refuse le bit 2 des flags (paramètres invalides).
+        raise ValueError(
+            f"Le firmware connecté (révision {firmware.revision}) ne gère pas la CLK "
+            "libre. Charger le firmware fourni (révision 4 ou plus) ou désactiver "
+            "CLK libre."
+        )
 
 
 class DemoDevice:
@@ -392,7 +400,7 @@ class DemoDevice:
 
     Le nombre de trames terminées inclut le latch et l'intervalle. Les temps ne
     sont pas ralentis : une émission courte peut finir avant le prochain poll.
-    La démo simule un firmware de révision 3 à l'horloge ``core_hz`` ; le motif
+    La démo simule un firmware de révision 4 à l'horloge ``core_hz`` ; le motif
     des LED virtuelles est exposé par ``led_pattern`` (``None`` : état). Une
     émission continue reste active jusqu'à STOP, son compteur modulo 65 536.
     """
@@ -401,9 +409,11 @@ class DemoDevice:
         self, *, clock: Callable[[], float] = time.monotonic, core_hz: int = REFERENCE_HZ
     ) -> None:
         self.firmware = FirmwareInfo(
-            revision=3,
+            revision=4,
             core_hz=core_hz,
-            capabilities=CAPABILITY_LED | CAPABILITY_INFO | CAPABILITY_CONTINUOUS,
+            capabilities=(
+                CAPABILITY_LED | CAPABILITY_INFO | CAPABILITY_CONTINUOUS | CAPABILITY_FREE_CLOCK
+            ),
             build_id=0,
         )
         self.led_pattern: int | None = None

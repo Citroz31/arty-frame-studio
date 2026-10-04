@@ -120,6 +120,15 @@ def build_layout(s: Studio) -> ft.Control:
         s.binary_preview,
         s.order_preview,
         ft.Row([s.lsb, s.latch_low], wrap=True, spacing=8),
+        ft.Row(
+            [
+                ft.TextButton("Exemple SIPO · 10 MHz", on_click=s._sipo_example),
+                ft.TextButton(
+                    "Guide utilisateur", icon=ft.Icons.HELP_OUTLINE, on_click=s._open_guide
+                ),
+            ],
+            wrap=True,
+        ),
     )
     frame.col = {"xs": 12, "lg": 6}
     timing = s._card(
@@ -127,7 +136,9 @@ def build_layout(s: Studio) -> ft.Control:
         _grid((s.frequency, 7), (s.divider, 5)),
         s.frequency_actual,
         _grid((s.latch_ns, 6), (s.gap_ns, 6), (s.repeat, 6)),
-        s.continuous,
+        ft.Column([s.continuous, s.free_clock], spacing=4),
+        s.emission_note,
+        ft.TextButton("Exemple CLK seule · 10 MHz", on_click=s._clock_example),
         s.timing_summary,
         s.quantization_note,
         _section(
@@ -181,6 +192,7 @@ def build_layout(s: Studio) -> ft.Control:
                 ft.Column(
                     [
                         s.validation,
+                        s.compatibility_note,
                         ft.Row(
                             [s.send_button, s.stop_button, s.simulate_button], wrap=True, spacing=12
                         ),

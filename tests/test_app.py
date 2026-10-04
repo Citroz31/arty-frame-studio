@@ -10,9 +10,9 @@ import pytest
 from arty_frame_studio import app
 from arty_frame_studio.app import Studio, waveform_signal_points
 from arty_frame_studio.model import FrameConfig
-from arty_frame_studio.protocol import FirmwareInfo, Opcode
+from arty_frame_studio.protocol import DeviceStatus, FirmwareInfo, Opcode, StatusCode
 from arty_frame_studio.simulation import simulate
-from arty_frame_studio.transport import CommandTimeout, DemoDevice
+from arty_frame_studio.transport import CommandTimeout, DemoDevice, PortInfo
 
 
 class PageStub:
@@ -375,7 +375,7 @@ def test_led_test_walks_virtual_and_board_leds_in_demo(tmp_path):
         assert studio.led_test_button.disabled
         await studio._toggle_connection()
         assert studio.firmware_info.led_test
-        assert "révision 3" in studio.firmware_status.value
+        assert "révision 4" in studio.firmware_status.value
         assert not studio.led_test_button.disabled
         seen = []
         original = studio._show_leds
@@ -649,3 +649,187 @@ def test_revision_two_firmware_is_flagged_without_continuous_emission(tmp_path):
     assert "sans émission continue" in studio.firmware_status.value
     studio._firmware_identified(FirmwareInfo(3, 200_000_000, 7, 0))
     assert "sans émission continue" not in studio.firmware_status.value
+
+
+def test_free_clock_switch_rounds_to_clock_periods_and_round_trips(tmp_path):
+    from arty_frame_studio.app import waveform_signal_points
+
+    studio = make_studio(tmp_path)
+    studio.divider.value = "4"
+    studio._divider_changed(None)
+    studio.latch_ns.value = "60"
+    studio.gap_ns.value = "40"
+    studio.free_clock.value = True
+    studio._changed()
+    config = studio.current_config
+    assert config.free_clock and (config.latch_ticks, config.gap_ticks) == (20, 16)
+    assert "LATCH 3 période(s) de CLK" in studio.timing_summary.value
+    assert "CLK continue" in studio.timing_summary.value
+    studio._set_profile(FrameConfig(divider=4, latch_ticks=20, gap_ticks=16, free_clock=True))
+    assert studio.free_clock.value and studio.latch_ns.value == "60"
+    assert studio._config() == FrameConfig(divider=4, latch_ticks=20, gap_ticks=16, free_clock=True)
+    studio._set_profile(FrameConfig())
+    assert not studio.free_clock.value
+    dense = simulate(
+        FrameConfig(
+            word=1,
+            bit_count=1,
+            divider=1,
+            latch_ticks=65535,
+            gap_ticks=65534,
+            repeat_count=0,
+            free_clock=True,
+        )
+    )
+    points = waveform_signal_points(dense, "clk", 1200)
+    assert len(points) <= 3 * 1200
+    assert {y for _, y in points} == {148.0, 178.0}
+
+
+def test_revision_three_firmware_is_flagged_without_free_clock(tmp_path):
+    studio = make_studio(tmp_path)
+    studio.mode.value = "uart"
+    studio._firmware_identified(FirmwareInfo(3, 200_000_000, 7, 0))
+    assert "sans CLK libre" in studio.firmware_status.value
+    studio._firmware_identified(FirmwareInfo(4, 200_000_000, 15, 0))
+    assert "sans" not in studio.firmware_status.value
+
+
+def test_zero_repeat_requires_explicit_continuous_switch(tmp_path):
+    studio = make_studio(tmp_path)
+    studio.repeat.value = "0"
+    studio._changed()
+    assert studio.current_config is None
+    assert studio.send_button.disabled
+    assert "Répéter jusqu'à Arrêter" in studio.validation.value
+    studio.continuous.value = True
+    studio._continuous_changed()
+    assert studio.current_config.continuous
+    assert studio.repeat.disabled
+
+
+@pytest.mark.parametrize("capabilities, free_clock", [(3, False), (7, True)])
+def test_unsupported_emission_modes_disable_send_but_keep_stop(tmp_path, capabilities, free_clock):
+    async def exercise():
+        studio = make_studio(tmp_path)
+        await studio._toggle_connection()
+        studio.continuous.value = True
+        studio.free_clock.value = free_clock
+        studio._changed()
+        studio._firmware_identified(FirmwareInfo(3, 200_000_000, capabilities, 0))
+        studio._buttons()
+        assert studio.send_button.disabled
+        assert not studio.stop_button.disabled
+        assert studio.compatibility_note.visible
+        assert "Firmware incompatible" in studio.compatibility_note.value
+        studio._firmware_identified(FirmwareInfo(4, 200_000_000, 15, 0))
+        studio._buttons()
+        assert not studio.send_button.disabled
+        assert not studio.compatibility_note.visible
+
+    run_async(exercise())
+
+
+def test_free_clock_displays_real_quantized_duration_and_clears_invalid_helpers(tmp_path):
+    studio = make_studio(tmp_path)
+    studio.free_clock.value = True
+    studio.latch_ns.value = "20"
+    studio.gap_ns.value = "140"
+    studio._changed()
+    assert "100 ns" in studio.quantization_note.value
+    assert studio.latch_ns.helper_text == "Réalisé : 100 ns"
+    assert studio.gap_ns.helper_text == "Réalisé : 100 ns"
+    studio.latch_ns.value = "nan"
+    studio._changed()
+    assert studio.current_config is None
+    assert not studio.latch_ns.helper_text and not studio.gap_ns.helper_text
+
+
+def test_partial_first_frame_is_not_counted_as_a_complete_frame(tmp_path):
+    studio = make_studio(tmp_path)
+    studio._set_profile(
+        FrameConfig(
+            word=0,
+            bit_count=1,
+            divider=1,
+            latch_ticks=65535,
+            gap_ticks=65534,
+            repeat_count=0,
+            free_clock=True,
+        )
+    )
+    assert studio.waveform.frames_simulated == 0
+    assert studio.waveform.partial_last_frame
+    assert "0 trame(s) complète(s) + 1 partielle" in studio.wave_note.value
+    assert "budget de transitions" in studio.wave_note.value
+
+
+def test_quick_profiles_prepare_without_changing_an_active_emission(tmp_path):
+    from arty_frame_studio.model import load_profile
+
+    async def exercise():
+        studio = make_studio(Path(__file__).resolve().parents[1])
+        await studio._toggle_connection()
+        await studio._clock_example()
+        assert studio.current_config == load_profile(
+            Path(__file__).resolve().parents[1] / "examples" / "horloge_seule_10mhz_continue.json"
+        )
+        assert studio.last_sent is None
+        assert studio.send_button.text == "Démarrer CLK continue"
+        await studio._send(None)
+        clock_config = studio.last_sent
+        assert studio.device_status.busy
+        assert any("SEND" in line and "CLK libre" in line for line in studio.log_lines)
+        assert "Illimité" in studio.repeat.helper_text
+        await studio._sipo_example()
+        assert studio.current_config.word == 0xA5
+        assert studio.current_config.bit_count == 8
+        assert studio.current_config.frequency_hz == 10e6
+        assert not studio.current_config.continuous
+        assert studio.last_sent == clock_config
+        assert studio.device_status.busy
+        assert not studio.stop_button.disabled
+        await studio._stop(None)
+        assert not studio.device_status.busy
+        assert not studio.page.messages
+
+    run_async(exercise())
+
+
+@pytest.mark.parametrize("busy,uncertain", [(True, False), (False, True)])
+def test_disconnecting_uart_does_not_claim_the_physical_emission_stopped(tmp_path, busy, uncertain):
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.mode.value = "uart"
+        studio.device = DemoDevice()
+        studio.device.connect()
+        studio.device_status = DeviceStatus(StatusCode.OK, busy, 0)
+        studio.command_uncertain = uncertain
+        await studio._toggle_connection()
+        assert studio.device is None
+        assert "non vérifié" in studio.hardware_status.value
+        assert "Aucune émission" not in studio.hardware_status.value
+        assert any("reconnecter" in line.lower() for line in studio.log_lines)
+
+    run_async(exercise())
+
+
+def test_port_discovery_prefers_usb_ftdi_and_preserves_manual_selection(tmp_path, monkeypatch):
+    async def exercise():
+        studio = make_studio(tmp_path)
+        ports = [
+            PortInfo("COM3", "Bluetooth", "BTHENUM"),
+            PortInfo("COM7", "USB Serial Port", "USB VID:PID=0403:6010 SER=ARTY001B"),
+        ]
+        monkeypatch.setattr(app, "list_ports", lambda: ports)
+        await studio._refresh_ports()
+        assert studio.port.value == "COM7"
+        assert studio.device is None
+        studio.port.value = "COM3"
+        await studio._refresh_ports()
+        assert studio.port.value == "COM3"
+        ports.clear()
+        await studio._refresh_ports()
+        assert not studio.port.value
+
+    run_async(exercise())

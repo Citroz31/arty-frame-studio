@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="332" viewBox="0 0 1200 332" role="img" aria-label="Chronogramme idéal DATA CLK LATCH">
+<rect width="100%" height="100%" rx="12" fill="#f8fafc"/>
+<g font-family="Arial, sans-serif" fill="#0f172a">
+<text x="22" y="28" font-size="16" font-weight="bold">Chronogramme numérique idéal</text>
+<text x="22" y="49" font-size="12" fill="#475569">8 bits · 10 MHz · MSB d’abord · CLK en salves</text>
+<path d="M92.00 66 V266" stroke="#e2e8f0" stroke-dasharray="3 4"/>
+<text x="92.00" y="287" text-anchor="start" font-size="11">0</text>
+<path d="M200.00 66 V266" stroke="#e2e8f0" stroke-dasharray="3 4"/>
+<text x="200.00" y="287" text-anchor="middle" font-size="11">97</text>
+<path d="M308.00 66 V266" stroke="#e2e8f0" stroke-dasharray="3 4"/>
+<text x="308.00" y="287" text-anchor="middle" font-size="11">194</text>
+<path d="M416.00 66 V266" stroke="#e2e8f0" stroke-dasharray="3 4"/>
+<text x="416.00" y="287" text-anchor="middle" font-size="11">291</text>
+<path d="M524.00 66 V266" stroke="#e2e8f0" stroke-dasharray="3 4"/>
+<text x="524.00" y="287" text-anchor="middle" font-size="11">388</text>
+<path d="M632.00 66 V266" stroke="#e2e8f0" stroke-dasharray="3 4"/>
+<text x="632.00" y="287" text-anchor="middle" font-size="11">485</text>
+<path d="M740.00 66 V266" stroke="#e2e8f0" stroke-dasharray="3 4"/>
+<text x="740.00" y="287" text-anchor="middle" font-size="11">582</text>
+<path d="M848.00 66 V266" stroke="#e2e8f0" stroke-dasharray="3 4"/>
+<text x="848.00" y="287" text-anchor="middle" font-size="11">679</text>
+<path d="M956.00 66 V266" stroke="#e2e8f0" stroke-dasharray="3 4"/>
+<text x="956.00" y="287" text-anchor="middle" font-size="11">776</text>
+<path d="M1064.00 66 V266" stroke="#e2e8f0" stroke-dasharray="3 4"/>
+<text x="1064.00" y="287" text-anchor="middle" font-size="11">873</text>
+<path d="M1172.00 66 V266" stroke="#e2e8f0" stroke-dasharray="3 4"/>
+<text x="1172.00" y="287" text-anchor="end" font-size="11">970</text>
+<text x="18" y="104" font-size="13">DATA</text>
+<path d="M92 112 H1172" stroke="#cbd5e1" stroke-width="1"/>
+<path d="M92.00 84 H147.67 H203.34 V112 H259.01 H314.68 V84 H370.35 H426.02 V112 H481.69 H537.36 H593.03 H648.70 V84 H704.37 H760.04 V112 H815.71 H871.38 V84 H927.05 H982.72 V112 H1038.39 H1060.66 H1172.00 H1172" fill="none" stroke="#2563eb" stroke-width="2" stroke-linejoin="round"/>
+<text x="18" y="172" font-size="13">CLK</text>
+<path d="M92 180 H1172" stroke="#cbd5e1" stroke-width="1"/>
+<path d="M92.00 180 H147.67 V152 H203.34 V180 H259.01 V152 H314.68 V180 H370.35 V152 H426.02 V180 H481.69 V152 H537.36 V180 H593.03 V152 H648.70 V180 H704.37 V152 H760.04 V180 H815.71 V152 H871.38 V180 H927.05 V152 H982.72 V180 H1038.39 H1060.66 H1172.00 H1172" fill="none" stroke="#0891b2" stroke-width="2" stroke-linejoin="round"/>
+<text x="18" y="240" font-size="13">LATCH</text>
+<path d="M92 248 H1172" stroke="#cbd5e1" stroke-width="1"/>
+<path d="M92.00 248 H147.67 H203.34 H259.01 H314.68 H370.35 H426.02 H481.69 H537.36 H593.03 H648.70 H704.37 H760.04 H815.71 H871.38 H927.05 H982.72 H1038.39 V220 H1060.66 V248 H1172.00 H1172" fill="none" stroke="#d97706" stroke-width="2" stroke-linejoin="round"/>
+<text x="147.67" y="75" font-size="10" text-anchor="middle" fill="#2563eb">1</text>
+<text x="259.01" y="75" font-size="10" text-anchor="middle" fill="#2563eb">0</text>
+<text x="370.35" y="75" font-size="10" text-anchor="middle" fill="#2563eb">1</text>
+<text x="481.69" y="75" font-size="10" text-anchor="middle" fill="#2563eb">0</text>
+<text x="593.03" y="75" font-size="10" text-anchor="middle" fill="#2563eb">0</text>
+<text x="704.37" y="75" font-size="10" text-anchor="middle" fill="#2563eb">1</text>
+<text x="815.71" y="75" font-size="10" text-anchor="middle" fill="#2563eb">0</text>
+<text x="927.05" y="75" font-size="10" text-anchor="middle" fill="#2563eb">1</text>
+<text x="92" y="316" font-size="11" fill="#475569">Temps (ns) · 1 trame(s) complète(s)</text>
+</g></svg>

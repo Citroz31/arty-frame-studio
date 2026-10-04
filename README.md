@@ -11,9 +11,20 @@ Le PC envoie les paramètres par UART ; le FPGA produit les fronts. Avec le
 firmware de référence, la fréquence réalisable est **200 MHz / N**, N entier
 de 1 à 65535, soit environ 3,052 kHz à 200 MHz. L’application retient la
 fréquence réalisable la plus élevée **sans dépasser** la demande (150 MHz
-donne 100 MHz) et affiche la valeur obtenue. Les durées latch et pause sont
-quantifiées à **2,5 ns**. CLK est émise en rafales, idle bas ; le destinataire
-échantillonne DATA au front montant. DATA change au front descendant.
+donne 100 MHz) et affiche la valeur obtenue. Par défaut, CLK est émise en
+rafales, au repos bas ; les durées latch et pause sont quantifiées à **2,5 ns**.
+Avec **CLK libre entre les trames**, CLK reste périodique pendant toute la
+séquence et ces durées sont arrondies à des périodes entières de CLK.
+Le destinataire échantillonne DATA au front montant ; DATA change au front descendant.
+
+**Pour commencer : [guide utilisateur et exemple SIPO à 10 MHz](docs/guide-utilisateur-sipo-spi.md).**
+Le guide détaille l'installation Windows, le chargement du firmware, le câblage
+et les chronogrammes. Deux boutons chargent directement un **exemple SIPO**
+ou une **CLK seule à 10 MHz**, sans lancer d'émission.
+
+La [revue de la CLK continue](docs/review-clk-continue.md) intègre le firmware
+révision 4 de Claude et renforce les contrôles de l'interface, l'arrêt en CLI,
+les aperçus et la traçabilité des compilations.
 
 Depuis l'onglet **FPGA → Personnaliser le firmware**, un nouveau firmware peut
 être compilé avec une autre **horloge de cœur** (32 valeurs de 50 à 200 MHz,
@@ -98,8 +109,10 @@ ou `--project-root` pour les commandes FPGA de la CLI.
    pilotage sans carte. Saisir la valeur en binaire, hexadécimal ou décimal,
    choisir 1 à 26 bits et régler la fréquence.
 2. Définir l’ordre MSB/LSB, la polarité du latch, sa durée, la pause après trame et
-   le nombre de répétitions, ou activer **Émission continue jusqu'à Arrêter** :
-   la carte répète alors la trame sans fin (firmware révision 3). Le FPGA
+   le nombre de répétitions, ou activer **Répéter jusqu'à Arrêter** :
+   la carte répète alors la trame sans fin (firmware révision 3). **CLK libre entre les trames**
+   garde CLK périodique pendant LATCH et la pause (firmware révision 4) ; LATCH
+   et pause sont alors arrondis à des périodes entières de CLK. Le FPGA
    accepte une seule séquence à la fois ; **Arrêter** (STOP) interrompt celle
    qui est active.
 3. Afficher le chronogramme idéal et exporter en SVG, CSV ou VCD (GTKWave). Le
@@ -123,6 +136,20 @@ ou `--project-root` pour les commandes FPGA de la CLI.
 La programmation proposée charge la **SRAM volatile** : il faut reprogrammer
 après une coupure d’alimentation. Une programmation de la flash n’est pas effectuée.
 Les profils sauvegardent les paramètres dans un JSON versionné.
+
+Pour une **CLK indéfinie sans interruption**, activer les **deux options**,
+puis cliquer sur **Démarrer CLK continue**. Le firmware doit annoncer les
+capacités correspondantes ; sinon le bouton d'envoi reste désactivé.
+**Déconnecter ne commande pas STOP** : le FPGA reste autonome.
+Le profil [horloge seule à 10 MHz](examples/horloge_seule_10mhz_continue.json)
+garde DATA à zéro ; LATCH continue de pulser et peut rester non raccordé.
+
+Pour un **SIPO à capture séparée**, commencer avec
+[0xA5 sur 8 bits à 10 MHz](examples/frame_sipo_8bits_10mhz.json), CLK libre
+désactivée. En CLK libre, les fronts supplémentaires décalent des zéros pendant
+LATCH et la pause : la capture doit être compatible avec ce comportement.
+DATA/CLK correspondent à une émission de type SPI mode 0 ; aucun MISO ni CS
+dédié n'est implémenté. LATCH ne remplace pas CS.
 
 Après une compilation réussie, son fichier est sélectionné dans les deux
 parcours de chargement. **Arrêter** et le suivi UART restent disponibles
@@ -155,7 +182,7 @@ mypy src/arty_frame_studio
 python firmware/sim/run_tests.py
 ```
 
-La dernière commande nécessite Icarus Verilog. Les tests Python et cinq bancs
+La dernière commande nécessite Icarus Verilog. Les tests Python et six bancs
 RTL couvrent le projet, avec vérification des types et du formatage. Une tâche
 GitHub Actions teste aussi le lanceur et le Python sur Windows.
 Le projet contient des tests du
@@ -171,6 +198,7 @@ et `docs/` le protocole et la procédure de compilation.
 ```bash
 arty-frame simulate --profile examples/frame_26bits.json --output exports/trame
 arty-frame send --profile examples/frame_26bits.json --demo --wait
+arty-frame send --profile examples/horloge_seule_10mhz_continue.json --port COM7 --duration 2
 arty-frame ports
 arty-frame info --port COM7
 arty-frame led-test --port COM7
@@ -196,6 +224,7 @@ nouvelles commandes reste limitée par la liaison UART.
 En ligne de commande : `arty-frame send --port COM7 --profile trame.json
 --continuous` lance l'émission continue, `arty-frame stop --port COM7`
 l'arrête ; `--duration 10` envoie STOP après 10 s, `--wait` jusqu'à Ctrl+C.
+`--free-clock` ajoute la CLK libre (LATCH et pause du profil arrondis).
 
 Licence MIT.
 Le pilote et la DLL FTDI D2XX restent des dépendances externes sous licence FTDI.

@@ -252,7 +252,7 @@ def test_version_one_profiles_load_as_reference_firmware(tmp_path: Path) -> None
     path = tmp_path / "custom.json"
     save_profile(FrameConfig(core_hz=100_000_000), path)
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["schema_version"] == 2 and saved["frame"]["core_hz"] == 100_000_000
+    assert saved["schema_version"] == 3 and saved["frame"]["core_hz"] == 100_000_000
     assert load_profile(path).core_hz == 100_000_000
     del saved["frame"]["core_hz"]
     path.write_text(json.dumps(saved), encoding="utf-8")
@@ -278,3 +278,126 @@ def test_continuous_emission_has_no_end_and_previews_a_window(tmp_path):
     path = tmp_path / "continu.json"
     save_profile(config, path)
     assert load_profile(path) == config
+
+
+def test_free_clock_frames_last_whole_clock_periods(tmp_path):
+    from arty_frame_studio.model import free_clock_ticks, with_free_clock
+
+    # LATCH 3 periods -> (2*3 - 1) * N, pause 2 periods -> 2*2*N; N = 4 here.
+    assert free_clock_ticks(60, 40, 4) == (20, 16)
+    # LATCH lasts at least one period; the pause may be zero.
+    assert free_clock_ticks(0, 1, 4) == (4, 0)
+    with pytest.raises(ValueError, match="LATCH limité"):
+        free_clock_ticks(1e9, 0, 40_000)
+    with pytest.raises(ValueError, match="pause limitée"):
+        free_clock_ticks(5, 1e9, 40_000)
+    config = FrameConfig(
+        word=0b101, bit_count=3, divider=4, latch_ticks=20, gap_ticks=16, free_clock=True
+    )
+    assert (config.latch_periods, config.gap_periods, config.latch_active_ticks) == (3, 2, 24)
+    assert config.frame_duration_ticks == 2 * 4 * (3 + 3 + 2)
+    for bad in ({"latch_ticks": 8}, {"latch_ticks": 6}, {"gap_ticks": 4}):
+        with pytest.raises(ValueError, match="CLK libre"):
+            replace(config, **bad)
+    with pytest.raises(ValueError, match="booléen"):
+        replace(config, free_clock=1)
+    converted = with_free_clock(FrameConfig(divider=20, latch_ticks=8, gap_ticks=40))
+    assert converted.free_clock and (converted.latch_ticks, converted.gap_ticks) == (20, 40)
+    assert with_free_clock(converted) is converted
+    path = tmp_path / "libre.json"
+    save_profile(config, path)
+    assert load_profile(path) == config
+
+
+def test_free_clock_simulation_never_pauses_clk():
+    config = FrameConfig(
+        word=0b101,
+        bit_count=3,
+        divider=2,
+        latch_ticks=6,
+        gap_ticks=8,
+        repeat_count=2,
+        free_clock=True,
+    )
+    waveform = simulate(config)
+    clk_edges = [t.time_ticks for t in waveform.transitions]
+    # One CLK edge every N ticks from 0 to the end of the second frame.
+    assert clk_edges == list(range(0, 2 * config.frame_duration_ticks + 1, 2))
+    levels = {t.time_ticks: (t.data, t.clk, t.latch) for t in waveform.transitions}
+    # LATCH from the last falling edge (tick 12) for 2 periods, then the pause.
+    assert [levels[tick][2] for tick in (10, 12, 16, 18, 20, 26)] == [0, 1, 1, 1, 0, 0]
+    assert levels[28] == (1, 0, 0) and not waveform.truncated
+    assert waveform.duration_ticks == 2 * config.frame_duration_ticks
+
+
+@pytest.mark.parametrize("repeat_count", [0, 1])
+def test_free_clock_preview_is_bounded_for_huge_frames(repeat_count):
+    from arty_frame_studio.simulation import MAX_FREE_CLOCK_TRANSITIONS, waveform_svg
+
+    config = FrameConfig(
+        word=1,
+        bit_count=1,
+        divider=1,
+        latch_ticks=65535,
+        gap_ticks=65534,
+        repeat_count=repeat_count,
+        free_clock=True,
+    )
+    waveform = simulate(config)
+    assert waveform.frames_simulated == 0 and waveform.truncated
+    assert waveform.partial_last_frame
+    assert len(waveform.transitions) == MAX_FREE_CLOCK_TRANSITIONS
+    assert waveform.duration_ticks == waveform.transitions[-1].time_ticks
+    # The window ends on a real rising edge in LATCH, without an artificial STOP.
+    assert waveform.transitions[-1].clk == 1 and waveform.transitions[-1].latch == 1
+    assert waveform.duration_ticks < config.frame_duration_ticks
+    assert "0 trame(s) complète(s) + 1 partielle" in waveform_svg(waveform)
+    svg = waveform_svg(simulate(replace(config, latch_ticks=1, gap_ticks=4, repeat_count=0)))
+    # Bit labels only within the bit window, not on LATCH/pause CLK edges.
+    assert svg.count('fill="#2563eb">') == 4
+
+
+def test_custom_clock_csv_preserves_time_and_vcd_describes_cropped_window(tmp_path):
+    config = FrameConfig(
+        word=1,
+        bit_count=1,
+        divider=1,
+        latch_ticks=65535,
+        gap_ticks=65534,
+        repeat_count=0,
+        free_clock=True,
+        core_hz=150_000_000,
+    )
+    waveform = simulate(config)
+    csv_path = tmp_path / "custom.csv"
+    export_csv(waveform, csv_path)
+    with csv_path.open(newline="", encoding="utf-8") as file:
+        reader = csv.DictReader(file)
+        assert reader.fieldnames == ["time_ns", "DATA", "CLK", "LATCH"]
+        times = [float(row["time_ns"]) for row in reader]
+    assert times == [transition.time_ns for transition in waveform.transitions]
+    vcd_path = tmp_path / "custom.vcd"
+    export_vcd(waveform, vcd_path)
+    vcd = vcd_path.read_text(encoding="utf-8")
+    assert "core_hz=150000000" in vcd and "continuous=1 free_clock=1" in vcd
+    assert "complete_frames=0 partial_last_frame=1 truncated=1" in vcd
+    assert "A cropped window does not imply STOP" in vcd
+    assert f"#{round(waveform.transitions[-1].time_ns * 1000)}\n" in vcd
+
+
+def test_free_clock_preview_reduces_complete_frames_without_exceeding_budget():
+    from arty_frame_studio.simulation import MAX_FREE_CLOCK_TRANSITIONS
+
+    config = FrameConfig(
+        word=1,
+        bit_count=1,
+        divider=1,
+        latch_ticks=10001,
+        gap_ticks=10000,
+        repeat_count=20,
+        free_clock=True,
+    )
+    waveform = simulate(config, max_frames=20)
+    assert waveform.frames_simulated == 2 and not waveform.partial_last_frame
+    assert waveform.truncated and len(waveform.transitions) <= MAX_FREE_CLOCK_TRANSITIONS
+    assert waveform.duration_ticks == 2 * config.frame_duration_ticks

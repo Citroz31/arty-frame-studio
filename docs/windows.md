@@ -13,7 +13,7 @@ la carte. Ce ne sont pas des réponses au protocole Arty Frame Studio.
 
 Le [firmware précompilé](../firmware/prebuilt/arty_frame.bit) est fourni
 dans `firmware/prebuilt/`. Sa synthèse et son routage ont réussi avec une
-**Fmax de 212,77 MHz pour une contrainte de 200 MHz**. Il reste à tester
+**Fmax de 210,79 MHz pour une contrainte de 200 MHz**. Il reste à tester
 son chargement, PING et les sorties sur la carte réelle.
 
 ## Charger le fichier sous Windows
@@ -136,3 +136,10 @@ La compilation distante et les rapports sont décrits dans
 [firmware-manifest.json](../firmware/prebuilt/firmware-manifest.json),
 [build.log](../firmware/prebuilt/build.log) et
 [timing.json](../firmware/prebuilt/timing.json).
+
+## Guide pas à pas
+
+Pour une première utilisation et un câblage concret, consulter le
+[guide utilisateur avec exemple SIPO à 10 MHz](guide-utilisateur-sipo-spi.md).
+Il distingue la répétition des trames de la CLK libre et explique comment
+charger le firmware, connecter le port COM et arrêter une émission.

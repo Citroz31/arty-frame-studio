@@ -5,8 +5,8 @@ import pytest
 
 from arty_frame_studio import cli
 from arty_frame_studio.cli import main
-from arty_frame_studio.protocol import DeviceStatus, Opcode, StatusCode
-from arty_frame_studio.transport import CommandTimeout, PortInfo, TransportError
+from arty_frame_studio.protocol import DeviceStatus, FirmwareInfo, Opcode, StatusCode
+from arty_frame_studio.transport import CommandTimeout, DeviceError, PortInfo, TransportError
 
 
 def test_profile_simulation_and_demo_are_usable_from_cli(tmp_path: Path, capsys) -> None:
@@ -190,7 +190,7 @@ def test_led_test_command_identifies_then_walks_leds(monkeypatch, capsys):
     monkeypatch.setattr(transport.time, "sleep", lambda _: None)
     assert main(["led-test", "--port", "COM7"]) == 0
     out = capsys.readouterr().out
-    assert '"revision": 3' in out and "commandes confirmées" in out
+    assert '"revision": 4' in out and "commandes confirmées" in out
     assert not demo.connected
 
 
@@ -204,6 +204,193 @@ def test_cli_continuous_send_stops_after_the_requested_duration(tmp_path: Path, 
     out = capsys.readouterr().out
     assert '"busy": true' in out and "STOP après 0.05 s" in out and "modulo 65536" in out
     assert main(["send", "--profile", str(profile), "--demo", "--continuous"]) == 0
-    assert "commande stop" in capsys.readouterr().err
+    assert "simulation sera fermée" in capsys.readouterr().err
     assert main(["send", "--profile", str(profile), "--demo", "--duration", "-1"]) == 1
     assert "--duration" in capsys.readouterr().err
+
+
+def test_cli_free_clock_rounds_profile_timings(tmp_path: Path, capsys) -> None:
+    profile = tmp_path / "frame.json"
+    output = tmp_path / "libre"
+    assert main(["profile", str(profile)]) == 0
+    assert (
+        main(["simulate", "--profile", str(profile), "--output", str(output), "--free-clock"]) == 0
+    )
+    captured = capsys.readouterr()
+    assert "CLK libre : LATCH 1 période(s), pause 1 période(s)" in captured.err
+    assert (
+        main(
+            [
+                "send",
+                "--profile",
+                str(profile),
+                "--demo",
+                "--free-clock",
+                "--continuous",
+                "--duration",
+                "0.05",
+            ]
+        )
+        == 0
+    )
+    assert "STOP après 0.05 s" in capsys.readouterr().out
+
+
+def test_cli_demo_uses_the_profile_core_clock(tmp_path: Path, capsys) -> None:
+    from arty_frame_studio.model import FrameConfig, save_profile
+
+    profile = tmp_path / "custom-core.json"
+    save_profile(FrameConfig(core_hz=150_000_000), profile)
+    assert main(["send", "--profile", str(profile), "--demo", "--wait"]) == 0
+    assert "Terminé : 1 trame(s)." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_result", "expected_stops"),
+    [
+        ("status_error", 1, 1),
+        ("interrupt", 130, 1),
+        ("interrupt_stop_timeout", 130, 1),
+        ("send_timeout", 1, 1),
+        ("cleanup_stop_timeout", 1, 1),
+        ("explicit_refusal", 1, 0),
+    ],
+)
+def test_cli_wait_cleans_up_once_after_failure_or_interrupt(
+    tmp_path: Path, monkeypatch, capsys, failure, expected_result, expected_stops
+) -> None:
+    from arty_frame_studio.model import FrameConfig, save_profile
+
+    calls = []
+
+    class Board:
+        def __init__(self, port):
+            assert port == "COM7"
+
+        def connect(self):
+            calls.append("connect")
+
+        def identify(self):
+            return FirmwareInfo(4, 200_000_000, 15, 0)
+
+        def send(self, config):
+            calls.append("send")
+            if failure == "send_timeout":
+                raise CommandTimeout(Opcode.SEND, 0)
+            if failure == "explicit_refusal":
+                raise DeviceError(DeviceStatus(StatusCode.BUSY, True, 0))
+            return DeviceStatus(StatusCode.OK, True, 0)
+
+        def status(self):
+            calls.append("status")
+            if failure in ("interrupt", "interrupt_stop_timeout"):
+                raise KeyboardInterrupt
+            raise TransportError("STATUS perdu")
+
+        def stop(self):
+            calls.append("stop")
+            if failure in ("cleanup_stop_timeout", "interrupt_stop_timeout"):
+                raise CommandTimeout(Opcode.STOP, 1)
+            return DeviceStatus(StatusCode.OK, False, 1)
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(cli, "SerialDevice", Board)
+    monkeypatch.setattr(cli.time, "sleep", lambda _: None)
+    profile = tmp_path / "continuous.json"
+    save_profile(FrameConfig(repeat_count=0), profile)
+    assert main(["send", "--profile", str(profile), "--port", "COM7", "--wait"]) == expected_result
+    assert calls.count("send") == 1 and calls.count("stop") == expected_stops
+    assert calls[-1] == "close"
+    stderr = capsys.readouterr().err
+    if failure == "cleanup_stop_timeout":
+        assert "L'émission peut encore être active" in stderr
+    if failure == "interrupt":
+        assert "Émission interrompue par STOP" in stderr
+    if failure == "interrupt_stop_timeout":
+        assert "Confirmation STOP non reçue" in stderr
+        assert "Émission interrompue par STOP" not in stderr
+
+
+@pytest.mark.parametrize("stop_timeout", [False, True])
+def test_cli_duration_sends_stop_at_deadline_without_a_final_status(
+    tmp_path: Path, monkeypatch, capsys, stop_timeout
+) -> None:
+    from arty_frame_studio.model import FrameConfig, save_profile
+
+    calls = []
+    now = [0.0]
+
+    class Board:
+        def __init__(self, port):
+            assert port == "COM7"
+
+        def connect(self):
+            pass
+
+        def identify(self):
+            return FirmwareInfo(4, 200_000_000, 15, 0)
+
+        def send(self, config):
+            calls.append("send")
+            return DeviceStatus(StatusCode.OK, True, 0)
+
+        def status(self):
+            pytest.fail("STATUS doit être évité à l'échéance d'arrêt")
+
+        def stop(self):
+            calls.append(("stop", now[0]))
+            if stop_timeout:
+                raise CommandTimeout(Opcode.STOP, 1)
+            return DeviceStatus(StatusCode.OK, False, 0)
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(cli, "SerialDevice", Board)
+    monkeypatch.setattr(cli.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(cli.time, "sleep", lambda duration: now.__setitem__(0, now[0] + duration))
+    profile = tmp_path / "continuous.json"
+    save_profile(FrameConfig(repeat_count=0), profile)
+    assert main(["send", "--profile", str(profile), "--port", "COM7", "--duration", "0.05"]) == (
+        1 if stop_timeout else 0
+    )
+    assert calls == ["send", ("stop", 0.05), "close"]
+    if stop_timeout:
+        assert "STOP" in capsys.readouterr().err
+
+
+def test_cli_unmonitored_hardware_continues_after_the_port_is_closed(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from arty_frame_studio.model import FrameConfig, save_profile
+
+    calls = []
+
+    class Board:
+        def __init__(self, port):
+            assert port == "COM7"
+
+        def connect(self):
+            pass
+
+        def identify(self):
+            return FirmwareInfo(4, 200_000_000, 15, 0)
+
+        def send(self, config):
+            calls.append("send")
+            return DeviceStatus(StatusCode.OK, True, 0)
+
+        def stop(self):
+            pytest.fail("Sans --wait/--duration, l'émission doit continuer sur le FPGA")
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(cli, "SerialDevice", Board)
+    profile = tmp_path / "continuous.json"
+    save_profile(FrameConfig(repeat_count=0), profile)
+    assert main(["send", "--profile", str(profile), "--port", "COM7"]) == 0
+    assert calls == ["send", "close"]
+    assert "commande stop" in capsys.readouterr().err

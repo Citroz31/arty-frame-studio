@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
 from .firmware_config import MAX_CORE_HZ, MIN_CORE_HZ, REFERENCE_CORE_HZ
@@ -17,7 +17,8 @@ MAX_BITS = 26
 MAX_COUNTER = 65_535
 # repeat_count 0 : la trame se répète sans fin jusqu'à STOP (firmware révision 3).
 CONTINUOUS = 0
-PROFILE_SCHEMA = 2
+# Schéma 3 : champ free_clock (CLK libre, firmware révision 4).
+PROFILE_SCHEMA = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +33,9 @@ class FrameConfig:
     latch_active_low: bool = False
     # Les ticks et le diviseur n'ont de sens qu'avec l'horloge du firmware.
     core_hz: int = REFERENCE_HZ
+    # CLK libre : CLK garde sa période pendant LATCH et la pause. LATCH et
+    # pause durent alors des périodes entières de CLK (voir free_clock_ticks).
+    free_clock: bool = False
 
     def __post_init__(self) -> None:
         limits = {
@@ -51,6 +55,21 @@ class FrameConfig:
         if type(self.lsb_first) is not bool or type(self.latch_active_low) is not bool:
             raise ValueError("Les options d’ordre et de polarité doivent être des booléens.")
         check_core_hz(self.core_hz)
+        if type(self.free_clock) is not bool:
+            raise ValueError("L’option CLK libre doit être un booléen.")
+        if self.free_clock:
+            # Chaque trame doit durer un nombre entier de périodes de CLK
+            # (2 × divider ticks) pour que la suivante démarre en phase.
+            if self.latch_ticks % self.divider or (self.latch_ticks // self.divider) % 2 == 0:
+                raise ValueError(
+                    "CLK libre : latch_ticks doit valoir (2k − 1) × divider, "
+                    "soit un LATCH de k périodes de CLK."
+                )
+            if self.gap_ticks % (2 * self.divider):
+                raise ValueError(
+                    "CLK libre : gap_ticks doit être un multiple de 2 × divider, "
+                    "soit une pause d’un nombre entier de périodes de CLK."
+                )
 
     @property
     def continuous(self) -> bool:
@@ -71,6 +90,21 @@ class FrameConfig:
     @property
     def tick_ns(self) -> float:
         return tick_ns(self.core_hz)
+
+    @property
+    def latch_active_ticks(self) -> int:
+        """Durée visible de LATCH ; en CLK libre il commence au dernier front descendant."""
+        return self.latch_ticks + (self.divider if self.free_clock else 0)
+
+    @property
+    def latch_periods(self) -> int:
+        """Périodes de CLK couvertes par LATCH (CLK libre)."""
+        return self.latch_active_ticks // (2 * self.divider)
+
+    @property
+    def gap_periods(self) -> int:
+        """Périodes de CLK de la pause (CLK libre)."""
+        return self.gap_ticks // (2 * self.divider)
 
     @property
     def frame_duration_ticks(self) -> int:
@@ -136,6 +170,51 @@ def ticks_for_ns(ns: float, *, allow_zero: bool = False, core_hz: int = REFERENC
     return ticks
 
 
+def free_clock_ticks(
+    latch_ns: float, gap_ns: float, divider: int, core_hz: int = REFERENCE_HZ
+) -> tuple[int, int]:
+    """LATCH (au moins une période) et pause arrondis à des périodes entières de CLK.
+
+    Renvoie ``(latch_ticks, gap_ticks)`` pour SEND : LATCH visible de k périodes
+    → ``(2k − 1) × divider`` (il commence une demi-période plus tôt qu'en mode
+    normal), pause de m périodes → ``2m × divider``.
+    """
+    if type(divider) is not int or not 1 <= divider <= MAX_COUNTER:
+        raise ValueError(f"divider doit être un entier entre 1 et {MAX_COUNTER}.")
+    period_ns = 2 * divider * tick_ns(core_hz)
+    for value in (latch_ns, gap_ns):
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("La durée doit être finie et positive.")
+    latch_periods = max(1, math.floor(latch_ns / period_ns + 0.5))
+    gap_periods = math.floor(gap_ns / period_ns + 0.5)
+    latch_ticks = (2 * latch_periods - 1) * divider
+    gap_ticks = 2 * gap_periods * divider
+    if latch_ticks > MAX_COUNTER:
+        raise ValueError(
+            f"CLK libre : LATCH limité à {(MAX_COUNTER // divider + 1) // 2} période(s) "
+            f"de CLK avec N = {divider}."
+        )
+    if gap_ticks > MAX_COUNTER:
+        raise ValueError(
+            f"CLK libre : pause limitée à {MAX_COUNTER // (2 * divider)} période(s) "
+            f"de CLK avec N = {divider}."
+        )
+    return latch_ticks, gap_ticks
+
+
+def with_free_clock(config: FrameConfig) -> FrameConfig:
+    """Même trame en CLK libre, LATCH et pause arrondis à des périodes entières."""
+    if config.free_clock:
+        return config
+    latch, gap = free_clock_ticks(
+        config.latch_ticks * config.tick_ns,
+        config.gap_ticks * config.tick_ns,
+        config.divider,
+        config.core_hz,
+    )
+    return replace(config, free_clock=True, latch_ticks=latch, gap_ticks=gap)
+
+
 def parse_word(text: str, base: str, bit_count: int) -> int:
     bases = {"bin": 2, "hex": 16, "dec": 10}
     if base not in bases:
@@ -172,14 +251,17 @@ def load_profile(path: str | Path) -> FrameConfig:
         not isinstance(payload, dict)
         or set(payload) != {"schema_version", "frame"}
         or type(payload["schema_version"]) is not int
-        or payload["schema_version"] not in (1, PROFILE_SCHEMA)
+        or payload["schema_version"] not in (1, 2, PROFILE_SCHEMA)
     ):
-        raise ValueError("Format de profil invalide : schema_version 1 ou 2 et frame requis.")
+        raise ValueError("Format de profil invalide : schema_version 1 à 3 et frame requis.")
     frame = payload["frame"]
     expected = {field.name for field in fields(FrameConfig)}
     if payload["schema_version"] == 1:
         # Version 1 : firmware de référence à 200 MHz, sans champ core_hz.
         expected.discard("core_hz")
+    if payload["schema_version"] < 3:
+        # Versions 1 et 2 : CLK toujours interrompue entre les trames.
+        expected.discard("free_clock")
     if not isinstance(frame, dict) or set(frame) != expected:
         raise ValueError("Les champs du profil ne correspondent pas à FrameConfig.")
     return FrameConfig(**frame)

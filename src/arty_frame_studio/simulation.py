@@ -35,10 +35,22 @@ class Waveform:
     duration_ticks: int
     frames_simulated: int
     truncated: bool
+    # frames_simulated compte uniquement les trames complètes. Une très longue
+    # première trame peut être recadrée sans simuler un arrêt de l'émission.
+    partial_last_frame: bool = False
 
     @property
     def duration_ns(self) -> float:
         return self.duration_ticks * self.config.tick_ns
+
+
+# Borne dure de l'aperçu en CLK libre, y compris pour une seule très longue
+# trame : la fenêtre peut alors contenir une trame partielle.
+MAX_FREE_CLOCK_TRANSITIONS = 50_000
+
+
+class _PreviewLimitReached(Exception):
+    """La fenêtre est pleine ; conserver le dernier niveau réellement calculé."""
 
 
 def simulate(config: FrameConfig, max_frames: int = 4) -> Waveform:
@@ -47,6 +59,9 @@ def simulate(config: FrameConfig, max_frames: int = 4) -> Waveform:
     # Une émission continue n'a pas de fin : la fenêtre montre max_frames trames.
     total = math.inf if config.continuous else config.repeat_count
     frames = max_frames if config.continuous else min(config.repeat_count, max_frames)
+    if config.free_clock:
+        per_frame = 2 * (config.bit_count + config.latch_periods + config.gap_periods)
+        frames = min(frames, max(1, (MAX_FREE_CLOCK_TRANSITIONS - 1) // per_frame))
     idle = int(config.latch_active_low)
     points: list[Transition] = []
     time = 0
@@ -56,10 +71,45 @@ def simulate(config: FrameConfig, max_frames: int = 4) -> Waveform:
         if points and points[-1].time_ticks == time:
             points[-1] = point
         else:
+            if config.free_clock and len(points) >= MAX_FREE_CLOCK_TRANSITIONS:
+                raise _PreviewLimitReached
             points.append(point)
 
     bits = config.bits
-    for _ in range(frames):
+    divider = config.divider
+    completed_frames = 0
+    try:
+        for _ in range(frames if config.free_clock else 0):
+            # CLK libre : une période de 2N ticks sans interruption ; LATCH part du
+            # dernier front descendant ; DATA et LATCH changent aux fronts descendants.
+            record(bits[0], 0, idle)
+            for index, bit in enumerate(bits):
+                time += divider
+                record(bit, 1, idle)
+                time += divider
+                last = index + 1 == len(bits)
+                record(0 if last else bits[index + 1], 0, 1 - idle if last else idle)
+            for period in range(config.latch_periods):
+                time += divider
+                record(0, 1, 1 - idle)
+                time += divider
+                record(0, 0, 1 - idle if period + 1 < config.latch_periods else idle)
+            for _ in range(config.gap_periods):
+                time += divider
+                record(0, 1, idle)
+                time += divider
+                record(0, 0, idle)
+            completed_frames += 1
+    except _PreviewLimitReached:
+        return Waveform(
+            config,
+            tuple(points),
+            points[-1].time_ticks,
+            completed_frames,
+            truncated=True,
+            partial_last_frame=True,
+        )
+    for _ in range(0 if config.free_clock else frames):
         record(bits[0], 0, idle)
         for index, bit in enumerate(bits):
             time += config.divider
@@ -86,13 +136,22 @@ def export_csv(waveform: Waveform, path: str | Path) -> None:
         writer.writerow(["time_ns", "DATA", "CLK", "LATCH"])
         for transition in waveform.transitions:
             writer.writerow(
-                [f"{transition.time_ns:.1f}", transition.data, transition.clk, transition.latch]
+                [f"{transition.time_ns:.17g}", transition.data, transition.clk, transition.latch]
             )
 
 
 def export_vcd(waveform: Waveform, path: str | Path) -> None:
     lines = [
         "$version Arty Frame Studio, simulation numérique idéale $end",
+        "$comment "
+        f"core_hz={waveform.config.core_hz} divider={waveform.config.divider} "
+        f"repeat_count={waveform.config.repeat_count} "
+        f"continuous={int(waveform.config.continuous)} "
+        f"free_clock={int(waveform.config.free_clock)} "
+        f"complete_frames={waveform.frames_simulated} "
+        f"partial_last_frame={int(waveform.partial_last_frame)} "
+        f"truncated={int(waveform.truncated)} duration_ticks={waveform.duration_ticks}. "
+        "A cropped window does not imply STOP. Timestamps rounded to 1 ps. $end",
         "$timescale 1ps $end",
         "$scope module frame $end",
         "$var wire 1 ! DATA $end",
@@ -127,6 +186,7 @@ def waveform_svg(waveform: Waveform, width: int = 1200) -> str:
     label = (
         f"{config.bit_count} bits · {config.frequency_hz / 1e6:.6g} MHz · "
         f"{'LSB' if config.lsb_first else 'MSB'} d’abord"
+        f" · {'CLK libre' if config.free_clock else 'CLK en salves'}"
     )
     pieces = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
@@ -170,17 +230,23 @@ def waveform_svg(waveform: Waveform, width: int = 1200) -> str:
             f'<path d="{" ".join(coords)}" fill="none" stroke="{color}" '
             'stroke-width="2" stroke-linejoin="round"/>'
         )
-    # Valeur du bit échantillonné au front montant de CLK.
-    if config.bit_count * waveform.frames_simulated <= 104 and width >= 800:
+    # Valeur du bit échantillonné au front montant de CLK, dans la fenêtre des
+    # bits de chaque trame (en CLK libre, CLK monte aussi pendant LATCH/pause).
+    bit_window = 2 * config.divider * config.bit_count
+    shown_frames = waveform.frames_simulated + int(waveform.partial_last_frame)
+    if config.bit_count * shown_frames <= 104 and width >= 800:
         previous_clk = 0
         for transition in waveform.transitions:
-            if transition.clk and not previous_clk:
+            in_bits = transition.time_ticks % config.frame_duration_ticks < bit_window
+            if transition.clk and not previous_clk and in_bits:
                 pieces.append(
                     f'<text x="{x(transition.time_ticks):.2f}" y="75" font-size="10" '
                     f'text-anchor="middle" fill="#2563eb">{transition.data}</text>'
                 )
             previous_clk = transition.clk
-    footer = f"Temps ({unit}) · {waveform.frames_simulated} trame(s)"
+    footer = f"Temps ({unit}) · {waveform.frames_simulated} trame(s) complète(s)"
+    if waveform.partial_last_frame:
+        footer += " + 1 partielle"
     if waveform.truncated:
         total = "une émission continue" if config.continuous else str(config.repeat_count)
         footer += f" affichée(s) sur {total} — exports limités à cette fenêtre"

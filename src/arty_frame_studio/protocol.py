@@ -35,6 +35,8 @@ CAPABILITY_LED = 0x0001
 CAPABILITY_INFO = 0x0002
 # Révision 3 : SEND avec repeat_count 0 répète la trame jusqu'à STOP.
 CAPABILITY_CONTINUOUS = 0x0004
+# Révision 4 : bit 2 des flags de SEND, CLK libre pendant LATCH et pause.
+CAPABILITY_FREE_CLOCK = 0x0008
 
 
 class StatusCode(IntEnum):
@@ -93,6 +95,10 @@ class FirmwareInfo:
     @property
     def continuous(self) -> bool:
         return bool(self.capabilities & CAPABILITY_CONTINUOUS)
+
+    @property
+    def free_clock(self) -> bool:
+        return bool(self.capabilities & CAPABILITY_FREE_CLOCK)
 
 
 def led_argument(pattern: int | None) -> int:
@@ -161,7 +167,11 @@ def encode_request(
     elif opcode == Opcode.SEND:
         if not isinstance(config, FrameConfig):
             raise ProtocolError("La commande SEND exige une configuration de trame.")
-        flags = int(config.lsb_first) | (int(config.latch_active_low) << 1)
+        flags = (
+            int(config.lsb_first)
+            | (int(config.latch_active_low) << 1)
+            | (int(config.free_clock) << 2)
+        )
         payload = SEND_FORMAT.pack(
             config.word,
             config.bit_count,

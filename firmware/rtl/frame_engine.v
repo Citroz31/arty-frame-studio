@@ -4,6 +4,11 @@
 // The two boundaries are decoded in parallel: no cascaded half-step ALUs.
 // repeat_in=0 repeats the frame continuously until STOP; completed then
 // counts finished frames modulo 2^16.
+// flags_in[2] (free CLK): CLK keeps its 2*divider period through LATCH and
+// the pause, from SEND to the end. LATCH then starts at the last falling
+// edge of the bits. The host sends latch_ticks=(2k-1)*divider and
+// gap_ticks=2m*divider, so every frame lasts whole CLK periods and each
+// frame starts in phase with CLK: DATA and LATCH change on falling edges.
 module frame_engine #(
     // A packet controller can align the word in its validation pipeline.
     // The default keeps the standalone SEND interface unchanged.
@@ -14,7 +19,7 @@ module frame_engine #(
     input wire [31:0] word_in,
     input wire [4:0] bits_in,
     input wire [15:0] divider_in, latch_ticks_in, gap_ticks_in, repeat_in,
-    input wire [1:0] flags_in,
+    input wire [2:0] flags_in,
     output wire busy,
     output reg [15:0] completed,
     output reg data_rise, data_fall,
@@ -29,9 +34,13 @@ module frame_engine #(
     reg [4:0] bit_count, bits_left;
     reg [15:0] divider, latch_ticks, gap_ticks, remaining, ticks;
     reg [15:0] divider_minus_one, latch_minus_one, gap_minus_one;
-    reg [1:0] flags;
+    reg [2:0] flags;
     reg initial_data, data_level, clock_level, latch_level;
     reg continuous, last_frame;
+    // Free-running CLK generator: level, ticks to the next edge, and the
+    // registered ticks==1/ticks==2 decodes, as for the frame timer.
+    reg [15:0] free_ticks;
+    reg free_level, free_one, free_two;
     reg ticks_one, ticks_two;
     reg divider_one, divider_two, divider_three;
     reg latch_one, latch_two, latch_three;
@@ -50,6 +59,8 @@ module frame_engine #(
     wire [25:0] shifted_word = flags[0] ? {1'b0,shift_word[25:1]}
         : {shift_word[24:0],1'b0};
     wire last_bit = bits_left == 1;
+    // Free CLK: the last falling edge of the bits also starts LATCH.
+    wire free_latch = flags[2] && last_bit;
     // last_frame is a register equal to (remaining == 1 && !continuous),
     // maintained wherever remaining changes. The 16-bit comparison stays
     // off the finish/next-state path; a continuous SEND never sets it.
@@ -121,6 +132,8 @@ module frame_engine #(
                             next_data = last_bit ? 1'b0 : following_data;
                             shift_data = !last_bit;
                             reload_minus_one = 0;
+                            // Free CLK: LATCH from the last falling edge.
+                            if (free_latch) next_latch = !flags[1];
                         end
                     end
                 end
@@ -129,9 +142,11 @@ module frame_engine #(
                     next_data = last_bit ? 1'b0 : following_data;
                     shift_data = !last_bit;
                     reload_divider = 1;
+                    if (free_latch) next_latch = !flags[1];
                     if (ticks_one) begin
                         clock_fall = 0;
                         data_fall = next_data;
+                        if (free_latch) latch_fall = !flags[1];
                         if (divider_one) begin
                             reload_minus_one = 0;
                             if (last_bit) begin
@@ -189,6 +204,13 @@ module frame_engine #(
                 end else reload_minus_one = 0;
             end
         end
+
+        // Free CLK replaces the gated CLK while a sequence runs. Both start
+        // low at SEND with the same period, so they agree during the bits.
+        if (flags[2] && busy) begin
+            clock_rise = free_level;
+            clock_fall = free_one ? !free_level : free_level;
+        end
     end
 
     always @(posedge clk) begin
@@ -207,6 +229,10 @@ module frame_engine #(
             remaining <= 0;
             continuous <= 0;
             last_frame <= 0;
+            free_ticks <= 0;
+            free_level <= 0;
+            free_one <= 0;
+            free_two <= 0;
             ticks <= 0;
             ticks_one <= 0;
             ticks_two <= 0;
@@ -230,6 +256,9 @@ module frame_engine #(
             phase <= IDLE;
             remaining <= 0;
             last_frame <= 0;
+            free_level <= 0;
+            free_one <= 0;
+            free_two <= 0;
             ticks_one <= 0;
             ticks_two <= 0;
             data_level <= 0;
@@ -249,6 +278,10 @@ module frame_engine #(
             remaining <= repeat_in;
             continuous <= repeat_in == 0;
             last_frame <= repeat_in == 1;
+            free_ticks <= divider_in;
+            free_level <= 0;
+            free_one <= divider_in == 1;
+            free_two <= divider_in == 2;
             ticks <= divider_in;
             ticks_one <= divider_in == 1;
             ticks_two <= divider_in == 2;
@@ -309,6 +342,30 @@ module frame_engine #(
             end else begin
                 ticks_one <= 0;
                 ticks_two <= 0;
+            end
+            // One CLK edge every divider ticks, two ticks per core cycle.
+            // An edge on the first boundary is reloaded with divider-1; with
+            // divider 1 both boundaries toggle and the level is unchanged.
+            if (!busy) begin
+                free_level <= 0;
+                free_one <= 0;
+                free_two <= 0;
+            end else if (free_one) begin
+                if (!divider_one) begin
+                    free_level <= !free_level;
+                    free_ticks <= divider_minus_one;
+                    free_one <= divider_two;
+                    free_two <= divider_three;
+                end
+            end else if (free_two) begin
+                free_level <= !free_level;
+                free_ticks <= divider;
+                free_one <= divider_one;
+                free_two <= divider_two;
+            end else begin
+                free_ticks <= free_ticks - 2'd2;
+                free_one <= free_ticks == 3;
+                free_two <= free_ticks == 4;
             end
         end
     end

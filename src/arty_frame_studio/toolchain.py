@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -52,9 +53,12 @@ class ToolchainConfig:
     prjxray_db: Path | None = None
     part: str = TARGET_PART
     build_dir: Path = Path("build")
-    # Placement seeds tried in order until the routed timing passes. The core
-    # paths sit close to 5 ns, so placement alone can move Fmax by ~10 %.
+    # Placement seeds tried in order. The core paths sit close to 5 ns and
+    # placement alone moves the routed Fmax by ~15 %: the sweep stops at the
+    # first seed with timing_margin above the requirement, otherwise keeps
+    # the passing seed with the highest Fmax.
     nextpnr_seeds: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8)
+    timing_margin: float = 0.03
 
     def __post_init__(self) -> None:
         if self.part != TARGET_PART:
@@ -81,6 +85,12 @@ class ToolchainConfig:
             or len(set(self.nextpnr_seeds)) != len(self.nextpnr_seeds)
         ):
             raise ValueError("nextpnr_seeds : 1 à 32 entiers distincts, positifs ou nuls.")
+        if (
+            type(self.timing_margin) not in (int, float)
+            or not math.isfinite(self.timing_margin)
+            or not 0 <= self.timing_margin <= 0.5
+        ):
+            raise ValueError("timing_margin : marge relative entre 0 et 0.5 (0.03 = 3 %).")
         for name in ("chipdb", "prjxray_db", "build_dir"):
             value = getattr(self, name)
             if name == "build_dir" and value is None:
@@ -466,48 +476,104 @@ class Toolchain:
                 "Aucun bitstream n'est autorisé."
             )
 
+    @staticmethod
+    def _core_fmax(report: str) -> float:
+        """Final routed Fmax of core_clock (the last report line for it)."""
+        values = re.findall(r"Max frequency for clock ['\"]core_clock['\"]:\s*([0-9.]+)", report)
+        return float(values[-1])
+
+    @staticmethod
+    def _note(message: str, log: Log | None, journal: IO[str]) -> None:
+        journal.write(message + "\n")
+        journal.flush()
+        if log:
+            log(message)
+
     def _place_and_route(
         self,
         command: list[str],
-        fasm: Path,
+        outputs: list[Path],
         firmware: FirmwareBuildConfig,
         log: Log | None,
         journal: IO[str],
     ) -> int:
-        """Try each configured seed; return the first whose routed timing passes.
+        """Sweep the seeds; keep the first with the margin, else the best passing.
 
         nextpnr exits with an error when the routed timing fails; that case, or
         a report that does not pass, moves to the next seed. Any other failure
-        stops the build. The last timing error is reported when all seeds fail.
+        stops the build. A passing route below ``timing_margin`` is saved and
+        the sweep goes on; the best saved route is restored if no seed reaches
+        the margin. The last timing error is reported when all seeds fail.
+        ``outputs[0]`` is the FASM file; all outputs belong to the same route.
         """
         required = firmware.core_hz / 1e6
+        target = required * (1 + self.config.timing_margin)
         seeds = self.config.nextpnr_seeds
+        best: tuple[float, int] | None = None
+        failure: ToolchainError | None = None
+
+        def saved(path: Path) -> Path:
+            return path.with_name(path.name + ".best")
+
         for attempt, seed in enumerate(seeds, start=1):
+            # These paths are shared by the attempts. Revoke their previous
+            # contents before invoking nextpnr, keeping only the separately
+            # saved best route. A partial/failed tool invocation must never
+            # borrow another seed's FASM, timing report or reset netlist.
+            for path in outputs:
+                path.unlink(missing_ok=True)
             code, report = self._execute([*command, "--seed", str(seed)], log, journal)
             timing_reported = "Max frequency for clock" in report
             if code != 0 and not timing_reported:
                 raise ToolchainError(f"{command[0]} a échoué (code {code}). Voir {journal.name}.")
             if code == 0:
-                # A clean exit without FASM is a tool failure, not a timing miss.
-                self._require_output(fasm)
+                # A clean exit missing any expected output is a tool failure,
+                # not a timing miss and not a reason to authorize old files.
+                for path in outputs:
+                    self._require_output(path)
             try:
                 self._check_core_timing(report, required)
-            except ToolchainError:
-                if attempt == len(seeds):
-                    raise
-                note = (
-                    f"[nextpnr] graine {seed} : timing {required:g} MHz non atteint ; "
-                    f"essai {attempt + 1}/{len(seeds)}."
+            except ToolchainError as exc:
+                failure = exc
+                self._note(
+                    f"[nextpnr] graine {seed} : timing {required:g} MHz non atteint "
+                    f"({attempt}/{len(seeds)}).",
+                    log,
+                    journal,
                 )
-                journal.write(note + "\n")
-                journal.flush()
-                if log:
-                    log(note)
                 continue
             if code != 0:
                 raise ToolchainError(f"{command[0]} a échoué (code {code}). Voir {journal.name}.")
-            return seed
-        raise AssertionError("La liste des graines nextpnr ne peut pas être vide.")
+            fmax = self._core_fmax(report)
+            if fmax >= target:
+                for path in outputs:
+                    saved(path).unlink(missing_ok=True)
+                self._note(f"[nextpnr] graine {seed} retenue : {fmax:.2f} MHz.", log, journal)
+                return seed
+            if best is None or fmax > best[0]:
+                best = (fmax, seed)
+                for path in outputs:
+                    shutil.copy2(path, saved(path))
+            self._note(
+                f"[nextpnr] graine {seed} : {fmax:.2f} MHz, marge inférieure à "
+                f"{self.config.timing_margin:.0%} ({target:.2f} MHz) ({attempt}/{len(seeds)}).",
+                log,
+                journal,
+            )
+        if best is None:
+            if failure is None:
+                raise AssertionError("La liste des graines nextpnr ne peut pas être vide.")
+            raise failure
+        fmax, seed = best
+        for path in outputs:
+            os.replace(saved(path), path)
+        self._note(
+            f"[nextpnr] aucune graine n'atteint {target:.2f} MHz ; graine {seed} retenue, "
+            f"la meilleure : {fmax:.2f} MHz (PASS at {required:.2f} MHz).",
+            log,
+            journal,
+        )
+        return seed
 
     def build(self, log: Log | None = None, firmware: FirmwareBuildConfig | None = None) -> Path:
         """Compile the reference firmware, or a validated custom configuration.
@@ -615,7 +681,10 @@ class Toolchain:
                     )
                 else:
                     place_route.extend(["--xdc", str(constraints), "--fasm", str(fasm)])
-                seed = self._place_and_route(place_route, fasm, firmware, log, journal)
+                outputs = [fasm]
+                if self.config.nextpnr_backend == "himbaechel":
+                    outputs += [run_dir / "timing.json", run_dir / "routed.json"]
+                seed = self._place_and_route(place_route, outputs, firmware, log, journal)
                 self._require_output(fasm)
                 if self.config.nextpnr_backend == "himbaechel":
                     self._require_output(run_dir / "routed.json")

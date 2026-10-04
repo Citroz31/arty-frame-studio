@@ -25,6 +25,8 @@ révision 1 répond « opcode inconnu » (status 1) ; l'application le traite
 alors comme le firmware historique à 200 MHz, sans test LED.
 L'émission continue (`repeat_count` = 0) existe à partir de la **révision 3** ;
 une révision 2 refuse ce SEND (status 2) et ne produit aucune trame.
+La CLK libre (bit 2 des flags) existe à partir de la **révision 4** ; une
+révision 3 refuse ce SEND (status 2).
 
 SEND correspond au format Python `struct.Struct("<IBHHHHB")` :
 
@@ -36,7 +38,7 @@ SEND correspond au format Python `struct.Struct("<IBHHHHB")` :
 | latch_ticks | uint16 | 1 à 65535 |
 | gap_ticks | uint16 | 0 à 65535 |
 | repeat_count | uint16 | 1 à 65535 trames, ou **0 : continu jusqu'à STOP** |
-| flags | uint8 | bit 0 : LSB first ; bit 1 : latch actif bas |
+| flags | uint8 | bit 0 : LSB first ; bit 1 : latch actif bas ; bit 2 : CLK libre |
 
 Un tick est un demi-cycle de l'horloge du cœur : **2,5 ns** pour le firmware
 de référence à 200 MHz, 3,33 ns à 150 MHz, 5 ns à 100 MHz. Le paquet SEND ne
@@ -69,14 +71,68 @@ coupure) : seule une commande STOP termine CLK, DATA et LATCH. `completed`
 compte alors modulo 65 536 et reboucle sans arrêter l'émission ; sa variation
 entre deux STATUS témoigne de l'activité, pas du total depuis SEND. Fermer le
 port série n'arrête pas la carte. La trame garde sa structure : CLK pulse
-`bit_count` fois, puis s'arrête pendant LATCH et la pause.
+`bit_count` fois, puis s'arrête pendant LATCH et la pause, sauf en CLK libre.
 
-Chronologie à partir du premier bit prêt (origine du chronogramme, indépendante
-de la latence de transport UART) : premier front montant à `divider` ticks,
-fronts descendants à `2 × divider`, `4 × divider`, etc. DATA change à ces fronts
-et revient à 0 au dernier front descendant. LATCH s’active `divider` ticks
-après ce dernier front, reste actif `latch_ticks`, puis vient la pause.
-CLK est basse entre les rafales ; latch est au niveau inactif choisi.
+### CLK libre (flags bit 2, révision 4)
+
+CLK garde sa période `2 × divider` ticks de SEND jusqu'à la fin ou STOP, y
+compris pendant LATCH et la pause. Pour que chaque trame commence en phase
+avec CLK, la trame doit durer un nombre entier de périodes :
+
+- LATCH devient actif **au dernier front descendant** des bits (et non une
+  demi-période plus tard) et dure `divider + latch_ticks` ticks : l'hôte
+  envoie `latch_ticks = (2k − 1) × divider` pour un LATCH de k périodes ;
+- la pause vaut `gap_ticks = 2m × divider` (m périodes, éventuellement 0) ;
+- la trame dure `2 × divider × (bits + k + m)` ticks ; DATA et LATCH ne
+  changent qu'aux fronts descendants de CLK.
+
+Le firmware ne vérifie pas cet alignement : l'application arrondit LATCH et
+pause aux périodes entières et `FrameConfig` refuse toute autre valeur. Un
+client UART indépendant doit aussi respecter ces contraintes : un SEND
+mal aligné peut être accepté tout en produisant des changements de DATA/LATCH
+qui ne coïncident plus avec les fronts descendants de CLK.
+
+Un récepteur qui décale à chaque front montant reçoit des zéros supplémentaires
+pendant LATCH et la pause. Pour un SIPO à registre de sortie déclenché par un
+**front montant** de LATCH, comme le 74HC595, choisir **LATCH actif haut** :
+ce front intervient juste après le dernier bit utile, avant les zéros suivants.
+La sortie mémorisée reste alors correcte, même si le registre de décalage
+continue de changer. Avec LATCH actif bas, le front montant intervient à la
+fin du LATCH : les horloges supplémentaires ont déjà décalé des zéros, donc
+un tel composant peut mémoriser une autre valeur. Un latch transparent pendant
+son niveau actif peut également suivre ces changements. La polarité doit
+correspondre au fonctionnement réel du récepteur, pas seulement à son nom.
+
+### Chronologie et distinction avec SPI
+
+L'origine du chronogramme est le premier bit prêt, indépendamment de la
+latence du transport UART. Avec `N = divider` et `b = bit_count`, les fronts
+montants utiles arrivent aux ticks `N`, `3N`, …, `(2b − 1)N` ; DATA change
+aux fronts descendants et revient à zéro au tick `2bN`.
+
+| Mode | Début de LATCH actif | Durée active de LATCH | CLK après les bits |
+| --- | --- | --- | --- |
+| CLK en rafales (`free_clock = false`) | `(2b + 1)N` | `latch_ticks` | Basse pendant LATCH et la pause |
+| CLK libre (`free_clock = true`) | `2bN` | `N + latch_ticks = 2kN` | Continue, y compris pendant LATCH et la pause |
+
+La pause suit la fin de LATCH dans les deux modes. En CLK libre, ses `2mN`
+ticks et le LATCH de `2kN` ticks assurent que la trame suivante commence
+sur un front descendant, après `b + k + m` périodes de CLK. Dans le mode
+en rafales, les durées de LATCH/pause sont simplement des ticks matériels.
+
+DATA correspond à MOSI et CLK à SCLK pour un récepteur qui lit au front montant
+(timing de type SPI mode 0 pendant les bits). **LATCH est un signal de
+validation après les bits ; ce n'est pas un chip select SPI.** Le moteur
+actuel ne fournit pas de CS actif avant le premier bit et maintenu pendant
+la transaction, ni MISO, ni sélection générale CPOL/CPHA. Un composant SPI
+qui exige CS doit disposer d'un autre moyen adapté pour le gérer ; ne pas
+raccorder LATCH à CS en supposant qu'ils sont équivalents.
+
+STOP interrompt immédiatement le moteur, sans attendre la fin du mot ou
+d'une période de CLK : le dernier bit, le dernier LATCH ou la dernière
+impulsion peuvent être incomplets. Après la latence du pipeline de sortie,
+CLK/DATA reviennent à zéro et LATCH au niveau inactif choisi. Un reset force
+toutes les sorties à zéro, y compris un LATCH configuré actif bas.
 
 Une seule requête est en vol côté Python, avec vérification du CRC, de l’opcode
 et du numéro de séquence. Le firmware reçoit des paquets bornés et abandonne
@@ -114,10 +170,10 @@ de 16 bits de la page demandée :
 
 | Page | Contenu |
 | --- | --- |
-| 0 | révision du firmware (3) |
+| 0 | révision du firmware (4) |
 | 1 | horloge du cœur en Hz, bits 15-0 |
 | 2 | horloge du cœur en Hz, bits 31-16 |
-| 3 | capacités : bit 0 test LED, bit 1 INFO, bit 2 émission continue |
+| 3 | capacités : bit 0 test LED, bit 1 INFO, bit 2 émission continue, bit 3 CLK libre |
 | 4 | identifiant de build, bits 15-0 |
 | 5 | identifiant de build, bits 31-16 |
 

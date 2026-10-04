@@ -1,0 +1,15 @@
+{
+  "schema_version": 3,
+  "frame": {
+    "word": 165,
+    "bit_count": 8,
+    "divider": 20,
+    "latch_ticks": 8,
+    "gap_ticks": 40,
+    "repeat_count": 1,
+    "lsb_first": false,
+    "latch_active_low": false,
+    "core_hz": 200000000,
+    "free_clock": false
+  }
+}

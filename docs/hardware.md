@@ -90,24 +90,77 @@ un autre terminal série qui active DTR peut maintenir ou relancer le reset.
 ## Signaux et fréquence
 
 L'interface implémente une trame **série**, un bit à la fois, de 1 à 26 bits.
-CLK est normalement au repos bas et actif en rafales. Le premier bit est
-présent avant le premier front montant ; le périphérique distant doit lire
+Avec **CLK en rafales**, CLK est au repos bas entre les trames. Le premier
+bit est présent avant le premier front montant ; le périphérique distant doit lire
 les données au front montant. Les bits suivants changent aux fronts
 descendants. Après le dernier front descendant, le moteur attend un
 demi-cycle de CLK puis active le latch pendant sa durée réglée. Il applique
 ensuite la pause entre répétitions. Une pause de zéro permet de réenchaîner
 selon le moteur, sans garantie de flux USB continu.
 
-Le paramètre N règle la fréquence à `200 MHz / N` et donne une durée de
-demi-cycle de `2,5 ns × N`. Les durées latch/pause sont des multiples de
-2,5 ns. L'application affiche la fréquence obtenue ; un diviseur entier ne
-permet pas toutes les valeurs réelles. Les répétitions vont de 1 à 65535, ou
+Le paramètre N règle la fréquence à `horloge du cœur / N` et donne une durée de
+demi-cycle de `N / (2 × horloge du cœur)`. Avec le firmware de référence,
+cela donne `200 MHz / N`, un demi-cycle de `2,5 ns × N` et des durées
+latch/pause multiples de 2,5 ns. Avec un firmware personnalisé, l'application
+utilise l'horloge annoncée par la carte. Elle affiche la fréquence obtenue ;
+un diviseur entier ne permet pas toutes les valeurs réelles. Les répétitions vont de 1 à 65535, ou
 sont **continues** (firmware révision 3) : la trame se répète alors sans fin
 jusqu'à STOP, sans dépendre de l'UART ni du PC. STOP interrompt l'émission
 dans tous les cas. Le latch peut être actif haut ou bas.
+
+Avec **CLK libre** (firmware révision 4), CLK ne s'interrompt plus pendant
+LATCH et la pause : c'est une horloge périodique de `horloge du cœur / N`,
+du début à la fin de l'émission, ou jusqu'à STOP en émission continue. LATCH commence au
+front descendant qui suit le dernier bit et dure un nombre entier de
+périodes, comme la pause ; DATA et LATCH changent uniquement aux fronts
+descendants lorsque les paramètres respectent l'alignement imposé par
+l'application. LATCH dure `N + latch_ticks` ticks, avec
+`latch_ticks = (2k − 1)N` ; la pause vaut `2mN` ticks. Il faut activer à la
+fois **CLK libre** et **émission continue** pour une horloge sans fin :
+CLK libre seule se termine après le nombre de trames demandé.
 À la fin ou au STOP, CLK/DATA reviennent à zéro et le latch à son niveau
-inactif selon la polarité choisie. Pendant un reset physique, les ODDR sont
-remis à zéro : ne dépendre pas d'un latch actif bas restant inactif au reset.
+inactif selon la polarité choisie. STOP est une interruption immédiate,
+pas une fin de transaction garantie : le mot, le LATCH ou la dernière
+impulsion CLK peuvent être incomplets. Pendant un reset physique, les ODDR
+sont remis à zéro : ne dépendre pas d'un latch actif bas restant inactif au reset.
+
+### Registre SIPO et SPI
+
+Pour un SIPO qui décale au front montant, DATA se raccorde à l'entrée série
+et CLK à son entrée de décalage. Si le composant dispose d'un registre de
+sortie indépendant, LATCH peut commander sa validation selon la polarité et
+le front indiqués dans sa fiche technique. Par exemple, le 74HC595 possède
+une entrée de décalage SHCP et une entrée de mémorisation STCP, toutes deux
+déclenchées au front montant : choisir **LATCH actif haut** pour STCP.
+Pour commencer, conserver **CLK libre désactivée** : seuls les bits utiles
+sont décalés et le latch arrive ensuite.
+
+En CLK libre, un SIPO sans validation de décalage décale des zéros pendant
+LATCH et la pause, même si la longueur du mot correspond à sa capacité.
+Un registre de sortie déclenché au **front montant** conserve la bonne
+valeur si LATCH est actif haut : il capture au dernier front descendant de
+CLK, avant les zéros. Avec LATCH actif bas, son front montant arrive à la
+fin du LATCH et peut capturer une valeur déjà décalée. Un latch transparent
+peut suivre les changements du registre pendant son niveau actif. Vérifier
+ces deux comportements avant d'utiliser CLK libre sur un SIPO.
+
+Cette émission suit le timing de type **SPI mode 0** pendant les bits :
+CLK démarre basse, DATA est prête avant le front montant et change au front
+descendant. Le moteur n'implémente pas tous les modes SPI. **LATCH intervient
+après la transmission ; il n'est pas un CS actif avant et pendant les bits.**
+Ne pas le raccorder à l'entrée CS d'un composant SPI sans vérifier le protocole.
+Le programme ne génère pas encore de CS de transaction, ne lit pas MISO et
+ne propose pas CPOL/CPHA configurables. Un SIPO comme le 74HC595 se pilote
+avec DATA/CLK/STCP ; un composant SPI exigeant un CS temporel nécessite un
+moyen supplémentaire pour le fournir.
+
+Exemple à 10 MHz avec le cœur de référence à 200 MHz : `N = 20`, période
+de CLK de 100 ns, données stables 50 ns avant le front montant idéal.
+Avec un mot de 8 bits, le dernier front montant est à 750 ns et le dernier
+front descendant à 800 ns, relativement au premier bit prêt. En CLK en
+rafales, LATCH commence à 850 ns ; en CLK libre, il commence à 800 ns.
+Ces instants sont des valeurs logiques idéales : les délais et le décalage
+entre les broches doivent être vérifiés sur le montage réel.
 
 Toutes les sorties utilisent LVCMOS33. Ne pas relier directement un
 périphérique 5 V ou un récepteur incompatible avec 3,3 V. Relier les masses.

@@ -27,9 +27,11 @@ from .firmware_config import (
 )
 from .model import (
     CONTINUOUS,
+    MAX_COUNTER,
     REFERENCE_HZ,
     FrameConfig,
     divider_for_frequency,
+    free_clock_ticks,
     load_profile,
     parse_word,
     save_profile,
@@ -91,6 +93,18 @@ def pin_options() -> list[Any]:
     ]
 
 
+def firmware_missing(info: FirmwareInfo) -> str:
+    """Première fonction absente d'un firmware ancien, à signaler à l'utilisateur."""
+    for present, label in (
+        (info.led_test, "sans test LED"),
+        (info.continuous, "sans émission continue"),
+        (info.free_clock, "sans CLK libre"),
+    ):
+        if not present:
+            return f" · {label} : recharger le firmware fourni à jour"
+    return ""
+
+
 def format_duration(ns: float) -> str:
     if math.isinf(ns):
         return "illimitée (jusqu'à Arrêter)"
@@ -130,7 +144,32 @@ def waveform_signal_points(
         previous = level
     if points[-1][0] < right:
         points.append((right, previous))
+    if len(points) > 4 * (right - left):
+        return _thin_points(points)
     return points
+
+
+def _thin_points(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Dense CLK libre : par colonne de pixel, niveau d'entrée, trait vertical, sortie."""
+    thinned: list[tuple[float, float]] = []
+    index = 0
+    while index < len(points):
+        column = float(round(points[index][0]))
+        first = last = points[index][1]
+        other: float | None = None
+        index += 1
+        while index < len(points) and float(round(points[index][0])) == column:
+            level = points[index][1]
+            if level != first:
+                other = level
+            last = level
+            index += 1
+        thinned.append((column, first))
+        if other is not None:
+            thinned.append((column, other))
+            if last == first:
+                thinned.append((column, first))
+    return thinned
 
 
 def waveform_canvas_shapes(waveform: Waveform, width: float = 1200) -> list[Any]:
@@ -380,14 +419,27 @@ class Studio:
         self.latch_ns = self._field("Impulsion LATCH (ns)", "20", width=205)
         self.gap_ns = self._field("Pause après LATCH (ns)", "100", width=205)
         self.repeat = self._field("Répétitions", "1", width=145, helper="1 à 65 535 trames")
+        # CLK libre : CLK garde sa période pendant LATCH et la pause ; ces
+        # durées sont alors arrondies à des périodes entières (révision 4).
+        self.free_clock = ft.Switch(
+            label="CLK libre entre les trames",
+            value=False,
+            on_change=self._changed,
+            tooltip=(
+                "Pendant une séquence active, CLK tourne aussi pendant LATCH et la pause. "
+                "Activer aussi la répétition pour la maintenir jusqu'à Arrêter."
+            ),
+        )
         # Émission continue : SEND avec repeat_count 0, la carte répète la
         # trame jusqu'à STOP (firmware révision 3).
         self.continuous = ft.Switch(
-            label="Émission continue jusqu'à Arrêter",
+            label="Répéter jusqu'à Arrêter",
             value=False,
             on_change=self._continuous_changed,
-            tooltip="CLK, DATA et LATCH se répètent sans fin ; le bouton Arrêter les termine",
+            tooltip="Les trames se répètent sans limite ; Arrêter termine l'émission.",
         )
+        self.emission_note = ft.Text(size=12, color=MUTED)
+        self.compatibility_note = ft.Text(size=12, color=AMBER, visible=False)
         self.lsb = ft.Switch(label="LSB en premier", value=False, on_change=self._changed)
         self.latch_low = ft.Switch(label="LATCH actif bas", value=False, on_change=self._changed)
         self.frequency_actual = ft.Text(size=19, color=AMBER, weight=ft.FontWeight.W_600)
@@ -632,22 +684,57 @@ class Studio:
         )
         self._update()
 
+    async def _load_example(self, filename: str) -> None:
+        self.profile_path.value = str(self.project_root / "examples" / filename)
+        await self._load_profile(None)
+
+    async def _sipo_example(self, _: Any = None) -> None:
+        await self._load_example("frame_sipo_8bits_10mhz.json")
+
+    async def _clock_example(self, _: Any = None) -> None:
+        await self._load_example("horloge_seule_10mhz_continue.json")
+
+    def _open_guide(self, _: Any = None) -> None:
+        self.page.launch_url(
+            "https://github.com/Citroz31/arty-frame-studio/blob/main/docs/guide-utilisateur-sipo-spi.md"
+        )
+
     def _config(self) -> FrameConfig:
         bits = int(self.bit_count.value or "")
         # The divider is authoritative, while the requested frequency must also
         # remain valid after edits to another field.
         requested_hz = float((self.frequency.value or "").replace(",", ".")) * 1e6
         divider_for_frequency(requested_hz, self.core_hz)
+        divider = int(self.divider.value or "")
+        repeat_count = CONTINUOUS if self.continuous.value else int(self.repeat.value or "")
+        if not self.continuous.value and not 1 <= repeat_count <= MAX_COUNTER:
+            raise ValueError(
+                "Répétitions : choisir 1 à 65 535, ou activer Répéter jusqu'à Arrêter."
+            )
+        if self.free_clock.value:
+            # Durées saisies = LATCH et pause visibles, arrondis aux périodes de CLK.
+            latch_ticks, gap_ticks = free_clock_ticks(
+                float((self.latch_ns.value or "").replace(",", ".")),
+                float((self.gap_ns.value or "").replace(",", ".")),
+                divider,
+                self.core_hz,
+            )
+        else:
+            latch_ticks = ticks_from_ns(self.latch_ns.value or "", core_hz=self.core_hz)
+            gap_ticks = ticks_from_ns(
+                self.gap_ns.value or "", allow_zero=True, core_hz=self.core_hz
+            )
         return FrameConfig(
             word=parse_word(self.word.value or "", self.base.value or "hex", bits),
             bit_count=bits,
-            divider=int(self.divider.value or ""),
-            latch_ticks=ticks_from_ns(self.latch_ns.value or "", core_hz=self.core_hz),
-            gap_ticks=ticks_from_ns(self.gap_ns.value or "", allow_zero=True, core_hz=self.core_hz),
-            repeat_count=CONTINUOUS if self.continuous.value else int(self.repeat.value or ""),
+            divider=divider,
+            latch_ticks=latch_ticks,
+            gap_ticks=gap_ticks,
+            repeat_count=repeat_count,
             lsb_first=bool(self.lsb.value),
             latch_active_low=bool(self.latch_low.value),
             core_hz=self.core_hz,
+            free_clock=bool(self.free_clock.value),
         )
 
     def _update(self) -> None:
@@ -686,18 +773,45 @@ class Studio:
             self.order_preview.value = (
                 f"Ordre sur DATA → {emitted} · {'LSB' if config.lsb_first else 'MSB'} en premier"
             )
+            if config.free_clock:
+                latch_text = (
+                    f"LATCH {config.latch_periods} période(s) de CLK "
+                    f"({config.latch_active_ticks * config.tick_ns:.6g} ns) · "
+                    f"Pause {config.gap_periods} période(s) "
+                    f"({config.gap_ticks * config.tick_ns:.6g} ns) · CLK continue · "
+                )
+                self.quantization_note.value = (
+                    f"LATCH et pause arrondis par périodes de CLK : "
+                    f"{2 * config.divider * config.tick_ns:.6g} ns ; LATCH au moins une période."
+                )
+                self.latch_ns.helper_text = (
+                    f"Réalisé : {config.latch_active_ticks * config.tick_ns:.6g} ns"
+                )
+                self.gap_ns.helper_text = f"Réalisé : {config.gap_ticks * config.tick_ns:.6g} ns"
+            else:
+                latch_text = (
+                    f"LATCH {config.latch_ticks * config.tick_ns:.6g} ns · "
+                    f"Pause {config.gap_ticks * config.tick_ns:.6g} ns · "
+                )
+                self.latch_ns.helper_text = self.gap_ns.helper_text = None
             self.timing_summary.value = (
-                f"LATCH {config.latch_ticks * config.tick_ns:.6g} ns · "
-                f"Pause {config.gap_ticks * config.tick_ns:.6g} ns · "
-                f"Période de trame {format_duration(config.frame_duration_ns)} · "
+                latch_text + f"Période de trame {format_duration(config.frame_duration_ns)} · "
                 f"Durée totale {format_duration(config.total_duration_ns)}"
             )
             total = "une émission continue" if config.continuous else str(config.repeat_count)
             self.wave_note.value = (
-                f"{waveform.frames_simulated} trame(s) affichée(s) sur {total} · "
+                f"{waveform.frames_simulated} trame(s) complète(s)"
+                + (" + 1 partielle" if waveform.partial_last_frame else "")
+                + f" affichée(s) sur {total} · "
                 f"fenêtre {format_duration(waveform.duration_ns)} · "
                 f"résolution {config.tick_ns:.4g} ns"
-                + (" · aperçu limité aux 4 premières trames" if waveform.truncated else "")
+                + (
+                    " · fenêtre partielle : budget de transitions atteint"
+                    if waveform.partial_last_frame
+                    else " · fenêtre limitée aux premières trames"
+                    if waveform.truncated
+                    else ""
+                )
             )
             self.validation.value = ""
             self.validation.visible = False
@@ -713,6 +827,7 @@ class Studio:
             self.binary_preview.value = "—"
             self.order_preview.value = ""
             self.timing_summary.value = ""
+            self.latch_ns.helper_text = self.gap_ns.helper_text = None
         self._buttons()
         self._update()
 
@@ -733,6 +848,7 @@ class Studio:
             self.validation.value = f"Fréquence invalide : {exc}"
             self.validation.visible = True
             self.frequency_actual.value = "Fréquence demandée à corriger"
+            self.latch_ns.helper_text = self.gap_ns.helper_text = None
             self._buttons()
             self._update()
             return
@@ -781,6 +897,21 @@ class Studio:
     def _buttons(self) -> None:
         connected = bool(self.device is not None and self.device.connected)
         busy = bool(self.device_status is not None and self.device_status.busy)
+        config = self.current_config
+        missing_modes = []
+        if connected and config is not None and self.firmware_info is not None:
+            if config.continuous and not self.firmware_info.continuous:
+                missing_modes.append("répétition jusqu'à Arrêter")
+            if config.free_clock and not self.firmware_info.free_clock:
+                missing_modes.append("CLK libre")
+        self.compatibility_note.visible = bool(missing_modes)
+        self.compatibility_note.value = (
+            "Firmware incompatible avec "
+            + ", ".join(missing_modes)
+            + " : charger le firmware fourni à jour ou désactiver ces options."
+            if missing_modes
+            else ""
+        )
         self.send_button.disabled = (
             not connected
             or self.current_config is None
@@ -788,11 +919,42 @@ class Studio:
             or self.serial_pending
             or self.programming_pending
             or self.command_uncertain
+            or bool(missing_modes)
         )
+        self.send_button.text = (
+            "Démarrer CLK continue"
+            if config is not None and config.continuous and config.free_clock
+            else "Démarrer la répétition"
+            if config is not None and config.continuous
+            else "Envoyer la trame"
+        )
+        self.repeat.disabled = bool(self.continuous.value)
+        self.repeat.helper_text = (
+            "Illimité · jusqu'à Arrêter" if self.continuous.value else "1 à 65 535 trames"
+        )
+        if self.free_clock.value:
+            self.emission_note.value = (
+                "CLK continue jusqu'à Arrêter."
+                if self.continuous.value
+                else "CLK libre pendant la séquence, puis arrêt automatique."
+            ) + " Des fronts supplémentaires décalent DATA = 0 pendant LATCH et la pause."
+            self.emission_note.color = AMBER
+        else:
+            self.emission_note.value = (
+                "Trames répétées jusqu'à Arrêter ; CLK reste basse pendant LATCH et la pause."
+                if self.continuous.value
+                else "CLK en rafales : une impulsion par bit transmis."
+            )
+            self.emission_note.color = MUTED
         self.stop_button.disabled = not connected or self.serial_pending or self.programming_pending
         self.simulate_button.disabled = self.current_config is None
         self.connect_button.disabled = self.serial_pending or self.programming_pending
         self.connect_button.text = "Déconnecter" if connected else "Connecter"
+        self.connect_button.tooltip = (
+            "Fermer le port n'arrête pas l'émission du FPGA ; utiliser Arrêter pour la terminer."
+            if connected and self.mode.value == "uart" and (busy or self.command_uncertain)
+            else None
+        )
         self.mode.disabled = connected or self.serial_pending or self.programming_pending
         self.port.disabled = (
             connected
@@ -844,11 +1006,16 @@ class Studio:
         )
         self.mode_badge.color = BLUE if simulated else GREEN if connected else AMBER
         self.connection_hint.value = (
-            "La démo permet de préparer les trames sans carte."
+            "Pour utiliser la carte : Déconnecter, puis choisir Carte · USB/UART."
+            if simulated and connected
+            else "La démo permet de préparer les trames sans carte."
             if simulated
+            else "Le FPGA est autonome : Déconnecter ne termine pas l'émission. "
+            "Utiliser Arrêter si elle doit se terminer."
+            if connected and (busy or self.command_uncertain)
             else "Charger le firmware dans FPGA avant de connecter le port COM à 115 200 bauds."
         )
-        self.connection_hint.visible = not connected
+        self.connection_hint.visible = not connected or simulated or busy or self.command_uncertain
         self.hardware_pinout.visible = connected and not simulated
         self.led_test_button.text = "Simuler les LED" if simulated else "Tester les LED"
         self.led_note.value = "Motif simulé" if simulated else "Motif confirmé par UART"
@@ -890,9 +1057,11 @@ class Studio:
                 ft.dropdown.Option(p.device, f"{p.device} · {p.description}") for p in ports
             ]
             available = {p.device for p in ports}
-            self.port.value = (
-                current if current in available else (ports[0].device if ports else None)
+            preferred = next(
+                (port.device for port in ports if "VID:PID=0403:6010" in (port.hwid or "").upper()),
+                ports[0].device if ports else None,
             )
+            self.port.value = current if current in available else preferred
             self._log(f"Ports USB/UART détectés : {len(ports)} (firmware non vérifié).")
             for port in ports:
                 self._log(f"{port.device} · {port.description} · {port.hwid or 'ID inconnu'}")
@@ -909,15 +1078,16 @@ class Studio:
         try:
             async with self.serial_lock:
                 if self.device is not None and self.device.connected:
-                    if (
-                        isinstance(self.device, SerialDevice)
-                        and self.device_status is not None
-                        and self.device_status.busy
-                    ):
+                    hardware_state_unknown = self.mode.value == "uart" and (
+                        self.command_uncertain
+                        or self.device_status is None
+                        or self.device_status.busy
+                    )
+                    if hardware_state_unknown:
                         # Fermer l'UART n'arrête pas la carte : une émission
                         # continue se poursuit jusqu'à STOP, reset ou coupure.
                         self._log(
-                            "La carte poursuit son émission après la déconnexion : "
+                            "La déconnexion UART ne confirme pas l'arrêt de la carte : "
                             "reconnecter puis Arrêter, ou appuyer sur RESET.",
                             AMBER,
                         )
@@ -928,7 +1098,12 @@ class Studio:
                     self._firmware_identified(None)
                     self.connection_status.value = "Déconnecté"
                     self.connection_status.color = MUTED
-                    self.hardware_status.value = "Aucune émission"
+                    self.hardware_status.value = (
+                        "Carte déconnectée · état non vérifié ; reconnecter puis Arrêter."
+                        if hardware_state_unknown
+                        else "Aucune émission"
+                    )
+                    self.hardware_status.color = AMBER if hardware_state_unknown else MUTED
                     self._log("Connexion fermée.")
                 else:
                     device: SerialDevice | DemoDevice
@@ -1022,14 +1197,10 @@ class Studio:
         self.firmware_status.value = (
             f"{prefix} révision {info.revision} · cœur {info.core_hz / 1e6:g} MHz · "
             + ("identité locale" if simulated else f"build {build}")
-            + ("" if info.led_test else " · sans test LED : recharger le firmware fourni à jour")
-            + (
-                ""
-                if info.continuous or not info.led_test
-                else " · sans émission continue : recharger le firmware fourni à jour"
-            )
+            + firmware_missing(info)
         )
-        self.firmware_status.color = GREEN if info.led_test and info.continuous else AMBER
+        complete = info.led_test and info.continuous and info.free_clock
+        self.firmware_status.color = GREEN if complete else AMBER
         self._log(self.firmware_status.value, self.firmware_status.color)
         if info.core_hz != self.core_hz:
             self._log(
@@ -1165,7 +1336,8 @@ class Studio:
                 )
                 self._log(
                     f"SEND · {config.bit_count} bits · 0x{config.word:X} · "
-                    f"{config.frequency_hz / 1e6:.7g} MHz · {repetitions}.",
+                    f"{config.frequency_hz / 1e6:.7g} MHz · {repetitions} · "
+                    f"{'CLK libre' if config.free_clock else 'CLK en rafales'}.",
                     BLUE,
                 )
         except Exception as exc:
@@ -1258,8 +1430,10 @@ class Studio:
         self.word.value = f"{config.word:X}"
         self.bit_count.value = str(config.bit_count)
         self.frequency.value = f"{config.frequency_hz / 1e6:.9g}"
-        self.latch_ns.value = f"{config.latch_ticks * config.tick_ns:.9g}"
+        # En CLK libre, le champ LATCH porte l'impulsion visible (k périodes).
+        self.latch_ns.value = f"{config.latch_active_ticks * config.tick_ns:.9g}"
         self.gap_ns.value = f"{config.gap_ticks * config.tick_ns:.9g}"
+        self.free_clock.value = config.free_clock
         if config.core_hz == self.core_hz:
             self.divider.value = str(config.divider)
         else:

@@ -183,10 +183,10 @@ module tb_top;
         payload[7:0]=1;
         request(6,41,1);
         check_response(72,6,41,0,0,16'hc200);
-        // INFO page 3: capabilities LED, INFO and continuous SEND.
+        // INFO page 3: capabilities LED, INFO, continuous SEND, free CLK.
         payload[7:0]=3;
         request(6,42,1);
-        check_response(84,6,42,0,0,16'h0007);
+        check_response(84,6,42,0,0,16'h000f);
 
         // Continuous SEND (repeat_count 0), 10 ns frames: during the
         // milliseconds of UART traffic the frame counter wraps several
@@ -217,6 +217,31 @@ module tb_top;
         if({data_pin,clock_pin,latch_pin}!==3'b000 || clock_pin_edges!=edges_at_status)
             $fatal(1,"Pins still active after STOP of continuous emission");
 
+        // Free CLK, continuous: 1 bit, N=1, LATCH one CLK period, no pause.
+        // CLK must rise once per 5 ns core cycle, LATCH and pause included.
+        payload=0;
+        payload[31:0]=1; payload[39:32]=1; payload[55:40]=1;
+        payload[71:56]=1; payload[103:88]=0; payload[111:104]=4;
+        request(2,46,14);
+        check_response(132,2,46,0,1,0);
+        // Exactly 10 us: from one clk100 edge to the 1000th following edge.
+        @(posedge clk100);
+        edges_at_status=clock_pin_edges;
+        repeat(1000) @(posedge clk100);
+        if(clock_pin_edges-edges_at_status<1999 || clock_pin_edges-edges_at_status>2001)
+            $fatal(1,"Free CLK not periodic: %0d rising edges in 2000 core cycles",
+                clock_pin_edges-edges_at_status);
+        request(3,47,0);
+        wait(captured_count>=156);
+        #0.1;
+        if(captured[147]!==8'h83 || captured[150]!==0 || captured[151]!==0)
+            $fatal(1,"STOP of free-CLK emission not acknowledged");
+        #20;
+        edges_at_status=clock_pin_edges;
+        repeat(100) @(posedge clk100);
+        if({data_pin,clock_pin,latch_pin}!==3'b000 || clock_pin_edges!=edges_at_status)
+            $fatal(1,"Pins still active after STOP of free-CLK emission");
+
         // Repeated long frames leave enough time to interrupt DATA/CLK and
         // LATCH independently. Commands still arrive over the production UART.
         payload=0;
@@ -233,7 +258,7 @@ module tb_top;
         request(1,37,0);
         check_response(0,1,37,0,0,0);
         if(reset_checks!=2) $fatal(1,"Missing asynchronous reset cases");
-        $display("PASS tb_top: UART PING/SEND/STATUS/LED/INFO, 200 MHz modeled burst, continuous SEND/STOP, %0d stopped-clock asynchronous resets and UART recovery",reset_checks);
+        $display("PASS tb_top: UART PING/SEND/STATUS/LED/INFO, 200 MHz modeled burst, continuous and free-CLK SEND/STOP, %0d stopped-clock asynchronous resets and UART recovery",reset_checks);
         $finish;
     end
     initial begin #60000000; $fatal(1,"Timeout"); end

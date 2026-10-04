@@ -11,7 +11,7 @@ La compilation décrite ci-dessous concerne les développeurs et GitHub Actions.
 
 Le [firmware précompilé](../firmware/prebuilt/arty_frame.bit) a été produit
 avec cette chaîne : synthèse, placement/routage et contrôle de timing réussis
-à **200 MHz**, avec une Fmax après routage de **212,77 MHz** (graine 2). Les sorties
+à **200 MHz**, avec une Fmax après routage de **210,79 MHz** (graine 8). Les sorties
 physiques et le chargement de ce firmware n'ont pas encore été testés sur carte.
 
 ## Outils épinglés et provenance
@@ -59,25 +59,25 @@ Le fichier publié dans `firmware/prebuilt/` est accompagné de :
 | [build.log](../firmware/prebuilt/build.log) | Commandes et résultats, dont le rapport de fréquence après routage |
 | [timing.json](../firmware/prebuilt/timing.json) | Rapport de timing nextpnr |
 
-Le build de référence utilise **ABC9**, la graine nextpnr **2** (première des
-graines 1 à 8 qui respecte le timing) et la cible `xc7a100tcsg324-1`. Le
-rapport final indique **212,76596069335938 MHz** sur `core_clock`, avec
+Le build de référence utilise **ABC9**, la graine nextpnr **8** (seule des
+graines 1 à 8 à dépasser 206 MHz) et la cible `xc7a100tcsg324-1`. Le
+rapport final indique **210,79258728027344 MHz** sur `core_clock`, avec
 **PASS at 200.00 MHz**. Le `.bit` contient un IDCODE
 `0x03631093`, compatible avec l'IDCODE `0x13631093` rapporté sur la carte
 (révision différente). Les trois resets ODDR R→SR ont été vérifiés dans le
 netlist routé. Le fichier mesure **3 825 995 octets** et son SHA256 est :
 
 ```text
-0ef4ed13170ea9a719a44566177fc480450ff916e73f719af41ab5e452523a8f
+02c208aa8cbe79599f605e2f14d667a8f4a77361e56637832449e359f2edb57e
 ```
 
 ## Reproduire un build dans un environnement de développement
 
-Le firmware distribué provient du commit `822f091` et du
-[run GitHub Actions 37207902391](https://github.com/Citroz31/arty-frame-studio/actions/runs/37207902391),
+Le firmware distribué provient du commit `dbe6803` et du
+[run GitHub Actions 37210822783](https://github.com/Citroz31/arty-frame-studio/actions/runs/37210822783),
 publié par son job `publish`. Il ajoute au brochage UART corrigé, aux
 entrées ODDR enregistrées et aux commandes LED et INFO l'émission continue
-jusqu'à STOP (révision 3).
+jusqu'à STOP (révision 3) et la CLK libre pendant LATCH et pause (révision 4).
 `arty-frame firmware-check` contrôle le fichier, les sources et le rapport
 de timing avant son utilisation, sans outil FPGA ni matériel raccordé.
 
@@ -218,13 +218,27 @@ placement provisoire n'est pas une preuve de fermeture du timing.
 `--timing-allow-fail` est interdit. Un rapport final absent ou en échec
 bloque la conversion en bitstream.
 
-Les chemins du cœur sont proches de 5 ns : le seul placement peut faire
-varier la Fmax d'environ 10 %. Le build essaie donc les graines de placement
-de `nextpnr_seeds` (par défaut 1 à 8) jusqu'au premier routage qui respecte
-le timing ; un échec de timing passe à la graine suivante, toute autre erreur
-de nextpnr arrête le build. La graine retenue figure dans le reçu et dans le
-manifeste. Le timing exigé reste le même : la graine ne change que le
-placement, jamais la contrainte.
+Les chemins du cœur sont proches de 5 ns : le seul placement fait varier la
+Fmax routée d'environ 15 % (182 à 220 MHz observés). Le build essaie donc les
+graines de placement de `nextpnr_seeds` (par défaut 1 à 8) et s'arrête à la
+première qui dépasse l'exigence de `timing_margin` (par défaut 0.03, soit
+206 MHz pour 200 MHz). Sinon, il garde la graine **la plus rapide** parmi
+celles qui respectent le timing : ses fichiers FASM, `timing.json` et
+`routed.json` sont restaurés et `build.log` indique la graine retenue. Un
+échec de timing passe à la graine suivante, toute autre erreur de nextpnr
+arrête le build. La graine retenue figure dans le reçu et dans le manifeste.
+Le timing exigé reste le même : la graine ne change que le placement, jamais
+la contrainte ; `timing_margin` à 0 reprend la première graine qui passe.
+
+Avant chaque essai, les sorties de l'essai précédent sont supprimées ; les
+copies du meilleur résultat sont conservées séparément. Une sortie FASM,
+un rapport de timing ou un netlist routé manquant bloque le build même si
+nextpnr annonce un PASS : aucun fichier d'une autre graine ne peut compléter
+un essai partiel. Avec le backend himbaechel, les trois fichiers restaurés
+proviennent donc du même essai que la graine indiquée dans le reçu. Le journal
+conserve tous les essais, y compris ceux qui échouent après le meilleur PASS :
+consulter sa ligne « graine … retenue » et le rapport `timing.json` restauré,
+plutôt que supposer que la dernière ligne de fréquence est celle retenue.
 
 Ce contrôle couvre les chemins modélisés par nextpnr. Il **ne certifie pas
 l'interface DDR ni la liaison Pmod externe** : fronts, skew, câbles et marges
