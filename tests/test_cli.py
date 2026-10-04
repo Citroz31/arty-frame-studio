@@ -190,5 +190,20 @@ def test_led_test_command_identifies_then_walks_leds(monkeypatch, capsys):
     monkeypatch.setattr(transport.time, "sleep", lambda _: None)
     assert main(["led-test", "--port", "COM7"]) == 0
     out = capsys.readouterr().out
-    assert '"revision": 2' in out and "commandes confirmées" in out
+    assert '"revision": 3' in out and "commandes confirmées" in out
     assert not demo.connected
+
+
+def test_cli_continuous_send_stops_after_the_requested_duration(tmp_path: Path, capsys) -> None:
+    profile = tmp_path / "frame.json"
+    assert main(["profile", str(profile)]) == 0
+    assert (
+        main(["send", "--profile", str(profile), "--demo", "--continuous", "--duration", "0.05"])
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert '"busy": true' in out and "STOP après 0.05 s" in out and "modulo 65536" in out
+    assert main(["send", "--profile", str(profile), "--demo", "--continuous"]) == 0
+    assert "commande stop" in capsys.readouterr().err
+    assert main(["send", "--profile", str(profile), "--demo", "--duration", "-1"]) == 1
+    assert "--duration" in capsys.readouterr().err

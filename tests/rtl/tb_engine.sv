@@ -30,7 +30,8 @@ module tb_engine;
             expected_data=0;
             expected_clock=0;
             expected_latch=flags_in[1];
-            if (tick < duration*repeat_in) begin
+            // repeat_in=0: continuous, every tick lies inside a frame.
+            if (repeat_in == 0 || tick < duration*repeat_in) begin
                 offset=tick%duration;
                 if (offset < 2*divider_in*bits_in) begin
                     bit_number=offset/(2*divider_in);
@@ -78,6 +79,47 @@ module tb_engine;
         end
     endtask
 
+    // Continuous SEND (repeat 0): the frame repeats past every 16-bit
+    // boundary of the hidden repetition counter until STOP, at any phase.
+    task run_continuous_case;
+        input [31:0] word_value;
+        input integer bit_value, divider_value, latch_value, gap_value;
+        input integer frames, stop_offset;
+        input [1:0] flags_value;
+        integer duration, pair_index, pairs;
+        begin
+            @(negedge clk);
+            word_in=word_value; bits_in=bit_value; divider_in=divider_value;
+            latch_ticks_in=latch_value; gap_ticks_in=gap_value;
+            repeat_in=0; flags_in=flags_value; start=1;
+            @(posedge clk); #0.1;
+            if (!busy || completed != 0) $fatal(1,"Continuous SEND did not start");
+            @(negedge clk); start=0;
+            duration=2*divider_value*bit_value+divider_value+latch_value+gap_value;
+            pairs=(duration*frames+stop_offset)/2;
+            for (pair_index=0; pair_index<pairs; pair_index=pair_index+1) begin
+                @(posedge clk);
+                check_tick(pair_index*2,duration,dr,cr,lr);
+                check_tick(pair_index*2+1,duration,df,cf,lf);
+            end
+            #0.1;
+            if (!busy || completed != ((pairs*2)/duration)%65536)
+                $fatal(1,"Continuous: busy=%b completed=%0d after %0d ticks (frame %0d)",
+                    busy,completed,pairs*2,duration);
+            @(negedge clk); stop=1;
+            @(posedge clk); #0.1;
+            if (busy || dr || df || cr || cf || lr !== flags_value[1] || lf !== flags_value[1])
+                $fatal(1,"STOP did not end continuous emission");
+            @(negedge clk); stop=0;
+            repeat (3) begin
+                @(posedge clk); #0.1;
+                if (busy || dr || df || cr || cf || lr !== flags_value[1])
+                    $fatal(1,"Outputs moved after STOP of continuous emission");
+            end
+            repeat_in=1;
+        end
+    endtask
+
     integer width_case, flag_case;
 
     initial begin
@@ -110,6 +152,16 @@ module tb_engine;
         end
         for (flag_case=0; flag_case<4; flag_case=flag_case+1)
             run_case(32'h123456,26,1,65535,65535,1,flag_case);
+        // Shortest frame (4 ticks): 70000 frames cross the 16-bit wrap twice
+        // for the hidden counter and once for completed, without ending.
+        run_continuous_case(1,1,1,1,0,70000,1,0);
+        run_continuous_case(32'h2a,6,1,3,0,40,3,3);
+        run_continuous_case(32'h123456,26,3,5,7,5,17,1);
+        repeat (40) begin
+            run_continuous_case($urandom_range(0,63),6,$urandom_range(1,7),
+                $urandom_range(1,9),$urandom_range(0,9),$urandom_range(2,4),
+                $urandom_range(0,40),$urandom_range(0,3));
+        end
         // STOP must preserve completed, including repetitions already finished.
         @(negedge clk);
         word_in=1; bits_in=1; divider_in=10; latch_ticks_in=1;

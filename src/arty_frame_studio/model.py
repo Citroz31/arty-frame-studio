@@ -15,6 +15,8 @@ REFERENCE_HZ = REFERENCE_CORE_HZ
 TICK_NS = 2.5
 MAX_BITS = 26
 MAX_COUNTER = 65_535
+# repeat_count 0 : la trame se répète sans fin jusqu'à STOP (firmware révision 3).
+CONTINUOUS = 0
 PROFILE_SCHEMA = 2
 
 
@@ -37,17 +39,23 @@ class FrameConfig:
             "divider": (1, MAX_COUNTER),
             "latch_ticks": (1, MAX_COUNTER),
             "gap_ticks": (0, MAX_COUNTER),
-            "repeat_count": (1, MAX_COUNTER),
+            "repeat_count": (CONTINUOUS, MAX_COUNTER),
         }
         for name, (low, high) in limits.items():
             value = getattr(self, name)
             if type(value) is not int or not low <= value <= high:
-                raise ValueError(f"{name} doit être un entier entre {low} et {high}.")
+                hint = " (0 : continu jusqu'à STOP)" if name == "repeat_count" else ""
+                raise ValueError(f"{name} doit être un entier entre {low} et {high}{hint}.")
         if type(self.word) is not int or not 0 <= self.word < 1 << self.bit_count:
             raise ValueError(f"La valeur doit tenir sur {self.bit_count} bits non signés.")
         if type(self.lsb_first) is not bool or type(self.latch_active_low) is not bool:
             raise ValueError("Les options d’ordre et de polarité doivent être des booléens.")
         check_core_hz(self.core_hz)
+
+    @property
+    def continuous(self) -> bool:
+        """Émission répétée jusqu'à STOP, sans nombre de trames fixé."""
+        return self.repeat_count == CONTINUOUS
 
     @property
     def bits(self) -> tuple[int, ...]:
@@ -74,6 +82,9 @@ class FrameConfig:
 
     @property
     def total_duration_ns(self) -> float:
+        """Durée de la séquence ; ``math.inf`` en émission continue."""
+        if self.continuous:
+            return math.inf
         return self.frame_duration_ns * self.repeat_count
 
 

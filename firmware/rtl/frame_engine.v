@@ -2,6 +2,8 @@
 // Two logical 2.5 ns steps per 200 MHz cycle. Connect *_rise/*_fall to
 // ODDR D1/D2 with DDR_CLK_EDGE="SAME_EDGE". No 400 MHz fabric clock.
 // The two boundaries are decoded in parallel: no cascaded half-step ALUs.
+// repeat_in=0 repeats the frame continuously until STOP; completed then
+// counts finished frames modulo 2^16.
 module frame_engine #(
     // A packet controller can align the word in its validation pipeline.
     // The default keeps the standalone SEND interface unchanged.
@@ -29,6 +31,7 @@ module frame_engine #(
     reg [15:0] divider_minus_one, latch_minus_one, gap_minus_one;
     reg [1:0] flags;
     reg initial_data, data_level, clock_level, latch_level;
+    reg continuous, last_frame;
     reg ticks_one, ticks_two;
     reg divider_one, divider_two, divider_three;
     reg latch_one, latch_two, latch_three;
@@ -47,7 +50,9 @@ module frame_engine #(
     wire [25:0] shifted_word = flags[0] ? {1'b0,shift_word[25:1]}
         : {shift_word[24:0],1'b0};
     wire last_bit = bits_left == 1;
-    wire last_frame = remaining == 1;
+    // last_frame is a register equal to (remaining == 1 && !continuous),
+    // maintained wherever remaining changes. The 16-bit comparison stays
+    // off the finish/next-state path; a continuous SEND never sets it.
     wire boundary = ticks_one || ticks_two;
     wire first_finish = ticks_one && (phase[5] || (phase[4] && gap_zero));
     // All assignments use the explicit one-hot constants above. The IDLE
@@ -200,6 +205,8 @@ module frame_engine #(
             gap_ticks <= 0;
             gap_minus_one <= 0;
             remaining <= 0;
+            continuous <= 0;
+            last_frame <= 0;
             ticks <= 0;
             ticks_one <= 0;
             ticks_two <= 0;
@@ -222,6 +229,7 @@ module frame_engine #(
         end else if (stop) begin
             phase <= IDLE;
             remaining <= 0;
+            last_frame <= 0;
             ticks_one <= 0;
             ticks_two <= 0;
             data_level <= 0;
@@ -239,6 +247,8 @@ module frame_engine #(
             gap_ticks <= gap_ticks_in;
             gap_minus_one <= gap_ticks_in - 1'b1;
             remaining <= repeat_in;
+            continuous <= repeat_in == 0;
+            last_frame <= repeat_in == 1;
             ticks <= divider_in;
             ticks_one <= divider_in == 1;
             ticks_two <= divider_in == 2;
@@ -266,7 +276,9 @@ module frame_engine #(
             latch_level <= next_latch;
             if (finish) begin
                 completed <= completed + 1'b1;
+                // A continuous count wraps freely and never ends the emission.
                 remaining <= remaining - 1'b1;
+                last_frame <= !continuous && remaining == 2;
                 bits_left <= bit_count;
                 shift_word <= word_config;
             end else if (shift_data) begin

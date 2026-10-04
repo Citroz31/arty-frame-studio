@@ -154,3 +154,15 @@ def test_info_pages_assemble_core_clock_and_build_identity():
     assert info.core_hz == 200_000_000 and info.build_id == 0 and info.led_test
     with pytest.raises(ValueError):
         info_from_pages([2, 0, 0])
+
+
+def test_continuous_send_encodes_repeat_zero_and_is_a_declared_capability():
+    from arty_frame_studio.protocol import CAPABILITY_CONTINUOUS, info_from_pages
+
+    config = FrameConfig(word=1, bit_count=1, divider=1, latch_ticks=1, gap_ticks=0, repeat_count=0)
+    request = encode_request(Opcode.SEND, 3, config)
+    # repeat_count is the uint16 at payload offset 11, just before the flags.
+    assert request[6 + 11 : 6 + 13] == b"\x00\x00"
+    assert CAPABILITY_CONTINUOUS == 0x0004
+    assert info_from_pages([3, 0xC200, 0x0BEB, 7, 0, 0]).continuous
+    assert not info_from_pages([2, 0xC200, 0x0BEB, 3, 0, 0]).continuous

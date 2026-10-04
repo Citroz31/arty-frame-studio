@@ -21,6 +21,7 @@ module tb_protocol;
     integer led_writes=0;
     integer page;
     reg [15:0] info_expected [0:5];
+    integer stopped_completed;
     frame_controller #(
         .PACKET_TIMEOUT_CYCLES(60), .CORE_HZ(32'd150000000), .BUILD_ID(32'hA5C31E2D)
     ) dut (
@@ -166,8 +167,19 @@ module tb_protocol;
         transaction(1,2,24,14,0,2,0,0);
         test_payload[55:40]=1; test_payload[71:56]=0;
         transaction(1,2,25,14,0,2,0,0);
+        // repeat_count 0 is continuous emission: still running after many
+        // frames, BUSY to a second SEND, and ended only by STOP.
         test_payload[71:56]=1; test_payload[103:88]=0;
-        transaction(1,2,26,14,0,2,0,0);
+        transaction(1,2,26,14,0,0,1,0);
+        repeat(300) @(posedge clk);
+        transaction(1,4,60,0,0,0,1,-1);
+        if(!busy || completed==0) $fatal(1,"Continuous SEND ended by itself");
+        transaction(1,2,61,14,0,3,1,-1);
+        transaction(1,3,62,0,0,0,0,-1);
+        if(busy || dr || df || cr || cf || lr || lf)
+            $fatal(1,"STOP did not end continuous emission");
+        stopped_completed=completed;
+        transaction(1,4,63,0,0,0,0,stopped_completed);
         // One-tick latch/gap zero and finite completion.
         test_payload[103:88]=2; test_payload[87:72]=0;
         transaction(1,2,27,14,0,0,1,0);
@@ -186,8 +198,8 @@ module tb_protocol;
         transaction(1,5,44,1,0,0,0,-1);
         if(led_writes!=2 || last_led!==5'b01010) $fatal(1,"LED automatic write missing");
         // INFO pages carry revision, CORE_HZ and BUILD_ID in the 16-bit field.
-        info_expected[0]=16'd2; info_expected[1]=16'hd180; info_expected[2]=16'h08f0;
-        info_expected[3]=16'h0003; info_expected[4]=16'h1e2d; info_expected[5]=16'ha5c3;
+        info_expected[0]=16'd3; info_expected[1]=16'hd180; info_expected[2]=16'h08f0;
+        info_expected[3]=16'h0007; info_expected[4]=16'h1e2d; info_expected[5]=16'ha5c3;
         for(page=0;page<6;page=page+1) begin
             test_payload[7:0]=page;
             transaction(1,6,50+page,1,0,0,0,info_expected[page]);

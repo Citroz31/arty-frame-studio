@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -13,7 +14,7 @@ from typing import Any
 
 from .bitstream import read_bitstream
 from .firmware_config import FirmwareBuildConfig
-from .model import FrameConfig, load_profile, save_profile
+from .model import CONTINUOUS, FrameConfig, load_profile, save_profile
 from .prebuilt import validate_programming_image, verify_prebuilt_firmware
 from .remote_build import GitHubBuildClient, RemoteBuildTarget
 from .simulation import export_csv, export_vcd, simulate, waveform_svg
@@ -95,6 +96,17 @@ def _parser() -> argparse.ArgumentParser:
     connection.add_argument("--port", help="COM3, /dev/ttyUSB1, etc.")
     connection.add_argument("--demo", action="store_true")
     send.add_argument("--wait", action="store_true", help="Attendre la fin ; Ctrl+C envoie STOP")
+    send.add_argument(
+        "--continuous",
+        action="store_true",
+        help="Répéter la trame sans fin jusqu'à STOP (repeat_count 0, firmware révision 3)",
+    )
+    send.add_argument(
+        "--duration",
+        type=float,
+        metavar="SECONDES",
+        help="Envoyer STOP après cette durée (utile en émission continue)",
+    )
     for name in ("status", "stop"):
         item = commands.add_parser(name, help="Lire l’état" if name == "status" else "Arrêter")
         item.add_argument("--port", required=True)
@@ -245,26 +257,58 @@ def main(argv: list[str] | None = None) -> int:
             svg.write_text(waveform_svg(waveform), encoding="utf-8")
             export_csv(waveform, args.output.with_suffix(".csv"))
             export_vcd(waveform, args.output.with_suffix(".vcd"))
+            total = "continu" if config.continuous else str(config.repeat_count)
             print(
-                f"Simulation idéale : {waveform.frames_simulated}/{config.repeat_count} trame(s), "
+                f"Simulation idéale : {waveform.frames_simulated}/{total} trame(s), "
                 f"{waveform.duration_ns:g} ns. Exports : {args.output.resolve()}.[svg,csv,vcd]"
             )
             if waveform.truncated:
                 print("Les exports sont limités à la fenêtre simulée.")
         elif args.command in ("send", "status", "stop"):
+            if args.command == "send":
+                # Refuser les options incohérentes avant d'ouvrir le port.
+                config = load_profile(args.profile)
+                if args.continuous:
+                    config = replace(config, repeat_count=CONTINUOUS)
+                if args.duration is not None and not (
+                    math.isfinite(args.duration) and args.duration > 0
+                ):
+                    raise ValueError("--duration attend un nombre de secondes positif.")
             device = DemoDevice() if getattr(args, "demo", False) else SerialDevice(args.port)
             device.connect()
             try:
                 if args.command == "send":
-                    # SEND refuse une trame calculée pour une autre horloge de cœur.
+                    # SEND refuse une trame calculée pour une autre horloge de
+                    # cœur, ou continue pour un firmware qui ne la gère pas.
                     device.identify()
-                    status = device.send(load_profile(args.profile))
+                    status = device.send(config)
                     print(json.dumps(asdict(status), ensure_ascii=False))
-                    if args.wait:
+                    if args.duration is not None:
+                        deadline = time.monotonic() + args.duration
+                        while status.busy and time.monotonic() < deadline:
+                            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+                            status = device.status()
+                        if status.busy:
+                            status = device.stop()
+                            print(
+                                f"STOP après {args.duration:g} s : {status.completed} trame(s)"
+                                + (" (compteur modulo 65536)." if config.continuous else ".")
+                            )
+                        else:
+                            print(f"Terminé : {status.completed} trame(s).")
+                    elif args.wait:
+                        if config.continuous:
+                            print("Émission continue : Ctrl+C envoie STOP.", file=sys.stderr)
                         while status.busy:
                             time.sleep(0.05)
                             status = device.status()
                         print(f"Terminé : {status.completed} trame(s).")
+                    elif config.continuous:
+                        print(
+                            "Émission continue en cours sur la carte ; elle s'arrête avec la "
+                            "commande stop (ou une coupure/un reset).",
+                            file=sys.stderr,
+                        )
                 else:
                     status = device.stop() if args.command == "stop" else device.status()
                     print(json.dumps(asdict(status), ensure_ascii=False))

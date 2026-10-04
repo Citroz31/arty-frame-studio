@@ -10,6 +10,7 @@ from typing import Any
 
 from .model import REFERENCE_HZ, FrameConfig, check_core_hz
 from .protocol import (
+    CAPABILITY_CONTINUOUS,
     CAPABILITY_INFO,
     CAPABILITY_LED,
     INFO_PAGES,
@@ -209,12 +210,9 @@ class SerialDevice:
         return self._exchange(Opcode.PING)
 
     def send(self, config: FrameConfig) -> DeviceStatus:
-        expected = (self.firmware or LEGACY_FIRMWARE).core_hz
-        if isinstance(config, FrameConfig) and config.core_hz != expected:
-            raise ValueError(
-                f"Trame calculée pour un cœur à {config.core_hz / 1e6:g} MHz ; le firmware "
-                f"connecté fonctionne à {expected / 1e6:g} MHz. Recalculer la trame."
-            )
+        firmware = self.firmware or LEGACY_FIRMWARE
+        if isinstance(config, FrameConfig):
+            check_firmware_accepts(config, firmware)
         return self._exchange(Opcode.SEND, config)
 
     def led(self, pattern: int | None) -> DeviceStatus:
@@ -372,22 +370,40 @@ class SerialDevice:
             )
 
 
+def check_firmware_accepts(config: FrameConfig, firmware: FirmwareInfo) -> None:
+    """Refuse localement une trame que ce firmware exécuterait autrement."""
+    if config.core_hz != firmware.core_hz:
+        raise ValueError(
+            f"Trame calculée pour un cœur à {config.core_hz / 1e6:g} MHz ; le firmware "
+            f"connecté fonctionne à {firmware.core_hz / 1e6:g} MHz. Recalculer la trame."
+        )
+    if config.continuous and not firmware.continuous:
+        # Une révision 2 refuserait repeat_count 0 (paramètres invalides) ;
+        # le message indique la cause plutôt qu'un refus générique.
+        raise ValueError(
+            f"Le firmware connecté (révision {firmware.revision}) ne gère pas l'émission "
+            "continue. Charger le firmware fourni (révision 3 ou plus) ou choisir un "
+            "nombre de répétitions."
+        )
+
+
 class DemoDevice:
     """Simulation des commandes selon le temps monotone et les durées idéales.
 
     Le nombre de trames terminées inclut le latch et l'intervalle. Les temps ne
     sont pas ralentis : une émission courte peut finir avant le prochain poll.
-    La démo simule un firmware de révision 2 à l'horloge ``core_hz`` ; le motif
-    des LED virtuelles est exposé par ``led_pattern`` (``None`` : état).
+    La démo simule un firmware de révision 3 à l'horloge ``core_hz`` ; le motif
+    des LED virtuelles est exposé par ``led_pattern`` (``None`` : état). Une
+    émission continue reste active jusqu'à STOP, son compteur modulo 65 536.
     """
 
     def __init__(
         self, *, clock: Callable[[], float] = time.monotonic, core_hz: int = REFERENCE_HZ
     ) -> None:
         self.firmware = FirmwareInfo(
-            revision=2,
+            revision=3,
             core_hz=core_hz,
-            capabilities=CAPABILITY_LED | CAPABILITY_INFO,
+            capabilities=CAPABILITY_LED | CAPABILITY_INFO | CAPABILITY_CONTINUOUS,
             build_id=0,
         )
         self.led_pattern: int | None = None
@@ -424,6 +440,7 @@ class DemoDevice:
                     f"Trame calculée pour un cœur à {config.core_hz / 1e6:g} MHz ; la démo "
                     f"simule {self.firmware.core_hz / 1e6:g} MHz. Recalculer la trame."
                 )
+            check_firmware_accepts(config, self.firmware)
             self._update()
             if self._busy:
                 raise DeviceError(DeviceStatus(StatusCode.BUSY, True, self._completed))
@@ -476,6 +493,10 @@ class DemoDevice:
             return
         elapsed = max(0.0, self._clock() - self._started_at)
         duration = self._config.frame_duration_ns / 1_000_000_000
+        if self._config.continuous:
+            # Comme le firmware : pas de fin, compteur 16 bits qui reboucle.
+            self._completed = int(elapsed / duration) & 0xFFFF
+            return
         if elapsed >= duration * self._config.repeat_count:
             self._completed = self._config.repeat_count
             self._busy = False

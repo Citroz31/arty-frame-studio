@@ -375,7 +375,7 @@ def test_led_test_walks_virtual_and_board_leds_in_demo(tmp_path):
         assert studio.led_test_button.disabled
         await studio._toggle_connection()
         assert studio.firmware_info.led_test
-        assert "révision 2" in studio.firmware_status.value
+        assert "révision 3" in studio.firmware_status.value
         assert not studio.led_test_button.disabled
         seen = []
         original = studio._show_leds
@@ -609,3 +609,43 @@ def test_info_timeout_does_not_claim_ping_failed(tmp_path, monkeypatch):
         assert studio.send_button.disabled
 
     run_async(exercise())
+
+
+def test_continuous_switch_sends_until_stop_and_round_trips_profiles(tmp_path):
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.repeat.value = "12"
+        studio.continuous.value = True
+        studio._continuous_changed()
+        assert studio.repeat.disabled
+        assert studio.current_config.continuous
+        assert "illimitée" in studio.timing_summary.value
+        assert "émission continue" in studio.wave_note.value
+        await studio._toggle_connection()
+        await studio._send(None)
+        assert studio.device_status.busy
+        assert "Émission continue" in studio.hardware_status.value
+        assert any("jusqu'à Arrêter" in line for line in studio.log_lines)
+        await studio._stop(None)
+        assert not studio.device_status.busy
+        assert "arrêtée" in studio.hardware_status.value
+        # Back to a finite count: the number typed earlier is still there.
+        studio.continuous.value = False
+        studio._continuous_changed()
+        assert not studio.repeat.disabled and studio.current_config.repeat_count == 12
+        studio._set_profile(FrameConfig(repeat_count=0))
+        assert studio.continuous.value and studio.repeat.disabled
+        assert studio._config().continuous
+        studio._set_profile(FrameConfig(repeat_count=5))
+        assert not studio.continuous.value and studio.repeat.value == "5"
+
+    run_async(exercise())
+
+
+def test_revision_two_firmware_is_flagged_without_continuous_emission(tmp_path):
+    studio = make_studio(tmp_path)
+    studio.mode.value = "uart"
+    studio._firmware_identified(FirmwareInfo(2, 200_000_000, 3, 0))
+    assert "sans émission continue" in studio.firmware_status.value
+    studio._firmware_identified(FirmwareInfo(3, 200_000_000, 7, 0))
+    assert "sans émission continue" not in studio.firmware_status.value

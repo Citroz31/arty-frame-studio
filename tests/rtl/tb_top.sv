@@ -12,7 +12,9 @@ module tb_top;
     wire returned_valid;
     wire data_pin, clock_pin, latch_pin;
     wire [3:0] led;
-    reg [7:0] captured [0:127];
+    reg [7:0] captured [0:255];
+    integer clock_pin_edges=0, edges_at_status;
+    always @(posedge clock_pin) clock_pin_edges=clock_pin_edges+1;
     integer captured_count=0;
     reg [111:0] payload;
     reg waveform_done=0;
@@ -181,6 +183,39 @@ module tb_top;
         payload[7:0]=1;
         request(6,41,1);
         check_response(72,6,41,0,0,16'hc200);
+        // INFO page 3: capabilities LED, INFO and continuous SEND.
+        payload[7:0]=3;
+        request(6,42,1);
+        check_response(84,6,42,0,0,16'h0007);
+
+        // Continuous SEND (repeat_count 0), 10 ns frames: during the
+        // milliseconds of UART traffic the frame counter wraps several
+        // times, CLK keeps running, and only STOP returns the pins to idle.
+        payload=0;
+        payload[31:0]=1; payload[39:32]=1; payload[55:40]=1;
+        payload[71:56]=1; payload[103:88]=0;
+        request(2,43,14);
+        check_response(96,2,43,0,1,0);
+        request(4,44,0);
+        wait(captured_count>=120);
+        #0.1;
+        if(captured[111]!==8'h84 || captured[114]!==0 || captured[115]!==1)
+            $fatal(1,"Continuous emission not reported busy by STATUS");
+        edges_at_status=clock_pin_edges;
+        if(edges_at_status<100000) $fatal(1,"CLK did not run continuously: %0d edges",
+            edges_at_status);
+        repeat(1000) @(posedge clk100);
+        if(clock_pin_edges<=edges_at_status) $fatal(1,"CLK halted before STOP");
+        request(3,45,0);
+        wait(captured_count>=132);
+        #0.1;
+        if(captured[123]!==8'h83 || captured[126]!==0 || captured[127]!==0)
+            $fatal(1,"STOP of continuous emission not acknowledged");
+        #20;
+        edges_at_status=clock_pin_edges;
+        repeat(100) @(posedge clk100);
+        if({data_pin,clock_pin,latch_pin}!==3'b000 || clock_pin_edges!=edges_at_status)
+            $fatal(1,"Pins still active after STOP of continuous emission");
 
         // Repeated long frames leave enough time to interrupt DATA/CLK and
         // LATCH independently. Commands still arrive over the production UART.
@@ -198,7 +233,7 @@ module tb_top;
         request(1,37,0);
         check_response(0,1,37,0,0,0);
         if(reset_checks!=2) $fatal(1,"Missing asynchronous reset cases");
-        $display("PASS tb_top: UART PING/SEND/STATUS/LED/INFO, 200 MHz modeled burst, %0d stopped-clock asynchronous resets and UART recovery",reset_checks);
+        $display("PASS tb_top: UART PING/SEND/STATUS/LED/INFO, 200 MHz modeled burst, continuous SEND/STOP, %0d stopped-clock asynchronous resets and UART recovery",reset_checks);
         $finish;
     end
     initial begin #60000000; $fatal(1,"Timeout"); end

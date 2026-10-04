@@ -7,6 +7,7 @@ référence à 200 MHz, ``FrameConfig.tick_ns`` pour un firmware personnalisé.
 from __future__ import annotations
 
 import csv
+import math
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
@@ -43,7 +44,9 @@ class Waveform:
 def simulate(config: FrameConfig, max_frames: int = 4) -> Waveform:
     if type(max_frames) is not int or not 1 <= max_frames <= 256:
         raise ValueError("Nombre de trames à simuler entre 1 et 256.")
-    frames = min(config.repeat_count, max_frames)
+    # Une émission continue n'a pas de fin : la fenêtre montre max_frames trames.
+    total = math.inf if config.continuous else config.repeat_count
+    frames = max_frames if config.continuous else min(config.repeat_count, max_frames)
     idle = int(config.latch_active_low)
     points: list[Transition] = []
     time = 0
@@ -69,11 +72,11 @@ def simulate(config: FrameConfig, max_frames: int = 4) -> Waveform:
         record(0, 0, idle)
         time += config.gap_ticks
         record(0, 0, idle)
-    if frames < config.repeat_count:
+    if frames < total:
         # La fenêtre se termine au début de la répétition suivante : conserver
         # ce niveau réel, plutôt que simuler un arrêt qui n'a pas été demandé.
         record(bits[0], 0, idle)
-    return Waveform(config, tuple(points), time, frames, frames < config.repeat_count)
+    return Waveform(config, tuple(points), time, frames, frames < total)
 
 
 def export_csv(waveform: Waveform, path: str | Path) -> None:
@@ -179,7 +182,8 @@ def waveform_svg(waveform: Waveform, width: int = 1200) -> str:
             previous_clk = transition.clk
     footer = f"Temps ({unit}) · {waveform.frames_simulated} trame(s)"
     if waveform.truncated:
-        footer += f" affichée(s) sur {config.repeat_count} — exports limités à cette fenêtre"
+        total = "une émission continue" if config.continuous else str(config.repeat_count)
+        footer += f" affichée(s) sur {total} — exports limités à cette fenêtre"
     pieces.append(f'<text x="{left}" y="316" font-size="11" fill="#475569">{escape(footer)}</text>')
     pieces.append("</g></svg>")
     return "\n".join(pieces)

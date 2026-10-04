@@ -26,6 +26,7 @@ from .firmware_config import (
     pll_settings,
 )
 from .model import (
+    CONTINUOUS,
     REFERENCE_HZ,
     FrameConfig,
     divider_for_frequency,
@@ -91,6 +92,8 @@ def pin_options() -> list[Any]:
 
 
 def format_duration(ns: float) -> str:
+    if math.isinf(ns):
+        return "illimitée (jusqu'à Arrêter)"
     if ns >= 1e9:
         return f"{ns / 1e9:.4g} s"
     if ns >= 1e6:
@@ -376,8 +379,14 @@ class Studio:
         )
         self.latch_ns = self._field("Impulsion LATCH (ns)", "20", width=205)
         self.gap_ns = self._field("Pause après LATCH (ns)", "100", width=205)
-        self.repeat = self._field(
-            "Répétitions", "1", width=145, helper="1 à 65 535 · émission finie"
+        self.repeat = self._field("Répétitions", "1", width=145, helper="1 à 65 535 trames")
+        # Émission continue : SEND avec repeat_count 0, la carte répète la
+        # trame jusqu'à STOP (firmware révision 3).
+        self.continuous = ft.Switch(
+            label="Émission continue jusqu'à Arrêter",
+            value=False,
+            on_change=self._continuous_changed,
+            tooltip="CLK, DATA et LATCH se répètent sans fin ; le bouton Arrêter les termine",
         )
         self.lsb = ft.Switch(label="LSB en premier", value=False, on_change=self._changed)
         self.latch_low = ft.Switch(label="LATCH actif bas", value=False, on_change=self._changed)
@@ -635,7 +644,7 @@ class Studio:
             divider=int(self.divider.value or ""),
             latch_ticks=ticks_from_ns(self.latch_ns.value or "", core_hz=self.core_hz),
             gap_ticks=ticks_from_ns(self.gap_ns.value or "", allow_zero=True, core_hz=self.core_hz),
-            repeat_count=int(self.repeat.value or ""),
+            repeat_count=CONTINUOUS if self.continuous.value else int(self.repeat.value or ""),
             lsb_first=bool(self.lsb.value),
             latch_active_low=bool(self.latch_low.value),
             core_hz=self.core_hz,
@@ -683,8 +692,9 @@ class Studio:
                 f"Période de trame {format_duration(config.frame_duration_ns)} · "
                 f"Durée totale {format_duration(config.total_duration_ns)}"
             )
+            total = "une émission continue" if config.continuous else str(config.repeat_count)
             self.wave_note.value = (
-                f"{waveform.frames_simulated} trame(s) affichée(s) sur {config.repeat_count} · "
+                f"{waveform.frames_simulated} trame(s) affichée(s) sur {total} · "
                 f"fenêtre {format_duration(waveform.duration_ns)} · "
                 f"résolution {config.tick_ns:.4g} ns"
                 + (" · aperçu limité aux 4 premières trames" if waveform.truncated else "")
@@ -705,6 +715,11 @@ class Studio:
             self.timing_summary.value = ""
         self._buttons()
         self._update()
+
+    def _continuous_changed(self, _: Any = None) -> None:
+        # Le nombre saisi est conservé pour un retour en émission finie.
+        self.repeat.disabled = bool(self.continuous.value)
+        self._changed()
 
     def _frequency_changed(self, _: Any) -> None:
         try:
@@ -894,6 +909,18 @@ class Studio:
         try:
             async with self.serial_lock:
                 if self.device is not None and self.device.connected:
+                    if (
+                        isinstance(self.device, SerialDevice)
+                        and self.device_status is not None
+                        and self.device_status.busy
+                    ):
+                        # Fermer l'UART n'arrête pas la carte : une émission
+                        # continue se poursuit jusqu'à STOP, reset ou coupure.
+                        self._log(
+                            "La carte poursuit son émission après la déconnexion : "
+                            "reconnecter puis Arrêter, ou appuyer sur RESET.",
+                            AMBER,
+                        )
                     await asyncio.to_thread(self.device.close)
                     self.device = None
                     self.device_status = None
@@ -996,8 +1023,13 @@ class Studio:
             f"{prefix} révision {info.revision} · cœur {info.core_hz / 1e6:g} MHz · "
             + ("identité locale" if simulated else f"build {build}")
             + ("" if info.led_test else " · sans test LED : recharger le firmware fourni à jour")
+            + (
+                ""
+                if info.continuous or not info.led_test
+                else " · sans émission continue : recharger le firmware fourni à jour"
+            )
         )
-        self.firmware_status.color = GREEN if info.led_test else AMBER
+        self.firmware_status.color = GREEN if info.led_test and info.continuous else AMBER
         self._log(self.firmware_status.value, self.firmware_status.color)
         if info.core_hz != self.core_hz:
             self._log(
@@ -1063,9 +1095,19 @@ class Studio:
 
     def _status_received(self, status: DeviceStatus) -> None:
         self.device_status = status
-        state = "Émission en cours" if status.busy else "Prêt"
-        total = f" / {self.last_sent.repeat_count}" if self.last_sent is not None else ""
-        self.hardware_status.value = f"{state} · {status.completed}{total} trame(s) terminée(s)"
+        if self.last_sent is not None and self.last_sent.continuous:
+            # Le compteur 16 bits de la carte reboucle : il témoigne de
+            # l'activité, pas du nombre total de trames depuis SEND.
+            self.hardware_status.value = (
+                f"Émission continue · compteur {status.completed} (modulo 65 536) · "
+                "Arrêter pour terminer"
+                if status.busy
+                else f"Prêt · émission continue arrêtée · compteur {status.completed}"
+            )
+        else:
+            state = "Émission en cours" if status.busy else "Prêt"
+            total = f" / {self.last_sent.repeat_count}" if self.last_sent is not None else ""
+            self.hardware_status.value = f"{state} · {status.completed}{total} trame(s) terminée(s)"
         if self.command_uncertain:
             self.hardware_status.value += " · Commande non confirmée : STOP ou reconnexion requis"
         self.hardware_status.color = AMBER if status.busy else MUTED
@@ -1116,9 +1158,14 @@ class Studio:
                     raise
                 self.last_sent = config
                 self._status_received(status)
+                repetitions = (
+                    "émission continue jusqu'à Arrêter"
+                    if config.continuous
+                    else f"{config.repeat_count} répétition(s)"
+                )
                 self._log(
                     f"SEND · {config.bit_count} bits · 0x{config.word:X} · "
-                    f"{config.frequency_hz / 1e6:.7g} MHz · {config.repeat_count} répétition(s).",
+                    f"{config.frequency_hz / 1e6:.7g} MHz · {repetitions}.",
                     BLUE,
                 )
         except Exception as exc:
@@ -1227,7 +1274,10 @@ class Studio:
                 self.divider.value = str(divider_for_frequency(config.frequency_hz, self.core_hz))
             except ValueError:
                 self.divider.value = "1"
-        self.repeat.value = str(config.repeat_count)
+        self.continuous.value = config.continuous
+        self.repeat.disabled = config.continuous
+        if not config.continuous:
+            self.repeat.value = str(config.repeat_count)
         self.lsb.value = config.lsb_first
         self.latch_low.value = config.latch_active_low
         self._changed()
