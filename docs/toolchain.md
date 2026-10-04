@@ -131,7 +131,7 @@ programmation. Le flux natif utilise :
 
 ## Firmware personnalisé depuis l'interface
 
-L'onglet **FPGA → Firmware personnalisé** produit une configuration validée
+L'onglet **FPGA → Personnaliser le firmware** produit une configuration validée
 (`FirmwareBuildConfig`) : horloge du cœur, broches DATA/CLK/LATCH, courant et
 fronts. La configuration par défaut reproduit exactement le firmware de
 référence et le XDC du dépôt, qu'un test compare octet par octet.

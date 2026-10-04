@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from .bitstream import BitstreamError, BitstreamImage, read_bitstream
+from .firmware_artifact import FirmwareArtifactError, validate_firmware_artifact
+from .firmware_config import FirmwareBuildConfig
 
 OBSOLETE_UART_SHA256 = "5849a6ffaf0cf05d3823e250ac7f6091d8c219c15194b61eabd411823e2e6b4e"
 
@@ -40,6 +42,16 @@ def validate_programming_image(image: BitstreamImage, project_root: Path) -> dic
     root = project_root.resolve()
     directory = root / "firmware" / "prebuilt"
     if image.path.resolve() != (directory / "arty_frame.bit").resolve():
+        # Downloaded custom bundles must be checked again just before JTAG,
+        # including when their files were changed after the download.
+        companion = image.path.parent / "firmware-manifest.json"
+        if companion.is_file():
+            manifest = _object(companion)
+            try:
+                config = FirmwareBuildConfig.from_dict(manifest["firmware_config"])
+                return validate_firmware_artifact(image.path.parent, config, image=image)
+            except (KeyError, ValueError, FirmwareArtifactError) as exc:
+                raise BitstreamError(f"Firmware sélectionné invalide : {exc}") from exc
         return None
     manifest = _object(directory / "firmware-manifest.json")
     if manifest.get("sha256") != image.sha256:
@@ -90,6 +102,11 @@ def validate_programming_image(image: BitstreamImage, project_root: Path) -> dic
         raise BitstreamError(
             "Le rapport et le manifeste doivent confirmer le timing de cœur à 200 MHz."
         )
+    if "firmware_config" in manifest:
+        try:
+            validate_firmware_artifact(directory, FirmwareBuildConfig(), image=image)
+        except FirmwareArtifactError as exc:
+            raise BitstreamError(str(exc)) from exc
     return manifest
 
 

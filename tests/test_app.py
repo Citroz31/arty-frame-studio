@@ -1,6 +1,7 @@
 """Control-tree smoke tests without a browser, desktop or FPGA attached."""
 
 import asyncio
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,7 +10,7 @@ import pytest
 from arty_frame_studio import app
 from arty_frame_studio.app import Studio, waveform_signal_points
 from arty_frame_studio.model import FrameConfig
-from arty_frame_studio.protocol import Opcode
+from arty_frame_studio.protocol import FirmwareInfo, Opcode
 from arty_frame_studio.simulation import simulate
 from arty_frame_studio.transport import CommandTimeout, DemoDevice
 
@@ -230,6 +231,7 @@ def test_programming_disables_uart_actions(tmp_path):
         await studio._toggle_connection()
         assert not studio.send_button.disabled
         studio.tool_pending = True
+        studio.programming_pending = True
         studio._buttons()
         assert studio.send_button.disabled
         assert studio.stop_button.disabled
@@ -500,10 +502,13 @@ def test_local_and_remote_builds_receive_the_selected_firmware(tmp_path, monkeyp
         studio.fw_core.value = "100000000"
         monkeypatch.setattr(studio, "_toolchain", lambda: Chain())
         await studio._build(None)
+        assert studio.windows_bitstream_path.value == studio.bitstream_path.value
+        assert studio.windows_bitstream_path.value == str(tmp_path / "build" / "arty_frame.bit")
         studio.gh_repository.value = "me/fork"
         studio.gh_token.value = "tok"
         monkeypatch.setattr(app, "GitHubBuildClient", Client)
         await studio._remote_build(None)
+        assert studio.windows_bitstream_path.value == studio.bitstream_path.value
         assert builds == [FirmwareBuildConfig(core_hz=100_000_000)] * 2
         assert studio.windows_bitstream_path.value.endswith("arty_frame.bit")
         assert "téléchargé et vérifié" in studio.tool_message.value
@@ -527,5 +532,80 @@ def test_connected_profile_for_another_core_is_converted(tmp_path):
         assert config.divider == 4  # 50 MHz, never above the profile frequency
         assert config.latch_ticks == 8  # 20 ns
         assert any("converti" in line for line in studio.log_lines)
+
+    run_async(exercise())
+
+
+def test_stop_remains_effective_while_a_build_is_running(tmp_path):
+    async def exercise():
+        studio = make_studio(tmp_path)
+        await studio._toggle_connection()
+        studio.divider.value = studio.repeat.value = "65535"
+        studio._divider_changed(None)
+        await studio._send(None)
+        assert studio.device_status.busy
+        assert studio.led_test_button.disabled
+        finished = threading.Event()
+        compilation = asyncio.create_task(
+            studio._tool_action("Compilation GitHub", lambda: finished.wait(3))
+        )
+        try:
+            while not studio.tool_pending:
+                await asyncio.sleep(0.01)
+            assert not studio.stop_button.disabled
+            await studio._stop(None)
+            assert not studio.device_status.busy
+            assert studio.tool_pending
+            assert not studio.page.messages
+        finally:
+            finished.set()
+            await compilation
+
+    run_async(exercise())
+
+
+def test_identity_never_assigns_reference_pins_to_unknown_custom_firmware(tmp_path):
+    studio = make_studio(tmp_path)
+    studio.mode.value = "uart"
+    studio._firmware_identified(FirmwareInfo(2, 150_000_000, 3, 0x12345678))
+    assert "personnalisé" in studio.hardware_pinout.value
+    assert "JB1" not in studio.hardware_pinout.value
+    assert "3.33333 ns" in studio.quantization_note.value
+    studio._firmware_identified(None)
+    assert studio.hardware_pinout.value == ""
+
+
+def test_demo_identity_and_led_result_are_explicitly_simulated(tmp_path):
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.led_step = 0
+        await studio._toggle_connection()
+        await studio._led_test(None)
+        assert "simulé" in studio.firmware_status.value
+        assert not studio.hardware_pinout.visible
+        assert "Simuler" in studio.led_test_button.text
+        assert any("10 commandes simulées" in line for line in studio.log_lines)
+
+    run_async(exercise())
+
+
+def test_info_timeout_does_not_claim_ping_failed(tmp_path, monkeypatch):
+    class InfoTimeoutDevice(DemoDevice):
+        def __init__(self, port, **kwargs):
+            super().__init__()
+
+        def identify(self):
+            raise CommandTimeout(Opcode.INFO, 1)
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.mode.value = "uart"
+        studio.port.value = "COM7"
+        monkeypatch.setattr(app, "SerialDevice", InfoTimeoutDevice)
+        await studio._toggle_connection()
+        assert "PING reçu" in studio.connection_status.value
+        assert "INFO incomplète" in studio.connection_status.value
+        assert studio.device is None and studio.firmware_info is None
+        assert studio.send_button.disabled
 
     run_async(exercise())

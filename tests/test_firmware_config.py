@@ -1,6 +1,7 @@
 """Custom firmware settings: PLL choices, Pmod pins and generated constraints."""
 
 from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -90,7 +91,7 @@ def test_custom_configuration_generates_its_own_xdc_and_identity():
         core_hz=150_000_000, data_pin="JC3", clock_pin="JC1", latch_pin="JC7", drive_ma=12
     )
     xdc = config.xdc()
-    assert "create_clock -period 6.667 -name core_clock [get_nets core_clock]" in xdc
+    assert "create_clock -period 6.666666666 -name core_clock [get_nets core_clock]" in xdc
     assert "PACKAGE_PIN V10 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 12} [get_ports data_out]" in xdc
     assert "PACKAGE_PIN U12 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 12} [get_ports frame_clk]" in xdc
     assert "PACKAGE_PIN U14 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 12} [get_ports latch_enable]" in xdc
@@ -134,3 +135,12 @@ def test_build_identity_is_a_positive_31_bit_integer():
         build_id = FirmwareBuildConfig(clock_pin=pin).build_id
         assert 0 < build_id < 2**31
         assert FirmwareBuildConfig(clock_pin=pin).yosys_parameters()["BUILD_ID"] == build_id
+
+
+@pytest.mark.parametrize("setting", pll_settings(), ids=lambda setting: str(setting.core_hz))
+def test_period_rounding_never_relaxes_the_requested_clock(setting):
+    xdc = FirmwareBuildConfig(core_hz=setting.core_hz).xdc()
+    line = next(line for line in xdc.splitlines() if "-name core_clock " in line)
+    period = Decimal(line.split("-period ")[1].split()[0])
+    assert period * setting.core_hz <= Decimal(1_000_000_000)
+    assert Decimal(1_000_000_000) / period - setting.core_hz < Decimal("0.1")

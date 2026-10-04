@@ -15,7 +15,7 @@ donne 100 MHz) et affiche la valeur obtenue. Les durées latch et pause sont
 quantifiées à **2,5 ns**. CLK est émise en rafales, idle bas ; le destinataire
 échantillonne DATA au front montant. DATA change au front descendant.
 
-Depuis l'onglet **FPGA → Firmware personnalisé**, un nouveau firmware peut
+Depuis l'onglet **FPGA → Personnaliser le firmware**, un nouveau firmware peut
 être compilé avec une autre **horloge de cœur** (32 valeurs de 50 à 200 MHz,
 par exemple 150 MHz pour une CLK de 150 MHz) et d'autres **broches DATA, CLK
 et LATCH** sur les Pmod JA à JD. La compilation se fait localement ou sur
@@ -26,6 +26,14 @@ son identifiant de build ; l'application adapte la base de temps.
 Le bouton **Tester les LED** fait défiler un chenillard sur les LED vertes
 LD4 à LD7 : il confirme d'un coup d'œil que le bon firmware tourne sur la
 carte et que la liaison UART fonctionne dans les deux sens.
+En mode démo, **Simuler les LED** affiche uniquement des motifs locaux.
+
+La revue du **4 octobre 2026** intègre les ajouts de Claude et améliore
+l'interface : paramètres répartis en deux colonnes lorsque la fenêtre le
+permet, actions **Envoyer / Arrêter / Chronogramme** toujours visibles,
+options avancées repliables et parcours Windows guidé. Les téléchargements
+de firmware sont vérifiés avec leurs rapports, puis revérifiés au chargement.
+Voir [l'analyse et les améliorations](docs/review-2026-10-04.md).
 
 Le [firmware précompilé pour le 100T](firmware/prebuilt/arty_frame.bit) est
 fourni avec son [manifeste](firmware/prebuilt/firmware-manifest.json) et ses
@@ -39,7 +47,11 @@ fichier aux broches UART inversées est refusé même renommé.
 Le rapport nextpnr ne certifie pas l'interface DDR ni la liaison Pmod externe.
 Voir [le matériel](docs/hardware.md) et [la chaîne FPGA](docs/toolchain.md).
 
-![Interface de simulation](docs/images/chronogramme-interface.png)
+![Interface de pilotage](docs/images/pilotage-interface.png)
+
+[Chronogramme](docs/images/chronogramme-interface.png) ·
+[Chargement Windows](docs/images/fpga-interface.png) ·
+[Petite fenêtre](docs/images/pilotage-petite-fenetre.png)
 
 ## Démarrage
 
@@ -92,7 +104,7 @@ ou `--project-root` pour les commandes FPGA de la CLI.
    nombre de répétitions affichées est limité ; cette limite est indiquée sur
    le graphique et s’applique aussi aux exports.
 4. Pour la carte réelle sous Windows, utiliser l'onglet **FPGA**, section
-   **JTAG Windows natif**. Indiquer `firmware/prebuilt/arty_frame.bit` dans le champ
+   **1 · Charger le firmware**. Indiquer `firmware/prebuilt/arty_frame.bit` dans le champ
    **Firmware existant pour l'Arty A7-100T (.bit)**, puis cliquer sur
    **Charger le .bit sous Windows** et attendre environ **30 à 60 secondes**.
    Ce champ est rempli automatiquement lorsque le fichier est présent dans
@@ -101,12 +113,20 @@ ou `--project-root` pour les commandes FPGA de la CLI.
    la procédure détaillée figure dans le [guide Windows](docs/windows.md).
 5. Vérifier que la première LED monochrome est allumée, puis choisir
    **Carte · USB / UART**, sélectionner le port de l'Arty et cliquer sur
-   **Connecter**. La réponse PING du firmware est vérifiée avant l'envoi
-   de trames. Dans la configuration observée, ce port est **COM7**.
+   **Connecter**. PING puis INFO vérifient le dialogue et identifient
+   le firmware avant l'envoi de trames. Dans la configuration observée,
+   ce port est **COM7**. L'application démarre connectée en démo : cliquer
+   d'abord sur **Déconnecter** pour changer de mode.
 
 La programmation proposée charge la **SRAM volatile** : il faut reprogrammer
 après une coupure d’alimentation. Une programmation de la flash n’est pas effectuée.
 Les profils sauvegardent les paramètres dans un JSON versionné.
+
+Après une compilation réussie, son fichier est sélectionné dans les deux
+parcours de chargement. **Arrêter** et le suivi UART restent disponibles
+pendant une compilation. Une reprogrammation JTAG ferme la liaison UART ;
+reconnecter ensuite pour identifier le nouveau firmware. Les réglages de
+compilation ne changent pas la carte avant le chargement du résultat.
 
 Après un délai dépassé sur SEND ou STOP, l'interface lit STATUS sans répéter
 la commande. L'état observé ne prouve pas son exécution : les nouveaux SEND

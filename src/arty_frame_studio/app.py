@@ -35,26 +35,29 @@ from .model import (
     ticks_for_ns,
 )
 from .prebuilt import validate_programming_image
-from .protocol import DeviceStatus, FirmwareInfo
+from .protocol import DeviceStatus, FirmwareInfo, Opcode
 from .remote_build import GitHubBuildClient, RemoteBuildTarget
 from .simulation import Waveform, export_csv, export_vcd, simulate, waveform_svg
 from .toolchain import Toolchain, ToolchainConfig
 from .transport import CommandTimeout, DemoDevice, SerialDevice, list_ports, run_led_test
+from .ui_layout import (
+    AMBER,
+    BG,
+    BLUE,
+    GREEN,
+    LED_OFF,
+    LED_ON,
+    LINE,
+    MUTED,
+    PANEL,
+    RED,
+    TEXT,
+    build_layout,
+)
 from .windows_jtag import probe_arty, program_arty
 
-BG = "#0C1423"
-PANEL = "#142136"
-LINE = "#273A54"
-TEXT = "#E7EDF5"
-MUTED = "#A5B4C9"
-AMBER = "#F4B759"
-BLUE = "#75B9F4"
-GREEN = "#79CFB0"
-RED = "#FF8E91"
 CHART_HEIGHT = 332
 SIGNALS = (("DATA", "data", "#2563EB"), ("CLK", "clk", "#B45309"), ("LATCH", "latch", "#9333EA"))
-LED_ON = "#4ADE80"
-LED_OFF = "#1E2B3F"
 
 
 def ticks_from_ns(value: str, *, allow_zero: bool = False, core_hz: int = REFERENCE_HZ) -> int:
@@ -221,6 +224,10 @@ def project_directory() -> Path:
 class Studio:
     """Own controls, connection lifecycle and asynchronous background work."""
 
+    tabs: ft.Tabs
+    setup_steps: ft.Container
+    tool_panel: ft.Container
+
     def __init__(self, page: ft.Page, project_root: Path | None = None) -> None:
         self.page = page
         self.project_root = project_root or project_directory()
@@ -229,6 +236,8 @@ class Studio:
         self.serial_lock = asyncio.Lock()
         self.serial_pending = False
         self.tool_pending = False
+        self.programming_pending = False
+        self.is_windows = os.name == "nt"
         self.closing = False
         self.poll_task: asyncio.Task[Any] | None = None
         self.current_config: FrameConfig | None = None
@@ -239,6 +248,8 @@ class Studio:
         # dans l'interface pour la démo et la simulation.
         self.core_hz = REFERENCE_HZ
         self.firmware_info: FirmwareInfo | None = None
+        self.known_firmwares = {0: FirmwareBuildConfig()}
+        self.browse_target: ft.TextField | None = None
         self.led_step = 0.25
         self.previous_base = "hex"
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -270,7 +281,9 @@ class Studio:
 
     def _card(self, *controls: ft.Control) -> ft.Container:
         return ft.Container(
-            content=ft.Column(list(controls), spacing=15),
+            content=ft.Column(
+                list(controls), spacing=15, horizontal_alignment=ft.CrossAxisAlignment.STRETCH
+            ),
             bgcolor=PANEL,
             border=ft.border.all(1, LINE),
             border_radius=16,
@@ -307,6 +320,12 @@ class Studio:
             on_click=self._toggle_connection,
         )
         self.connection_status = ft.Text("Déconnecté", color=MUTED)
+        self.mode_badge = ft.Text("Simulation", size=12, color=BLUE)
+        self.connection_hint = ft.Text(size=12, color=MUTED)
+        self.hardware_pinout = ft.Text(size=12, color=BLUE, selectable=True)
+        self.prepare_button = ft.TextButton(
+            "Préparer la carte", icon=ft.Icons.MEMORY, on_click=self._open_fpga
+        )
         self.hardware_status = ft.Text("Aucune émission", size=12, color=MUTED)
         self.firmware_status = ft.Text("Firmware non identifié", size=12, color=MUTED)
         self.led_test_button = ft.OutlinedButton(
@@ -319,6 +338,7 @@ class Studio:
         self.led_lamps = [
             ft.Container(width=16, height=16, border_radius=8, bgcolor=LED_OFF) for _ in range(4)
         ]
+        self.led_note = ft.Text(size=11, color=MUTED)
         self.word = self._field("Valeur de la trame", "2AAAAAA", width=340)
         self.word.text_style = ft.TextStyle(font_family="monospace", color=TEXT)
         self.base = ft.Dropdown(
@@ -363,6 +383,7 @@ class Studio:
         self.latch_low = ft.Switch(label="LATCH actif bas", value=False, on_change=self._changed)
         self.frequency_actual = ft.Text(size=19, color=AMBER, weight=ft.FontWeight.W_600)
         self.timing_summary = ft.Text(color=MUTED, size=12)
+        self.quantization_note = ft.Text(size=12, color=MUTED)
         self.binary_preview = ft.Text(size=19, color=BLUE, selectable=True, font_family="monospace")
         self.order_preview = ft.Text(size=12, color=MUTED, selectable=True)
         self.validation = ft.Text(size=12, color=RED)
@@ -519,11 +540,17 @@ class Studio:
             on_click=self._jtag_probe,
         )
         prebuilt_firmware = self.project_root / "firmware" / "prebuilt" / "arty_frame.bit"
+        self.selected_firmware_note = ft.Text(
+            "Firmware fourni · cœur 200 MHz · DATA JB1 · CLK JB2 · LATCH JB3",
+            size=12,
+            color=BLUE,
+            selectable=True,
+        )
         self.windows_bitstream_path = self._field(
             "Firmware existant pour l'Arty A7-100T (.bit)",
             str(prebuilt_firmware) if prebuilt_firmware.is_file() else "",
             width=650,
-            on_change=lambda _: None,
+            on_change=self._bitstream_changed,
             helper="Chargez le firmware du projet par JTAG avant de connecter le port COM.",
         )
         self.jtag_program_button = ft.ElevatedButton(
@@ -543,304 +570,58 @@ class Studio:
             on_change=lambda _: None,
         )
         self.log_lines: list[str] = []
+        self.file_picker = ft.FilePicker(on_result=self._file_chosen)
+        if hasattr(self.page, "overlay"):
+            self.page.overlay.append(self.file_picker)
         self._refresh_firmware_summary()
 
     def layout(self) -> ft.Control:
-        connection = self._card(
-            self._heading(
-                "Connexion au moteur",
-                "USB / UART 115 200 bauds · les fronts sont produits dans le FPGA",
-            ),
-            ft.Row([self.mode, self.port, self.refresh_button, self.connect_button], wrap=True),
-            ft.Row([self.connection_status, self.hardware_status], wrap=True, spacing=24),
-            self.firmware_status,
-            ft.Row(
-                [
-                    self.led_test_button,
-                    ft.Text("LD4-LD7", size=12, color=MUTED),
-                    *self.led_lamps,
-                ],
-                wrap=True,
-                spacing=10,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            ft.Text(
-                "Mode carte : chargez d'abord le bitstream UART du projet par JTAG. "
-                "La détection d'un port COM ne confirme pas la présence du firmware. "
-                "Le test LED fait défiler un motif sur les quatre LED vertes de la carte : "
-                "il confirme le chargement, la liaison UART et le firmware en un coup d'œil.",
-                size=12,
-                color=MUTED,
-            ),
+        return build_layout(self)
+
+    def _open_fpga(self, _: Any = None) -> None:
+        self.tabs.selected_index = 2
+        self._update()
+
+    def _open_control(self, _: Any = None) -> None:
+        self.tabs.selected_index = 0
+        self._update()
+
+    def _browse_path(self, field: ft.TextField, extensions: list[str]) -> None:
+        self.browse_target = field
+        self.file_picker.pick_files(
+            dialog_title="Choisir un fichier",
+            file_type=ft.FilePickerFileType.CUSTOM,
+            allowed_extensions=extensions,
+            allow_multiple=False,
         )
-        frame = self._card(
-            self._heading(
-                "Trame série",
-                "DATA transmet un bit par cycle ; CLK et LATCH utilisent deux autres broches",
-            ),
-            ft.Row([self.word, self.base, self.bit_count], wrap=True),
-            self.binary_preview,
-            self.order_preview,
-            ft.Row([self.lsb, self.latch_low], wrap=True),
+
+    def _file_chosen(self, event: Any) -> None:
+        target = self.browse_target
+        self.browse_target = None
+        if target is not None and event.files and event.files[0].path:
+            target.value = event.files[0].path
+            if target is self.windows_bitstream_path:
+                self._bitstream_changed()
+            self._update()
+
+    def _bitstream_changed(self, _: Any = None) -> None:
+        self.selected_firmware_note.value = (
+            "Fichier sélectionné · cible et manifeste vérifiés lors du chargement."
         )
-        timing = self._card(
-            self._heading(
-                "Horloge et séquencement",
-                "CLK en rafales · repos bas · échantillonnage au front montant",
-            ),
-            ft.Row([self.core_clock, self.frequency, self.divider, self.repeat], wrap=True),
-            self.frequency_actual,
-            ft.Row([self.latch_ns, self.gap_ns], wrap=True),
-            self.timing_summary,
-            ft.Text(
-                "Les durées sont arrondies sur des pas de 2,5 ns. À 200 MHz, "
-                "la validation temporelle et une liaison électrique adaptée sont nécessaires.",
-                size=12,
-                color=MUTED,
-            ),
-            self.validation,
-            ft.Row([self.send_button, self.stop_button, self.simulate_button], wrap=True),
+        self.selected_firmware_note.color = MUTED
+        self._update()
+
+    def _select_firmware(self, path: Path, firmware: FirmwareBuildConfig) -> None:
+        self.windows_bitstream_path.value = self.bitstream_path.value = str(path)
+        self.known_firmwares[firmware.build_id] = firmware
+        self.selected_firmware_note.value = f"Sélectionné · {firmware.summary()}"
+        self.selected_firmware_note.color = BLUE
+
+    def _use_reference(self, _: Any = None) -> None:
+        self._select_firmware(
+            self.project_root / "firmware" / "prebuilt" / "arty_frame.bit", FirmwareBuildConfig()
         )
-        profiles = self._card(
-            self._heading("Profils", "Les fichiers conservent tous les paramètres de la trame"),
-            ft.Row([self.profile_path], wrap=True),
-            ft.Row(
-                [
-                    ft.OutlinedButton(
-                        "Charger", icon=ft.Icons.FOLDER_OPEN, on_click=self._load_profile
-                    ),
-                    ft.OutlinedButton(
-                        "Enregistrer", icon=ft.Icons.SAVE, on_click=self._save_profile
-                    ),
-                ],
-                wrap=True,
-            ),
-            self.profile_message,
-        )
-        control_tab = ft.Column(
-            [connection, frame, timing, profiles],
-            spacing=14,
-            scroll=ft.ScrollMode.AUTO,
-            expand=True,
-        )
-        waveform_tab = ft.Column(
-            [
-                self._card(
-                    self._heading(
-                        "Chronogramme idéal",
-                        "Aperçu calculé à partir des paramètres du panneau Pilotage",
-                    ),
-                    ft.Text(
-                        "Le graphe représente les fronts attendus. Il ne mesure pas les broches "
-                        "et ne simule pas l'intégrité du signal.",
-                        size=12,
-                        color=MUTED,
-                    ),
-                    self.wave_canvas,
-                    self.wave_note,
-                ),
-                self._card(
-                    self._heading(
-                        "Exporter le chronogramme",
-                        "SVG pour le partage · CSV des transitions · VCD pour GTKWave",
-                    ),
-                    ft.Row([self.export_path], wrap=True),
-                    ft.Row(
-                        [
-                            ft.OutlinedButton("SVG", on_click=self._export_svg),
-                            ft.OutlinedButton("CSV", on_click=self._export_csv),
-                            ft.OutlinedButton("VCD", on_click=self._export_vcd),
-                        ],
-                        wrap=True,
-                    ),
-                    self.export_message,
-                ),
-            ],
-            scroll=ft.ScrollMode.AUTO,
-            spacing=14,
-            expand=True,
-        )
-        fpga_tab = ft.Column(
-            [
-                ft.Container(
-                    self._card(
-                        self._heading(
-                            "JTAG Windows natif", "FTDI D2XX existant · profil Digilent Arty"
-                        ),
-                        ft.Text(
-                            "Ce test lit l'identifiant du FPGA sur le canal JTAG A. "
-                            "Il ne charge pas de bitstream et ne remplace aucun pilote USB.",
-                            size=12,
-                            color=MUTED,
-                        ),
-                        ft.Row([self.ftdi_dll_path], wrap=True),
-                        ft.Row([self.ftdi_serial, self.jtag_probe_button], wrap=True),
-                        ft.Row([self.windows_bitstream_path], wrap=True),
-                        ft.Row([self.jtag_program_button], wrap=True),
-                        ft.Text(
-                            "Chargement en SRAM d'un .bit existant, sans compiler sur ce PC. "
-                            "Backend expérimental, testé avec une interface FTDI simulée. "
-                            "La configuration disparaît hors tension ; vérifiez ensuite PING.",
-                            size=12,
-                            color=MUTED,
-                        ),
-                    ),
-                    visible=os.name == "nt",
-                ),
-                self._card(
-                    self._heading(
-                        "Arty A7-100T",
-                        "xc7a100tcsg324-1 · référence carte 100 MHz · génération interne 200 MHz",
-                    ),
-                    ft.Text(
-                        "Chaîne : Yosys → nextpnr-xilinx → Project X-Ray → openFPGALoader.",
-                        color=BLUE,
-                    ),
-                    ft.Text(
-                        "Configurez les chemins des outils et de la base X-Ray "
-                        "dans le fichier JSON. La compilation prépare le moteur série ; "
-                        "les trames suivantes passent par UART.",
-                        color=MUTED,
-                        size=12,
-                    ),
-                    ft.Text(
-                        "Brochage de départ : Pmod JB. Consultez le fichier de contraintes "
-                        "et le guide "
-                        "de câblage fourni avant de connecter votre périphérique (logique 3,3 V).",
-                        color=MUTED,
-                        size=12,
-                    ),
-                    ft.Text(
-                        "JB1 / E15 : DATA · JB2 / E16 : CLK · JB3 / D15 : LATCH · "
-                        "masse : JB5 ou JB11",
-                        color=BLUE,
-                        size=12,
-                        selectable=True,
-                    ),
-                    ft.Row([self.toolchain_path], wrap=True),
-                    ft.Row([self.doctor_button], wrap=True),
-                    self.doctor_results,
-                ),
-                self._card(
-                    self._heading(
-                        "Firmware personnalisé",
-                        "Horloge du cœur et broches DATA / CLK / LATCH sur les Pmod JA-JD",
-                    ),
-                    ft.Row([self.fw_core, self.fw_drive, self.fw_slew], wrap=True),
-                    ft.Row(list(self.fw_pins.values()), wrap=True),
-                    self.fw_summary,
-                    self.fw_warnings,
-                    ft.Row([self.fw_config_path], wrap=True),
-                    ft.Row(
-                        [
-                            ft.OutlinedButton(
-                                "Charger", icon=ft.Icons.FOLDER_OPEN, on_click=self._load_firmware
-                            ),
-                            ft.OutlinedButton(
-                                "Enregistrer", icon=ft.Icons.SAVE, on_click=self._save_firmware
-                            ),
-                        ],
-                        wrap=True,
-                    ),
-                    ft.Text(
-                        "Compiler localement utilise la chaîne libre configurée ci-dessus "
-                        "(Linux/WSL). Sans chaîne locale, GitHub Actions compile ce firmware "
-                        "avec les outils épinglés du dépôt puis l'application télécharge et "
-                        "vérifie le .bit, prêt pour « Charger le .bit sous Windows ». "
-                        "Une nouvelle compilation est nécessaire pour changer de broches.",
-                        size=12,
-                        color=MUTED,
-                    ),
-                    ft.Row([self.gh_repository, self.gh_ref, self.gh_token], wrap=True),
-                    ft.Row([self.build_button, self.remote_build_button], wrap=True),
-                ),
-                self._card(
-                    self._heading(
-                        "Programmer le bitstream",
-                        "Chargement volatile en SRAM · la configuration est perdue à l'extinction",
-                    ),
-                    ft.Row([self.bitstream_path], wrap=True),
-                    ft.Row([self.program_button], wrap=True),
-                    self.tool_progress,
-                    self.tool_message,
-                    ft.Text(
-                        "Les sorties rapides nécessitent un rapport de timing valide. "
-                        "Le mode démo reste disponible sans outils FPGA installés.",
-                        color=MUTED,
-                        size=12,
-                    ),
-                ),
-            ],
-            scroll=ft.ScrollMode.AUTO,
-            spacing=14,
-            expand=True,
-        )
-        journal_tab = ft.Column(
-            [
-                self._heading(
-                    "Journal de session",
-                    "Commandes, réponses de la carte et messages de compilation",
-                ),
-                ft.Container(
-                    self.journal,
-                    expand=True,
-                    bgcolor="#080E19",
-                    padding=12,
-                    border_radius=12,
-                    border=ft.border.all(1, LINE),
-                ),
-                ft.Row([self.journal_path], wrap=True),
-                ft.Row(
-                    [
-                        ft.OutlinedButton("Exporter le journal", on_click=self._export_journal),
-                        ft.TextButton("Effacer", on_click=self._clear_journal),
-                    ],
-                    wrap=True,
-                ),
-            ],
-            expand=True,
-            spacing=12,
-        )
-        self.tabs = ft.Tabs(
-            tabs=[
-                ft.Tab(text="Pilotage", icon=ft.Icons.TUNE, content=control_tab),
-                ft.Tab(text="Chronogramme", icon=ft.Icons.SHOW_CHART, content=waveform_tab),
-                ft.Tab(text="FPGA", icon=ft.Icons.MEMORY, content=fpga_tab),
-                ft.Tab(text="Journal", icon=ft.Icons.TERMINAL, content=journal_tab),
-            ],
-            selected_index=0,
-            expand=True,
-            animation_duration=180,
-        )
-        return ft.Column(
-            [
-                ft.Row(
-                    [
-                        ft.Container(
-                            ft.Icon(ft.Icons.MEMORY, size=30, color=AMBER),
-                            bgcolor=PANEL,
-                            padding=12,
-                            border_radius=14,
-                        ),
-                        ft.Column(
-                            [
-                                ft.Text("ARTY FRAME STUDIO", size=23, weight=ft.FontWeight.W_700),
-                                ft.Text(
-                                    "Série 26 bits · Horloge ajustable · Latch · Simulation",
-                                    size=12,
-                                    color=MUTED,
-                                ),
-                            ],
-                            spacing=3,
-                        ),
-                    ],
-                    spacing=14,
-                ),
-                self.tabs,
-            ],
-            spacing=18,
-            expand=True,
-        )
+        self._update()
 
     def _config(self) -> FrameConfig:
         bits = int(self.bit_count.value or "")
@@ -874,6 +655,10 @@ class Studio:
             self._update()
 
     def _changed(self, _: Any = None) -> None:
+        self.quantization_note.value = (
+            f"Durées arrondies au pas de {1e9 / (2 * self.core_hz):.6g} ns · "
+            f"cœur {self.core_hz / 1e6:g} MHz."
+        )
         try:
             config = self._config()
             waveform = simulate(config, max_frames=4)
@@ -905,6 +690,7 @@ class Studio:
                 + (" · aperçu limité aux 4 premières trames" if waveform.truncated else "")
             )
             self.validation.value = ""
+            self.validation.visible = False
         except (ValueError, TypeError, OverflowError) as exc:
             self.current_config = None
             self.waveform = None
@@ -912,6 +698,7 @@ class Studio:
             self.wave_canvas.visible = False
             self.wave_note.value = "Complétez les paramètres pour afficher le chronogramme."
             self.validation.value = f"Paramètre invalide : {exc}"
+            self.validation.visible = True
             self.frequency_actual.value = "Paramètres à corriger"
             self.binary_preview.value = "—"
             self.order_preview.value = ""
@@ -929,6 +716,7 @@ class Studio:
             self.wave_canvas.shapes = []
             self.wave_canvas.visible = False
             self.validation.value = f"Fréquence invalide : {exc}"
+            self.validation.visible = True
             self.frequency_actual.value = "Fréquence demandée à corriger"
             self._buttons()
             self._update()
@@ -983,18 +771,22 @@ class Studio:
             or self.current_config is None
             or busy
             or self.serial_pending
-            or self.tool_pending
+            or self.programming_pending
             or self.command_uncertain
         )
-        self.stop_button.disabled = not connected or self.serial_pending or self.tool_pending
+        self.stop_button.disabled = not connected or self.serial_pending or self.programming_pending
         self.simulate_button.disabled = self.current_config is None
-        self.connect_button.disabled = self.serial_pending or self.tool_pending
+        self.connect_button.disabled = self.serial_pending or self.programming_pending
         self.connect_button.text = "Déconnecter" if connected else "Connecter"
-        self.mode.disabled = connected or self.serial_pending or self.tool_pending
+        self.mode.disabled = connected or self.serial_pending or self.programming_pending
         self.port.disabled = (
-            connected or self.mode.value != "uart" or self.serial_pending or self.tool_pending
+            connected
+            or self.mode.value != "uart"
+            or self.serial_pending
+            or self.programming_pending
         )
-        self.refresh_button.disabled = self.serial_pending or self.tool_pending
+        self.refresh_button.disabled = self.serial_pending or self.programming_pending
+        self.port.visible = self.refresh_button.visible = self.mode.value == "uart"
         for control in (
             self.doctor_button,
             self.build_button,
@@ -1007,12 +799,51 @@ class Studio:
         self.program_button.disabled = self.tool_pending or self.serial_pending
         self.jtag_probe_button.disabled = self.tool_pending or self.serial_pending
         self.jtag_program_button.disabled = self.tool_pending or self.serial_pending
+        try:
+            self._firmware_settings()
+        except ValueError:
+            self.build_button.disabled = self.remote_build_button.disabled = True
         led_capable = self.firmware_info is not None and self.firmware_info.led_test
         self.led_test_button.disabled = (
-            not connected or not led_capable or self.serial_pending or self.tool_pending
+            not connected
+            or not led_capable
+            or busy
+            or self.serial_pending
+            or self.programming_pending
         )
         # Une carte connectée impose l'horloge annoncée par son firmware.
-        self.core_clock.disabled = connected
+        self.core_clock.disabled = connected or self.serial_pending or self.programming_pending
+        simulated = self.mode.value == "demo"
+        self.core_clock.label = (
+            "Horloge démo · déconnecter pour modifier"
+            if simulated and connected
+            else "Cœur identifié"
+            if connected
+            else "Horloge de simulation"
+        )
+        self.prepare_button.visible = not simulated
+        self.mode_badge.value = (
+            "Simulation · aucun signal physique"
+            if simulated
+            else ("Carte connectée" if connected else "Carte · déconnectée")
+        )
+        self.mode_badge.color = BLUE if simulated else GREEN if connected else AMBER
+        self.connection_hint.value = (
+            "La démo permet de préparer les trames sans carte."
+            if simulated
+            else "Charger le firmware dans FPGA avant de connecter le port COM à 115 200 bauds."
+        )
+        self.connection_hint.visible = not connected
+        self.hardware_pinout.visible = connected and not simulated
+        self.led_test_button.text = "Simuler les LED" if simulated else "Tester les LED"
+        self.led_note.value = "Motif simulé" if simulated else "Motif confirmé par UART"
+        self.led_test_button.tooltip = (
+            "Aperçu local des motifs ; aucune LED physique n'est pilotée"
+            if simulated
+            else "Chenillard sur LD4–LD7 : chaque motif est une commande confirmée"
+        )
+        if hasattr(self, "setup_steps"):
+            self.setup_steps.visible = not simulated
 
     def _log(self, message: str, color: str = MUTED) -> None:
         for line in str(message).splitlines():
@@ -1055,7 +886,7 @@ class Studio:
             self._error("Détection des ports", exc)
 
     async def _toggle_connection(self, _: Any = None) -> None:
-        if self.serial_pending or self.tool_pending:
+        if self.serial_pending or self.programming_pending:
             return
         self.serial_pending = True
         self._buttons()
@@ -1080,7 +911,7 @@ class Studio:
                                 "Sélectionnez un port série ou branchez la carte puis actualisez."
                             )
                         device = SerialDevice(self.port.value, baudrate=115200)
-                        self._log(f"Test du firmware UART sur {self.port.value} · PING uniquement.")
+                        self._log(f"Identification UART sur {self.port.value} · PING puis INFO.")
                     else:
                         device = DemoDevice(core_hz=self.core_hz)
                     try:
@@ -1105,13 +936,23 @@ class Studio:
                     self.connection_status.color = GREEN
                     self._log(f"Connecté : {label}.", GREEN)
         except Exception as exc:
+            self.device = None
+            self.device_status = None
+            self.last_sent = None
+            self._firmware_identified(None)
             if self.mode.value == "uart":
                 self.connection_status.color = RED
                 if isinstance(exc, CommandTimeout):
-                    self.connection_status.value = (
-                        f"{self.port.value} ouvert · aucune réponse PING compatible"
-                    )
-                    self.hardware_status.value = "Vérifier bitstream UART, reset et horloge"
+                    if exc.opcode == Opcode.INFO:
+                        self.connection_status.value = (
+                            f"{self.port.value} · PING reçu, identification INFO incomplète"
+                        )
+                        self.hardware_status.value = "Vérifier la version du firmware et recharger"
+                    else:
+                        self.connection_status.value = (
+                            f"{self.port.value} ouvert · aucune réponse PING compatible"
+                        )
+                        self.hardware_status.value = "Vérifier bitstream UART, reset et horloge"
                 else:
                     self.connection_status.value = f"Connexion impossible · {self.port.value}"
                     self.hardware_status.value = "Consulter le journal"
@@ -1126,17 +967,34 @@ class Studio:
         if info is None:
             self.firmware_status.value = "Firmware non identifié"
             self.firmware_status.color = MUTED
+            self.hardware_pinout.value = ""
             self._show_leds(None)
             return
+        simulated = self.mode.value == "demo"
         build = "référence" if info.build_id == 0 else f"0x{info.build_id:08X}"
         try:
             local = self._firmware_settings()
         except ValueError:
             local = None
-        if info.build_id and local is not None and local.build_id == info.build_id:
-            build += f" ({local.summary()})"
+        if local is not None and local.build_id == info.build_id and local.core_hz == info.core_hz:
+            self.known_firmwares[info.build_id] = local
+        known = self.known_firmwares.get(info.build_id)
+        if known is not None and known.core_hz != info.core_hz:
+            known = None
+        if not simulated and known is not None:
+            self.hardware_pinout.value = (
+                f"Brochage identifié · DATA {known.data_pin} · CLK {known.clock_pin} · "
+                f"LATCH {known.latch_pin} · masse commune"
+            )
+        elif not simulated:
+            self.hardware_pinout.value = (
+                "Firmware personnalisé · consulter sa configuration pour le brochage ; "
+                "INFO transmet un identifiant, pas les noms des broches."
+            )
+        prefix = "Firmware simulé" if simulated else "Firmware"
         self.firmware_status.value = (
-            f"Firmware révision {info.revision} · cœur {info.core_hz / 1e6:g} MHz · build {build}"
+            f"{prefix} révision {info.revision} · cœur {info.core_hz / 1e6:g} MHz · "
+            + ("identité locale" if simulated else f"build {build}")
             + ("" if info.led_test else " · sans test LED : recharger le firmware fourni à jour")
         )
         self.firmware_status.color = GREEN if info.led_test else AMBER
@@ -1162,7 +1020,11 @@ class Studio:
             self._show_leds(pattern)
 
     async def _led_test(self, _: Any = None) -> None:
-        if self.serial_pending or self.tool_pending:
+        if (
+            self.serial_pending
+            or self.programming_pending
+            or (self.device_status is not None and self.device_status.busy)
+        ):
             return
         self.serial_pending = True
         self._buttons()
@@ -1173,18 +1035,24 @@ class Studio:
                 if device is None or not device.connected:
                     raise ValueError("Connectez la carte avant le test LED.")
                 self._log(
-                    "Test LED : observer LD4 à LD7 (chenillard, toutes allumées, puis état).",
+                    "Simulation LED : aperçu des motifs sans carte."
+                    if self.mode.value == "demo"
+                    else "Test LED : observer LD4 à LD7 (chenillard, toutes allumées, puis état).",
                     BLUE,
                 )
                 result = await asyncio.to_thread(
                     run_led_test, device, step=self.led_step, on_step=self._led_step
                 )
-                self._log(
-                    f"Test LED terminé · {result.commands} commandes confirmées · aller-retour "
+                message = (
+                    f"Test LED terminé · {result.commands} commandes simulées · "
+                    "aucun signal physique."
+                    if self.mode.value == "demo"
+                    else f"Test LED terminé · {result.commands} commandes confirmées · "
+                    "aller-retour "
                     f"moyen {result.mean_ms:.1f} ms (max {result.max_ms:.1f} ms). Si les LED "
-                    "de la carte n'ont pas défilé, le port répond mais pas cette carte.",
-                    GREEN,
+                    "de la carte n'ont pas défilé, le port répond mais pas cette carte."
                 )
+                self._log(message, GREEN)
         except Exception as exc:
             self._error("Test LED", exc)
         finally:
@@ -1227,7 +1095,7 @@ class Studio:
             self._log(f"Lecture de STATUS impossible : {status_error}", RED)
 
     async def _send(self, _: Any) -> None:
-        if self.serial_pending or self.tool_pending or self.command_uncertain:
+        if self.serial_pending or self.programming_pending or self.command_uncertain:
             return
         try:
             config = self._config()
@@ -1261,7 +1129,7 @@ class Studio:
             self._update()
 
     async def _stop(self, _: Any) -> None:
-        if self.serial_pending or self.tool_pending:
+        if self.serial_pending or self.programming_pending:
             return
         self.serial_pending = True
         self._buttons()
@@ -1292,7 +1160,7 @@ class Studio:
             )
             if (
                 self.serial_pending
-                or self.tool_pending
+                or self.programming_pending
                 or self.device is None
                 or not self.device.connected
             ):
@@ -1316,8 +1184,11 @@ class Studio:
                         await asyncio.to_thread(self.device.close)
                     self.device = None
                     self.device_status = None
+                    self.last_sent = None
+                    self._firmware_identified(None)
                 self.connection_status.value = "Connexion interrompue · reconnectez la carte"
                 self.connection_status.color = RED
+                self.hardware_status.value = "État de la carte inconnu"
                 self._buttons()
                 self._update()
 
@@ -1455,8 +1326,12 @@ class Studio:
             self.worker_messages.clear()
             self._log(messages)
 
-    async def _tool_action(self, title: str, action: Callable[[], Any]) -> Any:
+    async def _tool_action(
+        self, title: str, action: Callable[[], Any], *, blocks_uart: bool = False
+    ) -> Any:
         self.tool_pending = True
+        self.programming_pending = blocks_uart
+        self.tool_panel.visible = True
         self.tool_progress.visible = True
         self.tool_message.value = f"{title} en cours… Consultez le journal pour les détails."
         self.tool_message.color = AMBER
@@ -1477,6 +1352,7 @@ class Studio:
             return None
         finally:
             self.tool_pending = False
+            self.programming_pending = False
             self.tool_progress.visible = False
             self._buttons()
             self._update()
@@ -1573,6 +1449,7 @@ class Studio:
 
     def _firmware_changed(self, _: Any = None) -> None:
         self._refresh_firmware_summary()
+        self._buttons()
         self._update()
 
     def _set_firmware(self, firmware: FirmwareBuildConfig) -> None:
@@ -1616,7 +1493,7 @@ class Studio:
             lambda: self._toolchain().build(log=self._worker_log, firmware=firmware),
         )
         if result is not None:
-            self.bitstream_path.value = str(result)
+            self._select_firmware(Path(result), firmware)
             self.tool_message.value = f"Bitstream créé : {result} · {firmware.summary()}"
             self._update()
 
@@ -1638,7 +1515,7 @@ class Studio:
             lambda: client.build(firmware, destination, progress=self._worker_log),
         )
         if result is not None:
-            self.windows_bitstream_path.value = str(result.bitstream)
+            self._select_firmware(Path(result.bitstream), firmware)
             self.tool_message.value = f"Firmware téléchargé et vérifié : {result.bitstream}"
             self._log(self.tool_message.value, GREEN)
             self._log(
@@ -1668,16 +1545,22 @@ class Studio:
             manifest = validate_programming_image(image, self.project_root)
             if manifest is not None:
                 self._worker_log(
-                    f"Firmware fourni vérifié · sources {manifest['source_commit'][:7]} · "
+                    f"Firmware vérifié · sources {manifest['source_commit'][:7]} · "
                     f"Fmax {manifest['routed_core_fmax_mhz']:.2f} MHz."
                 )
             self._worker_log(f"Bitstream {image.part} · SHA256 {image.sha256}")
-            return program_arty(
+            result = program_arty(
                 image.payload, serial=serial or None, dll_path=Path(dll) if dll else None
             )
+            return result, manifest
 
-        result = await self._tool_action("Chargement SRAM Windows", run)
-        if result is not None:
+        outcome = await self._tool_action("Chargement SRAM Windows", run, blocks_uart=True)
+        if outcome is not None:
+            result, manifest = outcome
+            if manifest is not None and "firmware_config" in manifest:
+                self._select_firmware(
+                    bitstream, FirmwareBuildConfig.from_dict(manifest["firmware_config"])
+                )
             self.tool_message.value = f"SRAM chargée · {result.serial} · STAT 0x{result.status:08X}"
             self._log(self.tool_message.value, GREEN)
             self._log(
@@ -1709,7 +1592,7 @@ class Studio:
             self._toolchain().program(bitstream, log=self._worker_log)
             return True
 
-        result = await self._tool_action("Programmation SRAM", program)
+        result = await self._tool_action("Programmation SRAM", program, blocks_uart=True)
         if result is not None:
             self._log(
                 "Le FPGA est configuré. Connectez le port UART dans Pilotage "

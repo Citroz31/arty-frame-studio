@@ -26,7 +26,7 @@ son chargement, PING et les sorties sur la carte réelle.
    ordinaire, actualise les dépendances. La simulation fonctionne sans carte.
 2. Brancher l'Arty sur **USB PROG/UART** et fermer les autres applications JTAG
    ou série, notamment Adept et les terminaux qui utilisent COM7.
-3. Ouvrir **FPGA**, section **JTAG Windows natif**, puis **Détecter le FPGA sous
+3. Ouvrir **FPGA**, section **1 · Charger le firmware**, puis **Détecter le FPGA sous
    Windows**. La détection lit l'IDCODE ; elle ne programme pas la carte.
 4. Utiliser le **nouveau** `firmware/prebuilt/arty_frame.bit` du ZIP, avec
    RX sur A9 et TX sur D10. Remplacer votre ancienne copie au brochage inversé.
@@ -56,7 +56,7 @@ redémarrage. Ne pas utiliser **Compiler localement** ou **Programmer la SRAM**
 du flux d'outils externes pour ce parcours de chargement Windows natif.
 
 Pour changer l'horloge du cœur ou les broches sans outil FPGA sur le PC :
-onglet **FPGA → Firmware personnalisé**, choisir les réglages, renseigner un
+onglet **FPGA → Personnaliser le firmware**, choisir les réglages, renseigner un
 jeton GitHub (Actions : lecture et écriture) puis **Compiler sur GitHub**.
 Le `.bit` vérifié est téléchargé dans `builds\` et proposé au chargement.
 Voir [la compilation personnalisée](toolchain.md#firmware-personnalisé-depuis-linterface).

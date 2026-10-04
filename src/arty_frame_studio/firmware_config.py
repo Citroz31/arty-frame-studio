@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import zlib
 from dataclasses import asdict, dataclass, fields
+from decimal import ROUND_FLOOR, Decimal
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ from typing import Any
 BOARD_OSCILLATOR_HZ = 100_000_000
 REFERENCE_CORE_HZ = 200_000_000
 MIN_CORE_HZ = 50_000_000
-# Le build de référence passe à 218 MHz ; au-delà, aucune marge n'est démontrée.
+# Le build révision 2 passe à 206 MHz ; au-delà, aucune marge n'est démontrée.
 MAX_CORE_HZ = 200_000_000
 VCO_MIN_HZ = 800_000_000
 VCO_MAX_HZ = 1_600_000_000
@@ -220,6 +221,13 @@ class FirmwareBuildConfig:
     def xdc(self) -> str:
         """Contraintes complètes ; la configuration par défaut donne le XDC du dépôt."""
         mhz = f"{self.core_hz / 1e6:g}"
+        # A 3-decimal period weakens 150 MHz to 149.9925 MHz (6.667 ns).
+        # Truncate with greater precision so the custom constraint is never
+        # weaker than the selected clock. Keep the committed reference XDC.
+        period = (Decimal(1_000_000_000) / Decimal(self.core_hz)).quantize(
+            Decimal("0.000000001"), rounding=ROUND_FLOOR
+        )
+        period_text = "5.000" if self.core_hz == REFERENCE_CORE_HZ else str(period)
 
         def output(port: str, name: str) -> str:
             pin = PMOD_PINS[name].package_pin
@@ -245,7 +253,7 @@ class FirmwareBuildConfig:
             "# create_generated_clock is NOT implemented by this nextpnr XDC parser.",
             "set_property -dict {PACKAGE_PIN E3 IOSTANDARD LVCMOS33} [get_ports clk100]",
             "create_clock -period 10.000 -name clk100 [get_ports clk100]",
-            f"create_clock -period {1e9 / self.core_hz:.3f} -name core_clock [get_nets core_clock]",
+            f"create_clock -period {period_text} -name core_clock [get_nets core_clock]",
             "",
             "# ck_rst: red RESET button, active low (not the user push buttons).",
             "set_property -dict {PACKAGE_PIN C2 IOSTANDARD LVCMOS33} [get_ports reset_n]",

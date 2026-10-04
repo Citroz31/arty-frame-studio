@@ -15,6 +15,7 @@ from arty_frame_studio.remote_build import (
     GitHubBuildClient,
     RemoteBuildError,
     RemoteBuildTarget,
+    extract_firmware_archive,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,22 +23,52 @@ BIT = (ROOT / "firmware/prebuilt/arty_frame.bit").read_bytes()
 FIRMWARE = FirmwareBuildConfig(
     core_hz=150_000_000, data_pin="JC3", clock_pin="JC1", latch_pin="JC7"
 )
+SOURCE_COMMIT = "a" * 40
 
 
-def artifact(firmware=FIRMWARE, *, sha256=None, extra=None):
+def artifact(firmware=FIRMWARE, *, sha256=None, extra=None, manifest_changes=None, omit=()):
     manifest = {
         "sha256": sha256 or hashlib.sha256(BIT).hexdigest(),
         "build_id": firmware.build_id,
         "firmware_config": firmware.to_dict(),
         "routed_core_fmax_mhz": firmware.core_hz / 1e6 + 10,
+        "timing_requirement_mhz": firmware.core_hz / 1e6,
+        "source_commit": SOURCE_COMMIT,
+        "part": "xc7a100tcsg324-1",
+        "idcode": "0x03631093",
     }
+    manifest.update(manifest_changes or {})
+    files = {
+        "arty_frame.bit": BIT,
+        "firmware-manifest.json": json.dumps(manifest),
+        "timing.json": json.dumps(
+            {
+                "fmax": {
+                    "core_clock": {
+                        "achieved": firmware.core_hz / 1e6 + 10,
+                        "constraint": firmware.core_hz / 1e6,
+                    }
+                }
+            }
+        ),
+        "successful-build.json": json.dumps(
+            {
+                "firmware_config": firmware.to_dict(),
+                "build_id": firmware.build_id,
+                "bitstream_sha256": hashlib.sha256(BIT).hexdigest(),
+                "part": "xc7a100tcsg324-1",
+                "timing_clock": "core_clock",
+                "timing_requirement_mhz": firmware.core_hz / 1e6,
+            }
+        ),
+        "../escape.txt": "outside",
+    }
+    files.update(extra or {})
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as bundle:
-        bundle.writestr("arty_frame.bit", BIT)
-        bundle.writestr("firmware-manifest.json", json.dumps(manifest))
-        bundle.writestr("../escape.txt", "outside")
-        for name, data in (extra or {}).items():
-            bundle.writestr(name, data)
+        for name, data in files.items():
+            if name not in omit:
+                bundle.writestr(name, data)
     return buffer.getvalue()
 
 
@@ -81,6 +112,7 @@ class FakeGitHub:
                 "id": 77,
                 "display_title": f"Firmware build {self.request_id}",
                 "html_url": "https://github.com/x/runs/77",
+                "head_sha": SOURCE_COMMIT,
             }
             other = {"id": 76, "display_title": "Firmware build 0123456789abcdef"}
             return Response(json.dumps({"workflow_runs": [other, run]}).encode())
@@ -90,6 +122,7 @@ class FakeGitHub:
                 "status": "completed",
                 "conclusion": self.conclusion,
                 "html_url": "https://github.com/x/runs/77",
+                "head_sha": SOURCE_COMMIT,
             }
             return Response(json.dumps(run).encode())
         if url.endswith("/actions/runs/77/artifacts"):
@@ -127,6 +160,8 @@ def test_remote_build_dispatches_finds_waits_and_verifies_the_artifact(tmp_path)
     assert sorted(path.name for path in result.bitstream.parent.iterdir()) == [
         "arty_frame.bit",
         "firmware-manifest.json",
+        "successful-build.json",
+        "timing.json",
     ]
     assert any("runs/77" in message for message in messages)
     assert all(url.startswith("https://api.github.com/") for _, url, _ in fake.requests)
@@ -150,6 +185,7 @@ def test_reference_firmware_is_requested_with_an_empty_configuration(tmp_path):
 def test_failed_or_mismatched_builds_are_refused(tmp_path, fake, message):
     with pytest.raises(RemoteBuildError, match=message):
         client(fake).build(FIRMWARE, tmp_path)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_http_errors_explain_token_permissions():
@@ -189,3 +225,76 @@ def test_missing_run_times_out_with_guidance():
     )
     with pytest.raises(RemoteBuildError, match="n'apparaît pas"):
         patient.find_run("feedfacecafebeef")
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), "160", True, 10**400])
+def test_nonfinite_or_untyped_timing_is_refused_without_leaving_a_download(tmp_path, value):
+    fake = FakeGitHub(archive=artifact(manifest_changes={"routed_core_fmax_mhz": value}))
+    with pytest.raises(RemoteBuildError, match="numériques finies"):
+        client(fake).build(FIRMWARE, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("name", ["timing.json", "successful-build.json"])
+def test_missing_build_evidence_is_refused(tmp_path, name):
+    fake = FakeGitHub(archive=artifact(omit=[name]))
+    with pytest.raises(RemoteBuildError, match=name):
+        client(fake).build(FIRMWARE, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "changes,message",
+    [
+        ({"source_commit": "b" * 40}, "commit"),
+        ({"source_commit": "unknown"}, "commit"),
+        ({"routed_core_fmax_mhz": 175}, "timing"),
+        ({"idcode": "0x03636093"}, "IDCODE"),
+    ],
+)
+def test_manifest_must_match_run_target_and_timing_report(tmp_path, changes, message):
+    with pytest.raises(RemoteBuildError, match=message):
+        client(FakeGitHub(archive=artifact(manifest_changes=changes))).build(FIRMWARE, tmp_path)
+
+
+def test_timing_constraint_cannot_be_weaker_than_the_requested_core(tmp_path):
+    report = {"fmax": {"core_clock": {"achieved": 160, "constraint": 149.99}}}
+    fake = FakeGitHub(archive=artifact(extra={"timing.json": json.dumps(report)}))
+    with pytest.raises(RemoteBuildError, match="timing"):
+        client(fake).build(FIRMWARE, tmp_path)
+
+
+def test_archive_limits_the_total_extracted_size(tmp_path, monkeypatch):
+    from arty_frame_studio import remote_build
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        bundle.writestr("build.log", "a" * 600)
+        bundle.writestr("rtl-tests.log", "b" * 600)
+    monkeypatch.setattr(remote_build, "MAX_ARTIFACT_BYTES", 1000)
+    with pytest.raises(RemoteBuildError, match="ensemble"):
+        extract_firmware_archive(buffer.getvalue(), tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_duplicate_files_are_rejected(tmp_path):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as bundle:
+        bundle.writestr("timing.json", "{}")
+        with pytest.warns(UserWarning, match="Duplicate"):
+            bundle.writestr("timing.json", "{}")
+    with pytest.raises(RemoteBuildError, match="dupliqué"):
+        extract_firmware_archive(buffer.getvalue(), tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_programming_revalidates_downloaded_firmware_after_metadata_changes(tmp_path):
+    from arty_frame_studio.bitstream import BitstreamError, read_bitstream
+    from arty_frame_studio.prebuilt import validate_programming_image
+
+    result = client(FakeGitHub()).build(FIRMWARE, tmp_path)
+    image = read_bitstream(result.bitstream)
+    assert validate_programming_image(image, ROOT)["build_id"] == FIRMWARE.build_id
+    (result.bitstream.parent / "timing.json").write_text("{}")
+    with pytest.raises(BitstreamError, match="timing"):
+        validate_programming_image(image, ROOT)

@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -23,7 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .bitstream import read_bitstream
+from .bitstream import BitstreamError
+from .firmware_artifact import FirmwareArtifactError, validate_firmware_artifact
 from .firmware_config import FirmwareBuildConfig
 
 API_ROOT = "https://api.github.com"
@@ -226,11 +228,22 @@ class GitHubBuildClient:
             raise RemoteBuildError(f"Artefact {name} absent ou expiré.")
         if int(artifact.get("size_in_bytes", 0)) > MAX_ARTIFACT_BYTES:
             raise RemoteBuildError("Artefact trop volumineux.")
+        head_sha = run.get("head_sha")
+        if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+            raise RemoteBuildError("L'exécution GitHub n'identifie pas son commit source.")
         archive = self._request("GET", str(artifact["archive_download_url"]), raw=True)
         output = Path(directory) / f"firmware-{firmware.build_id:08x}-{request_id}"
-        output.mkdir(parents=True, exist_ok=True)
-        extract_firmware_archive(archive, output)
-        manifest = check_downloaded_firmware(output, firmware)
+        Path(directory).mkdir(parents=True, exist_ok=True)
+        if output.exists():
+            raise RemoteBuildError(
+                "Le dossier de cette compilation existe déjà ; il n'est pas écrasé."
+            )
+        # Keep an invalid/partial download out of the selectable build folders.
+        with tempfile.TemporaryDirectory(prefix=".firmware-download-", dir=directory) as temporary:
+            staging = Path(temporary)
+            extract_firmware_archive(archive, staging)
+            manifest = check_downloaded_firmware(staging, firmware, expected_commit=head_sha)
+            staging.rename(output)
         return RemoteBuildResult(output / "arty_frame.bit", manifest, str(run.get("html_url", "")))
 
     def build(
@@ -250,34 +263,37 @@ def extract_firmware_archive(archive: bytes, output: Path) -> None:
     """Extrait les seuls fichiers attendus, à plat, sans suivre de chemin."""
     try:
         with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
-            members = {Path(info.filename).name: info for info in bundle.infolist()}
-            for name in ARTIFACT_FILES:
-                info = members.get(name)
-                if info is None or info.is_dir() or Path(info.filename).name != info.filename:
+            members = {}
+            total = 0
+            for info in bundle.infolist():
+                if info.filename not in ARTIFACT_FILES or info.is_dir():
                     continue
-                if info.file_size > MAX_ARTIFACT_BYTES:
+                if info.filename in members:
+                    raise RemoteBuildError(f"Fichier dupliqué dans l'artefact : {info.filename}.")
+                total += info.file_size
+                members[info.filename] = info
+            if total > MAX_ARTIFACT_BYTES:
+                raise RemoteBuildError("L'ensemble des fichiers de l'artefact est trop volumineux.")
+            for name in ARTIFACT_FILES:
+                member = members.get(name)
+                if (
+                    member is None
+                    or member.is_dir()
+                    or Path(member.filename).name != member.filename
+                ):
+                    continue
+                if member.file_size > MAX_ARTIFACT_BYTES:
                     raise RemoteBuildError(f"{name} trop volumineux dans l'artefact.")
-                (output / name).write_bytes(bundle.read(info))
+                (output / name).write_bytes(bundle.read(member))
     except zipfile.BadZipFile as exc:
         raise RemoteBuildError("Artefact GitHub illisible (ZIP invalide).") from exc
 
 
-def check_downloaded_firmware(directory: Path, firmware: FirmwareBuildConfig) -> dict[str, Any]:
+def check_downloaded_firmware(
+    directory: Path, firmware: FirmwareBuildConfig, *, expected_commit: str | None = None
+) -> dict[str, Any]:
     """Le .bit, son manifeste et la configuration demandée doivent concorder."""
-    bit = directory / "arty_frame.bit"
-    manifest_path = directory / "firmware-manifest.json"
-    if not bit.is_file() or not manifest_path.is_file():
-        raise RemoteBuildError("L'artefact doit contenir arty_frame.bit et son manifeste.")
-    image = read_bitstream(bit)
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        declared = FirmwareBuildConfig.from_dict(manifest["firmware_config"])
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise RemoteBuildError("Manifeste du firmware téléchargé invalide.") from exc
-    if not isinstance(manifest, dict) or manifest.get("sha256") != image.sha256:
-        raise RemoteBuildError("Le .bit téléchargé ne correspond pas à son manifeste.")
-    if declared != firmware or manifest.get("build_id") != firmware.build_id:
-        raise RemoteBuildError("Le firmware téléchargé ne correspond pas à la configuration.")
-    if float(manifest.get("routed_core_fmax_mhz", 0)) < firmware.core_hz / 1e6:
-        raise RemoteBuildError("Le timing du firmware téléchargé n'atteint pas son horloge.")
-    return manifest
+        return validate_firmware_artifact(directory, firmware, expected_commit=expected_commit)
+    except (FirmwareArtifactError, BitstreamError, OSError) as exc:
+        raise RemoteBuildError(str(exc)) from exc

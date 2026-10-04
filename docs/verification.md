@@ -9,7 +9,7 @@ carte.
 
 ## Logiciel et simulation
 
-Les **385 tests Python passent** : paramètres et profils, chronogrammes,
+Les **436 tests Python passent** : paramètres et profils, chronogrammes,
 protocole UART, transport, interface, CLI et protections du flux FPGA.
 Ruff, formatage et mypy vérifient le code Python.
 
@@ -49,6 +49,10 @@ est connectée aux tests.
 
 L'interface Flet 0.28.3 a été rendue avec Chromium : démarrage en démo et
 chronogramme affiché avec le Canvas natif, sans exception JavaScript.
+La revue du 4 octobre vérifie les fenêtres 1220 × 930 et 760 × 680, les
+actions toujours visibles, SEND/STOP en démo, les fréquences invalides,
+le redimensionnement des traces, les options avancées et l’export du journal.
+Voir [le compte rendu de revue](review-2026-10-04.md).
 Des distributions source et wheel ont été construites pendant le développement.
 Les modèles de simulation PLL/ODDR ne sont jamais inclus dans la synthèse.
 
