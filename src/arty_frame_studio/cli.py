@@ -14,13 +14,30 @@ from typing import Any
 
 from .bitstream import read_bitstream
 from .firmware_config import FirmwareBuildConfig
-from .model import CONTINUOUS, FrameConfig, load_profile, save_profile
+from .model import CONTINUOUS, FrameConfig, load_profile, save_profile, with_free_clock
 from .prebuilt import validate_programming_image, verify_prebuilt_firmware
 from .remote_build import GitHubBuildClient, RemoteBuildTarget
 from .simulation import export_csv, export_vcd, simulate, waveform_svg
 from .toolchain import Toolchain, ToolchainConfig
 from .transport import DemoDevice, SerialDevice, TransportError, list_ports, run_led_test
 from .windows_jtag import list_ftdi_devices, probe_arty, program_arty
+
+FREE_CLOCK_HELP = (
+    "CLK libre pendant LATCH et pause (firmware révision 4) ; LATCH et pause du "
+    "profil arrondis à des périodes entières de CLK"
+)
+
+
+def _free_clock(config: FrameConfig) -> FrameConfig:
+    result = with_free_clock(config)
+    if result != config:
+        print(
+            f"CLK libre : LATCH {result.latch_periods} période(s), pause "
+            f"{result.gap_periods} période(s) de CLK (latch_ticks={result.latch_ticks}, "
+            f"gap_ticks={result.gap_ticks}).",
+            file=sys.stderr,
+        )
+    return result
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -90,6 +107,7 @@ def _parser() -> argparse.ArgumentParser:
     simulation.add_argument("--profile", type=Path)
     simulation.add_argument("--output", type=Path, default=Path("exports/chronogramme"))
     simulation.add_argument("--max-frames", type=int, default=4)
+    simulation.add_argument("--free-clock", action="store_true", help=FREE_CLOCK_HELP)
     send = commands.add_parser("send", help="Transmettre un profil à la carte ou à la démo")
     send.add_argument("--profile", type=Path, required=True)
     connection = send.add_mutually_exclusive_group(required=True)
@@ -101,6 +119,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Répéter la trame sans fin jusqu'à STOP (repeat_count 0, firmware révision 3)",
     )
+    send.add_argument("--free-clock", action="store_true", help=FREE_CLOCK_HELP)
     send.add_argument(
         "--duration",
         type=float,
@@ -251,6 +270,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Profil créé : {args.path.resolve()}")
         elif args.command == "simulate":
             config = load_profile(args.profile) if args.profile else FrameConfig()
+            if args.free_clock:
+                config = _free_clock(config)
             waveform = simulate(config, max_frames=args.max_frames)
             args.output.parent.mkdir(parents=True, exist_ok=True)
             svg = args.output.with_suffix(".svg")
@@ -270,6 +291,8 @@ def main(argv: list[str] | None = None) -> int:
                 config = load_profile(args.profile)
                 if args.continuous:
                     config = replace(config, repeat_count=CONTINUOUS)
+                if args.free_clock:
+                    config = _free_clock(config)
                 if args.duration is not None and not (
                     math.isfinite(args.duration) and args.duration > 0
                 ):

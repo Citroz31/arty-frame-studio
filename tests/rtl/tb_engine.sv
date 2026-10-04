@@ -6,7 +6,7 @@ module tb_engine;
     reg [31:0] word_in;
     reg [4:0] bits_in;
     reg [15:0] divider_in, latch_ticks_in, gap_ticks_in, repeat_in;
-    reg [1:0] flags_in;
+    reg [2:0] flags_in;
     wire busy;
     wire [15:0] completed;
     wire dr, df, cr, cf, lr, lf;
@@ -39,7 +39,14 @@ module tb_engine;
                         : word_in[bits_in-1-bit_number];
                     expected_clock=(offset%(2*divider_in)) >= divider_in;
                 end
-                if (offset >= 2*divider_in*bits_in+divider_in
+                if (flags_in[2]) begin
+                    // Free CLK: one period of 2N ticks from SEND, without
+                    // gaps; LATCH from the last falling edge of the bits.
+                    expected_clock=(tick%(2*divider_in)) >= divider_in;
+                    if (offset >= 2*divider_in*bits_in
+                        && offset < 2*divider_in*bits_in+divider_in+latch_ticks_in)
+                        expected_latch=!flags_in[1];
+                end else if (offset >= 2*divider_in*bits_in+divider_in
                     && offset < 2*divider_in*bits_in+divider_in+latch_ticks_in)
                     expected_latch=!flags_in[1];
             end
@@ -56,7 +63,7 @@ module tb_engine;
     task run_case;
         input [31:0] word_value;
         input integer bit_value, divider_value, latch_value, gap_value, repeat_value;
-        input [1:0] flags_value;
+        input [2:0] flags_value;
         integer duration, pair_index, pairs;
         begin
             @(negedge clk);
@@ -85,7 +92,7 @@ module tb_engine;
         input [31:0] word_value;
         input integer bit_value, divider_value, latch_value, gap_value;
         input integer frames, stop_offset;
-        input [1:0] flags_value;
+        input [2:0] flags_value;
         integer duration, pair_index, pairs;
         begin
             @(negedge clk);
@@ -120,7 +127,7 @@ module tb_engine;
         end
     endtask
 
-    integer width_case, flag_case;
+    integer width_case, flag_case, free_divider, free_latch, free_gap;
 
     initial begin
         word_in=0; bits_in=1; divider_in=1; latch_ticks_in=1;
@@ -161,6 +168,35 @@ module tb_engine;
             run_continuous_case($urandom_range(0,63),6,$urandom_range(1,7),
                 $urandom_range(1,9),$urandom_range(0,9),$urandom_range(2,4),
                 $urandom_range(0,40),$urandom_range(0,3));
+        end
+        // Free CLK (flags bit 2): LATCH (2k-1)*N and pause 2m*N ticks keep
+        // every frame a whole number of CLK periods; CLK never pauses.
+        run_case(32'h2a,6,1,1,0,2,4);
+        run_case(32'h2a,6,1,3,4,2,7);
+        run_case(32'h123456,26,3,9,6,2,5);
+        run_case(0,1,65535,65535,0,1,4);
+        run_case(32'h3ffffff,26,2,2,0,3,6);
+        repeat (80) begin
+            free_divider=$urandom_range(1,7);
+            free_latch=(2*$urandom_range(1,3)-1)*free_divider;
+            free_gap=2*$urandom_range(0,3)*free_divider;
+            run_case($urandom_range(0,63),6,free_divider,free_latch,free_gap,
+                $urandom_range(1,3),4+$urandom_range(0,3));
+        end
+        for (width_case=1; width_case<=26; width_case=width_case+1) begin
+            repeat (4) begin
+                free_divider=$urandom_range(1,5);
+                run_case($urandom_range(0,(1<<width_case)-1),width_case,free_divider,
+                    (2*$urandom_range(1,2)-1)*free_divider,2*$urandom_range(0,2)*free_divider,
+                    $urandom_range(1,2),4+$urandom_range(0,3));
+            end
+        end
+        run_continuous_case(1,1,1,1,0,70000,1,4);
+        repeat (30) begin
+            free_divider=$urandom_range(1,7);
+            run_continuous_case($urandom_range(0,63),6,free_divider,
+                (2*$urandom_range(1,3)-1)*free_divider,2*$urandom_range(0,3)*free_divider,
+                $urandom_range(2,4),$urandom_range(0,40),4+$urandom_range(0,3));
         end
         // STOP must preserve completed, including repetitions already finished.
         @(negedge clk);

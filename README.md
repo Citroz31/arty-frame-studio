@@ -99,7 +99,9 @@ ou `--project-root` pour les commandes FPGA de la CLI.
    choisir 1 à 26 bits et régler la fréquence.
 2. Définir l’ordre MSB/LSB, la polarité du latch, sa durée, la pause après trame et
    le nombre de répétitions, ou activer **Émission continue jusqu'à Arrêter** :
-   la carte répète alors la trame sans fin (firmware révision 3). Le FPGA
+   la carte répète alors la trame sans fin (firmware révision 3). **CLK libre**
+   garde CLK périodique pendant LATCH et la pause (firmware révision 4) ; LATCH
+   et pause sont alors arrondis à des périodes entières de CLK. Le FPGA
    accepte une seule séquence à la fois ; **Arrêter** (STOP) interrompt celle
    qui est active.
 3. Afficher le chronogramme idéal et exporter en SVG, CSV ou VCD (GTKWave). Le
@@ -196,6 +198,7 @@ nouvelles commandes reste limitée par la liaison UART.
 En ligne de commande : `arty-frame send --port COM7 --profile trame.json
 --continuous` lance l'émission continue, `arty-frame stop --port COM7`
 l'arrête ; `--duration 10` envoie STOP après 10 s, `--wait` jusqu'à Ctrl+C.
+`--free-clock` ajoute la CLK libre (LATCH et pause du profil arrondis).
 
 Licence MIT.
 Le pilote et la DLL FTDI D2XX restent des dépendances externes sous licence FTDI.

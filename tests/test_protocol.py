@@ -166,3 +166,15 @@ def test_continuous_send_encodes_repeat_zero_and_is_a_declared_capability():
     assert CAPABILITY_CONTINUOUS == 0x0004
     assert info_from_pages([3, 0xC200, 0x0BEB, 7, 0, 0]).continuous
     assert not info_from_pages([2, 0xC200, 0x0BEB, 3, 0, 0]).continuous
+
+
+def test_free_clock_sets_flag_bit_two_and_capability():
+    from arty_frame_studio.protocol import CAPABILITY_FREE_CLOCK, info_from_pages
+
+    config = FrameConfig(
+        divider=20, latch_ticks=20, gap_ticks=40, latch_active_low=True, free_clock=True
+    )
+    assert encode_request(Opcode.SEND, 1, config)[6 + 13] == 0b110
+    assert CAPABILITY_FREE_CLOCK == 0x0008
+    assert info_from_pages([4, 0xC200, 0x0BEB, 15, 0, 0]).free_clock
+    assert not info_from_pages([3, 0xC200, 0x0BEB, 7, 0, 0]).free_clock

@@ -375,7 +375,7 @@ def test_led_test_walks_virtual_and_board_leds_in_demo(tmp_path):
         assert studio.led_test_button.disabled
         await studio._toggle_connection()
         assert studio.firmware_info.led_test
-        assert "révision 3" in studio.firmware_status.value
+        assert "révision 4" in studio.firmware_status.value
         assert not studio.led_test_button.disabled
         seen = []
         original = studio._show_leds
@@ -649,3 +649,47 @@ def test_revision_two_firmware_is_flagged_without_continuous_emission(tmp_path):
     assert "sans émission continue" in studio.firmware_status.value
     studio._firmware_identified(FirmwareInfo(3, 200_000_000, 7, 0))
     assert "sans émission continue" not in studio.firmware_status.value
+
+
+def test_free_clock_switch_rounds_to_clock_periods_and_round_trips(tmp_path):
+    from arty_frame_studio.app import waveform_signal_points
+
+    studio = make_studio(tmp_path)
+    studio.divider.value = "4"
+    studio._divider_changed(None)
+    studio.latch_ns.value = "60"
+    studio.gap_ns.value = "40"
+    studio.free_clock.value = True
+    studio._changed()
+    config = studio.current_config
+    assert config.free_clock and (config.latch_ticks, config.gap_ticks) == (20, 16)
+    assert "LATCH 3 période(s) de CLK" in studio.timing_summary.value
+    assert "CLK continue" in studio.timing_summary.value
+    studio._set_profile(FrameConfig(divider=4, latch_ticks=20, gap_ticks=16, free_clock=True))
+    assert studio.free_clock.value and studio.latch_ns.value == "60"
+    assert studio._config() == FrameConfig(divider=4, latch_ticks=20, gap_ticks=16, free_clock=True)
+    studio._set_profile(FrameConfig())
+    assert not studio.free_clock.value
+    dense = simulate(
+        FrameConfig(
+            word=1,
+            bit_count=1,
+            divider=1,
+            latch_ticks=65535,
+            gap_ticks=65534,
+            repeat_count=0,
+            free_clock=True,
+        )
+    )
+    points = waveform_signal_points(dense, "clk", 1200)
+    assert len(points) <= 3 * 1200
+    assert {y for _, y in points} == {148.0, 178.0}
+
+
+def test_revision_three_firmware_is_flagged_without_free_clock(tmp_path):
+    studio = make_studio(tmp_path)
+    studio.mode.value = "uart"
+    studio._firmware_identified(FirmwareInfo(3, 200_000_000, 7, 0))
+    assert "sans CLK libre" in studio.firmware_status.value
+    studio._firmware_identified(FirmwareInfo(4, 200_000_000, 15, 0))
+    assert "sans" not in studio.firmware_status.value

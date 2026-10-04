@@ -41,12 +41,20 @@ class Waveform:
         return self.duration_ticks * self.config.tick_ns
 
 
+# En CLK libre, une trame peut compter jusqu'à ~131 000 fronts de CLK : l'aperçu
+# réduit alors le nombre de trames (au moins une) pour rester interactif.
+MAX_FREE_CLOCK_TRANSITIONS = 50_000
+
+
 def simulate(config: FrameConfig, max_frames: int = 4) -> Waveform:
     if type(max_frames) is not int or not 1 <= max_frames <= 256:
         raise ValueError("Nombre de trames à simuler entre 1 et 256.")
     # Une émission continue n'a pas de fin : la fenêtre montre max_frames trames.
     total = math.inf if config.continuous else config.repeat_count
     frames = max_frames if config.continuous else min(config.repeat_count, max_frames)
+    if config.free_clock:
+        per_frame = 2 * (config.bit_count + config.latch_periods + config.gap_periods)
+        frames = min(frames, max(1, MAX_FREE_CLOCK_TRANSITIONS // per_frame))
     idle = int(config.latch_active_low)
     points: list[Transition] = []
     time = 0
@@ -59,7 +67,28 @@ def simulate(config: FrameConfig, max_frames: int = 4) -> Waveform:
             points.append(point)
 
     bits = config.bits
-    for _ in range(frames):
+    divider = config.divider
+    for _ in range(frames if config.free_clock else 0):
+        # CLK libre : une période de 2N ticks sans interruption ; LATCH part du
+        # dernier front descendant ; DATA et LATCH changent aux fronts descendants.
+        record(bits[0], 0, idle)
+        for index, bit in enumerate(bits):
+            time += divider
+            record(bit, 1, idle)
+            time += divider
+            last = index + 1 == len(bits)
+            record(0 if last else bits[index + 1], 0, 1 - idle if last else idle)
+        for period in range(config.latch_periods):
+            time += divider
+            record(0, 1, 1 - idle)
+            time += divider
+            record(0, 0, 1 - idle if period + 1 < config.latch_periods else idle)
+        for _ in range(config.gap_periods):
+            time += divider
+            record(0, 1, idle)
+            time += divider
+            record(0, 0, idle)
+    for _ in range(0 if config.free_clock else frames):
         record(bits[0], 0, idle)
         for index, bit in enumerate(bits):
             time += config.divider
@@ -170,11 +199,14 @@ def waveform_svg(waveform: Waveform, width: int = 1200) -> str:
             f'<path d="{" ".join(coords)}" fill="none" stroke="{color}" '
             'stroke-width="2" stroke-linejoin="round"/>'
         )
-    # Valeur du bit échantillonné au front montant de CLK.
+    # Valeur du bit échantillonné au front montant de CLK, dans la fenêtre des
+    # bits de chaque trame (en CLK libre, CLK monte aussi pendant LATCH/pause).
+    bit_window = 2 * config.divider * config.bit_count
     if config.bit_count * waveform.frames_simulated <= 104 and width >= 800:
         previous_clk = 0
         for transition in waveform.transitions:
-            if transition.clk and not previous_clk:
+            in_bits = transition.time_ticks % config.frame_duration_ticks < bit_window
+            if transition.clk and not previous_clk and in_bits:
                 pieces.append(
                     f'<text x="{x(transition.time_ticks):.2f}" y="75" font-size="10" '
                     f'text-anchor="middle" fill="#2563eb">{transition.data}</text>'

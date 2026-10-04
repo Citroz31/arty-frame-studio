@@ -516,7 +516,7 @@ def test_demo_continuous_emission_runs_until_stop_with_a_wrapping_counter():
     clock = Clock()
     demo = DemoDevice(clock=clock)
     demo.connect()
-    assert demo.identify().continuous and demo.identify().revision == 3
+    assert demo.identify().continuous and demo.identify().revision == 4
     config = FrameConfig(word=1, bit_count=1, divider=1, latch_ticks=1, gap_ticks=0, repeat_count=0)
     duration = config.frame_duration_ns / 1e9
     assert demo.send(config).busy
@@ -530,3 +530,23 @@ def test_demo_continuous_emission_runs_until_stop_with_a_wrapping_counter():
     assert not stopped.busy
     clock.now *= 2
     assert not demo.status().busy and demo.status().completed == stopped.completed
+
+
+def test_free_clock_requires_revision_four_before_writing():
+    free = FrameConfig(divider=20, latch_ticks=20, gap_ticks=40, free_clock=True)
+    revision_three = [3, 200_000_000 & 0xFFFF, 200_000_000 >> 16, 7, 0, 0]
+    device, endpoint = make_serial(info_handler(revision_three))
+    device.connect()
+    device.identify()
+    with pytest.raises(ValueError, match="CLK libre"):
+        device.send(free)
+    assert not [p for p in endpoint.requests if p.opcode == Opcode.SEND]
+    revision_four = [4, 200_000_000 & 0xFFFF, 200_000_000 >> 16, 15, 0, 0]
+    device, endpoint = make_serial(info_handler(revision_four))
+    device.connect()
+    assert device.identify().free_clock
+    assert device.send(free).ok
+    assert [p for p in endpoint.requests if p.opcode == Opcode.SEND][0].payload[13] == 4
+    demo = DemoDevice()
+    demo.connect()
+    assert demo.identify().free_clock and demo.send(free).busy

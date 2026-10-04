@@ -105,6 +105,16 @@ permet pas toutes les valeurs réelles. Les répétitions vont de 1 à 65535, ou
 sont **continues** (firmware révision 3) : la trame se répète alors sans fin
 jusqu'à STOP, sans dépendre de l'UART ni du PC. STOP interrompt l'émission
 dans tous les cas. Le latch peut être actif haut ou bas.
+
+Avec **CLK libre** (firmware révision 4), CLK ne s'interrompt plus pendant
+LATCH et la pause : c'est une horloge périodique de `200 MHz / N` du début à
+la fin de l'émission, ou jusqu'à STOP en émission continue. LATCH commence au
+front descendant qui suit le dernier bit et dure un nombre entier de
+périodes, comme la pause ; DATA et LATCH changent uniquement aux fronts
+descendants. Un registre à décalage relié à cette horloge décale des zéros
+pendant LATCH et la pause ; utiliser un récepteur prévu pour une horloge
+continue (signal de trame, chip select) ou dont la longueur est exactement
+celle de la trame.
 À la fin ou au STOP, CLK/DATA reviennent à zéro et le latch à son niveau
 inactif selon la polarité choisie. Pendant un reset physique, les ODDR sont
 remis à zéro : ne dépendre pas d'un latch actif bas restant inactif au reset.

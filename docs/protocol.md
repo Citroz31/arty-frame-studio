@@ -25,6 +25,8 @@ révision 1 répond « opcode inconnu » (status 1) ; l'application le traite
 alors comme le firmware historique à 200 MHz, sans test LED.
 L'émission continue (`repeat_count` = 0) existe à partir de la **révision 3** ;
 une révision 2 refuse ce SEND (status 2) et ne produit aucune trame.
+La CLK libre (bit 2 des flags) existe à partir de la **révision 4** ; une
+révision 3 refuse ce SEND (status 2).
 
 SEND correspond au format Python `struct.Struct("<IBHHHHB")` :
 
@@ -36,7 +38,7 @@ SEND correspond au format Python `struct.Struct("<IBHHHHB")` :
 | latch_ticks | uint16 | 1 à 65535 |
 | gap_ticks | uint16 | 0 à 65535 |
 | repeat_count | uint16 | 1 à 65535 trames, ou **0 : continu jusqu'à STOP** |
-| flags | uint8 | bit 0 : LSB first ; bit 1 : latch actif bas |
+| flags | uint8 | bit 0 : LSB first ; bit 1 : latch actif bas ; bit 2 : CLK libre |
 
 Un tick est un demi-cycle de l'horloge du cœur : **2,5 ns** pour le firmware
 de référence à 200 MHz, 3,33 ns à 150 MHz, 5 ns à 100 MHz. Le paquet SEND ne
@@ -69,7 +71,26 @@ coupure) : seule une commande STOP termine CLK, DATA et LATCH. `completed`
 compte alors modulo 65 536 et reboucle sans arrêter l'émission ; sa variation
 entre deux STATUS témoigne de l'activité, pas du total depuis SEND. Fermer le
 port série n'arrête pas la carte. La trame garde sa structure : CLK pulse
-`bit_count` fois, puis s'arrête pendant LATCH et la pause.
+`bit_count` fois, puis s'arrête pendant LATCH et la pause, sauf en CLK libre.
+
+### CLK libre (flags bit 2, révision 4)
+
+CLK garde sa période `2 × divider` ticks de SEND jusqu'à la fin ou STOP, y
+compris pendant LATCH et la pause. Pour que chaque trame commence en phase
+avec CLK, la trame doit durer un nombre entier de périodes :
+
+- LATCH devient actif **au dernier front descendant** des bits (et non une
+  demi-période plus tard) et dure `divider + latch_ticks` ticks : l'hôte
+  envoie `latch_ticks = (2k − 1) × divider` pour un LATCH de k périodes ;
+- la pause vaut `gap_ticks = 2m × divider` (m périodes, éventuellement 0) ;
+- la trame dure `2 × divider × (bits + k + m)` ticks ; DATA et LATCH ne
+  changent qu'aux fronts descendants de CLK.
+
+Le firmware ne vérifie pas cet alignement : l'application arrondit LATCH et
+pause aux périodes entières et `FrameConfig` refuse toute autre valeur. Un
+récepteur qui décale à chaque front montant (registre à décalage) reçoit des
+zéros supplémentaires pendant LATCH et la pause ; LATCH, qui monte juste après
+le dernier bit, capture néanmoins les `bits` derniers bits reçus.
 
 Chronologie à partir du premier bit prêt (origine du chronogramme, indépendante
 de la latence de transport UART) : premier front montant à `divider` ticks,
@@ -114,10 +135,10 @@ de 16 bits de la page demandée :
 
 | Page | Contenu |
 | --- | --- |
-| 0 | révision du firmware (3) |
+| 0 | révision du firmware (4) |
 | 1 | horloge du cœur en Hz, bits 15-0 |
 | 2 | horloge du cœur en Hz, bits 31-16 |
-| 3 | capacités : bit 0 test LED, bit 1 INFO, bit 2 émission continue |
+| 3 | capacités : bit 0 test LED, bit 1 INFO, bit 2 émission continue, bit 3 CLK libre |
 | 4 | identifiant de build, bits 15-0 |
 | 5 | identifiant de build, bits 31-16 |
 
