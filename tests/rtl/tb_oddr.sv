@@ -12,7 +12,7 @@ module tb_oddr;
     frame_engine engine(.clk(clk),.reset(reset),.start(start),.stop(1'b0),
         .word_in(32'h2a),.bits_in(5'd6),.divider_in(16'd1),
         .latch_ticks_in(16'd1),.gap_ticks_in(16'd0),.repeat_in(16'd2),
-        .flags_in(2'd0),.busy(busy),.completed(completed),
+        .flags_in(3'd0),.busy(busy),.completed(completed),
         .data_rise(dr),.data_fall(df),.clock_rise(cr),.clock_fall(cf),
         .latch_rise(lr),.latch_fall(lf));
     ODDR data_ddr(.C(clk),.CE(1'b1),.D1(dr),.D2(df),.R(reset),.S(1'b0),.Q(data_pin));

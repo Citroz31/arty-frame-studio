@@ -224,6 +224,8 @@ module tb_top;
         payload[71:56]=1; payload[103:88]=0; payload[111:104]=4;
         request(2,46,14);
         check_response(132,2,46,0,1,0);
+        // Exactly 10 us: from one clk100 edge to the 1000th following edge.
+        @(posedge clk100);
         edges_at_status=clock_pin_edges;
         repeat(1000) @(posedge clk100);
         if(clock_pin_edges-edges_at_status<1999 || clock_pin_edges-edges_at_status>2001)
