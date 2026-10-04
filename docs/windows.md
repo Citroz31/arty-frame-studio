@@ -13,7 +13,7 @@ la carte. Ce ne sont pas des réponses au protocole Arty Frame Studio.
 
 Le [firmware précompilé](../firmware/prebuilt/arty_frame.bit) est fourni
 dans `firmware/prebuilt/`. Sa synthèse et son routage ont réussi avec une
-**Fmax de 212,77 MHz pour une contrainte de 200 MHz**. Il reste à tester
+**Fmax de 210,79 MHz pour une contrainte de 200 MHz**. Il reste à tester
 son chargement, PING et les sorties sur la carte réelle.
 
 ## Charger le fichier sous Windows
