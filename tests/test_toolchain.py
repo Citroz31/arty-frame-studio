@@ -46,9 +46,10 @@ if name == "yosys":
 elif name == "nextpnr-xilinx":
     fasm = (args[args.index("--fasm") + 1] if "--fasm" in args
             else next(arg[5:] for arg in args if arg.startswith("fasm=")))
-    Path(fasm).write_text("CLBLL_L_X1Y1.SLICEL_X0.A5LUT.INIT[0] = 1\n")
+    seed = args[args.index("--seed") + 1] if "--seed" in args else "none"
+    Path(fasm).write_text(f"CLBLL_L_X1Y1.SLICEL_X0.A5LUT.INIT[0] = 1\n# seed {seed}\n")
     if "--report" in args:
-        Path(args[args.index("--report") + 1]).write_text('{"fmax": {}}')
+        Path(args[args.index("--report") + 1]).write_text(json.dumps({"fmax": {}, "seed": seed}))
     if "--write" in args:
         source = json.loads(Path(args[args.index("--json") + 1]).read_text())
         cells = {}
@@ -76,7 +77,6 @@ elif name == "nextpnr-xilinx":
         Path(args[args.index("--write") + 1]).write_text(json.dumps(routed))
     default_timing = "Info: Max frequency for clock 'core_clock': "
     default_timing += "210.52 MHz (PASS at 200.00 MHz)"
-    seed = args[args.index("--seed") + 1] if "--seed" in args else "none"
     timing = os.environ.get("FAKE_TIMING", default_timing)
     timing = os.environ.get(f"FAKE_TIMING_SEED_{seed}", timing)
     print(timing)
@@ -553,10 +553,74 @@ def test_placement_seed_sweep_keeps_the_first_seed_that_meets_timing(
         "3",
     ]
     assert json.loads(toolchain.receipt.read_text())["nextpnr_seed"] == 3
-    assert sum("graine" in line for line in logs) == 2
+    assert sum("non atteint" in line for line in logs) == 2
+    assert any("graine 3 retenue : 214.00 MHz" in line for line in logs)
     assert (
         "graine 2 : timing 200 MHz non atteint" in (toolchain.build_dir / "build.log").read_text()
     )
+
+
+def test_seed_sweep_continues_until_the_timing_margin(
+    toolchain: Toolchain, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 201 MHz passes 200 MHz but not the 3 % margin (206 MHz): keep sweeping.
+    monkeypatch.setenv(
+        "FAKE_TIMING", "Info: Max frequency for clock 'core_clock': 201.00 MHz (PASS at 200.00 MHz)"
+    )
+    monkeypatch.setenv(
+        "FAKE_TIMING_SEED_3",
+        "Info: Max frequency for clock 'core_clock': 207.10 MHz (PASS at 200.00 MHz)",
+    )
+    logs: list[str] = []
+    toolchain.build(log=logs.append)
+    seeds = [call[call.index("--seed") + 1] for call in history() if call[0] == "nextpnr-xilinx"]
+    assert seeds == ["1", "2", "3"]
+    assert json.loads(toolchain.receipt.read_text())["nextpnr_seed"] == 3
+    assert any("graine 3 retenue : 207.10 MHz" in line for line in logs)
+    assert not list(toolchain.build_dir.rglob("*.best"))
+
+
+def test_best_passing_seed_is_restored_when_none_reaches_the_margin(
+    toolchain: Toolchain, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    failing = "ERROR: Max frequency for clock 'core_clock': 192.09 MHz (FAIL at 200.00 MHz)"
+    monkeypatch.setenv("FAKE_TIMING", failing)
+    monkeypatch.setenv("FAKE_TIMING_EXIT", "1")
+    for seed, mhz in ((2, "200.04"), (4, "204.50"), (6, "202.00")):
+        monkeypatch.setenv(
+            f"FAKE_TIMING_SEED_{seed}",
+            f"Info: Max frequency for clock 'core_clock': {mhz} MHz (PASS at 200.00 MHz)",
+        )
+    logs: list[str] = []
+    toolchain.build(log=logs.append)
+    seeds = [call[call.index("--seed") + 1] for call in history() if call[0] == "nextpnr-xilinx"]
+    assert seeds == [str(seed) for seed in range(1, 9)]
+    assert json.loads(toolchain.receipt.read_text())["nextpnr_seed"] == 4
+    # The FASM used for the bitstream is the one routed with seed 4.
+    fasm = next(toolchain.build_dir.rglob("*.fasm"))
+    assert "# seed 4" in fasm.read_text()
+    assert any("graine 4 retenue, la meilleure : 204.50 MHz" in line for line in logs)
+    assert not list(toolchain.build_dir.rglob("*.best"))
+
+
+def test_zero_margin_keeps_the_first_passing_seed(
+    toolchain: Toolchain, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dataclasses import replace
+
+    toolchain.config = replace(toolchain.config, timing_margin=0)
+    monkeypatch.setenv(
+        "FAKE_TIMING", "Info: Max frequency for clock 'core_clock': 200.04 MHz (PASS at 200.00 MHz)"
+    )
+    toolchain.build()
+    seeds = [call[call.index("--seed") + 1] for call in history() if call[0] == "nextpnr-xilinx"]
+    assert seeds == ["1"]
+
+
+@pytest.mark.parametrize("margin", [-0.01, 0.6, float("nan"), True, "0.03"])
+def test_invalid_timing_margin_is_rejected(margin: object) -> None:
+    with pytest.raises(ValueError, match="timing_margin"):
+        ToolchainConfig(timing_margin=margin)  # type: ignore[arg-type]
 
 
 def test_nextpnr_crash_is_not_retried_with_another_seed(
