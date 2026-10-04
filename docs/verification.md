@@ -1,15 +1,15 @@
 # Vérifications réalisées et limites
 
-Le firmware précompilé, révision 2 du protocole (LED et INFO), a passé la
-synthèse, le placement/routage et le contrôle strict à 200 MHz : **Fmax après
-routage 206,14 MHz** avec la graine de placement 4. Les valeurs exactes de
+Le firmware précompilé, révision 3 du protocole (LED, INFO et émission
+continue), a passé la synthèse, le placement/routage et le contrôle strict à
+200 MHz : **Fmax après routage 212,77 MHz** avec la graine de placement 2. Les valeurs exactes de
 chaque publication sont dans [le manifeste](../firmware/prebuilt/firmware-manifest.json).
 Le chargement de ce firmware et ses sorties physiques restent à tester sur la
 carte.
 
 ## Logiciel et simulation
 
-Les **436 tests Python passent** : paramètres et profils, chronogrammes,
+Les **444 tests Python passent** : paramètres et profils, chronogrammes,
 protocole UART, transport, interface, CLI et protections du flux FPGA.
 Ruff, formatage et mypy vérifient le code Python.
 
@@ -19,13 +19,17 @@ les réponses SEND/STOP perdues avec ou sans réponse STATUS. Un SEND incertain
 n'est pas répété ; l'interface exige STOP confirmé ou reconnexion avant de
 permettre une nouvelle émission.
 
-Les **cinq bancs Icarus Verilog passent** : **1 124 018 vérifications du
-moteur**, **42 cas ODDR**, **38 cas protocole** (dont les formats valides et
-invalides de LED et les six pages INFO), chemin UART complet jusqu'aux
-sorties DATA/CLK/LATCH et liaison UART à **200 MHz / 115200 bauds**. Le banc
-de carte vérifie aussi le test LED par l'UART (motif, retour automatique à
-l'état, retour immédiat), une page INFO, deux resets lorsque l'horloge est
-arrêtée, puis la reprise de fonctionnement.
+Les **cinq bancs Icarus Verilog passent** : **1 413 012 vérifications du
+moteur**, **42 cas ODDR**, **42 cas protocole** (dont les formats valides et
+invalides de LED, les six pages INFO et l'émission continue), chemin UART
+complet jusqu'aux sorties DATA/CLK/LATCH et liaison UART à **200 MHz /
+115200 bauds**. Le banc moteur compare l'émission continue (`repeat_count`
+= 0) au modèle à chaque demi-tick, dont 70 000 trames au-delà des
+rebouclages 16 bits, puis STOP à une phase quelconque. Le banc de carte
+vérifie aussi le test LED par l'UART (motif, retour automatique à l'état,
+retour immédiat), deux pages INFO, une émission continue lancée, observée
+(plus de 100 000 fronts CLK, busy) puis arrêtée par STOP, deux resets
+lorsque l'horloge est arrêtée, puis la reprise de fonctionnement.
 
 Ils couvrent aussi la configuration de firmware personnalisé (table PLL,
 broches Pmod, XDC de référence identique au dépôt, avertissements), le build
@@ -72,10 +76,16 @@ le netlist routé après normalisation des seules entrées S inactives.
 Voir [les adaptations et le contrôle de timing](toolchain.md).
 
 Le build réel a terminé avec un code de sortie **0** et le mapping **ABC9**.
-Les graines 1 à 3 ont échoué après routage (188,7, 199,6 et 165,5 MHz) ; la
-graine **4** donne **206,14306640625 MHz**, **PASS at 200.00 MHz** sur
-`core_clock`. La marge est donc d'environ 3 %, limitée par des chemins du
-moteur de trame où le routage représente 75 à 85 % du délai. Les trois
+La graine 1 a échoué après routage (183,32 MHz) ; la graine **2** donne
+**212,76596069335938 MHz**, **PASS at 200.00 MHz** sur `core_clock`. La
+marge est donc d'environ 6 % (3 % en révision 2, avant que `last_frame` ne
+devienne une bascule), limitée par des chemins du moteur de trame où le
+routage représente environ 75 % du délai (1,20 ns de logique, 3,50 ns de
+routage).
+
+Un build personnalisé à **150 MHz** (run 37207946892, artefact seul) valide
+aussi la période XDC précise : nextpnr applique une contrainte de
+**150,01 MHz** (≥ 150 MHz) et le routage atteint 214,45 MHz. Les trois
 ODDR conservent R→SR après routage. La provenance et les hashes du reçu
 correspondent aux sources qui ont produit le fichier.
 
@@ -83,7 +93,7 @@ Le parser du projet accepte le `.bit` de **3 825 995 octets**, dont
 **3 825 788 octets** de configuration, et son IDCODE **`0x03631093`**. SHA256 :
 
 ```text
-859ad3674bcd2505c6f510436a5f123c3004f208be9fde969338a82e8f47effb
+0ef4ed13170ea9a719a44566177fc480450ff916e73f719af41ab5e452523a8f
 ```
 
 Voir [firmware-manifest.json](../firmware/prebuilt/firmware-manifest.json),
@@ -92,8 +102,8 @@ Voir [firmware-manifest.json](../firmware/prebuilt/firmware-manifest.json),
 et refuse tout résultat final absent ou en échec.
 
 Ce fichier a été publié par le job `publish` du
-[run 37142507552](https://github.com/Citroz31/arty-frame-studio/actions/runs/37142507552),
-à partir du commit `d588999`, après exécution de toute la suite Python sur le
+[run 37207902391](https://github.com/Citroz31/arty-frame-studio/actions/runs/37207902391),
+à partir du commit `822f091`, après exécution de toute la suite Python sur le
 nouveau contenu ([python-tests.log](../firmware/prebuilt/python-tests.log)).
 Les fichiers RTL/XDC/modèle de primitives correspondent exactement au
 manifeste. Les broches UART sont RX=A9, TX=D10. Les fins de lignes LF des `.v`/`.xdc` sont imposées par
