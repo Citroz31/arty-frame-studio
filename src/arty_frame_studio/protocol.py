@@ -33,6 +33,8 @@ LED_MANUAL = 0x80
 INFO_PAGES = 6
 CAPABILITY_LED = 0x0001
 CAPABILITY_INFO = 0x0002
+# Révision 3 : SEND avec repeat_count 0 répète la trame jusqu'à STOP.
+CAPABILITY_CONTINUOUS = 0x0004
 
 
 class StatusCode(IntEnum):
@@ -87,6 +89,10 @@ class FirmwareInfo:
     @property
     def led_test(self) -> bool:
         return bool(self.capabilities & CAPABILITY_LED)
+
+    @property
+    def continuous(self) -> bool:
+        return bool(self.capabilities & CAPABILITY_CONTINUOUS)
 
 
 def led_argument(pattern: int | None) -> int:

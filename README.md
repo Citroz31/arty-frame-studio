@@ -98,8 +98,10 @@ ou `--project-root` pour les commandes FPGA de la CLI.
    pilotage sans carte. Saisir la valeur en binaire, hexadécimal ou décimal,
    choisir 1 à 26 bits et régler la fréquence.
 2. Définir l’ordre MSB/LSB, la polarité du latch, sa durée, la pause après trame et
-   le nombre de répétitions. Le FPGA accepte une seule séquence à la fois ; STOP
-   interrompt celle qui est active.
+   le nombre de répétitions, ou activer **Émission continue jusqu'à Arrêter** :
+   la carte répète alors la trame sans fin (firmware révision 3). Le FPGA
+   accepte une seule séquence à la fois ; **Arrêter** (STOP) interrompt celle
+   qui est active.
 3. Afficher le chronogramme idéal et exporter en SVG, CSV ou VCD (GTKWave). Le
    nombre de répétitions affichées est limité ; cette limite est indiquée sur
    le graphique et s’applique aussi aux exports.
@@ -188,9 +190,12 @@ arty-frame program --toolchain toolchain.json
 
 Exemple de sortie idéale : [chronogramme SVG](examples/chronogramme.svg).
 Les broches par défaut sont **JB1 DATA, JB2 CLK, JB3 LATCH**.
-Le firmware produit une séquence finie localement ; la vitesse UART ne limite
-pas la fréquence de ses fronts. La cadence de nouvelles commandes reste
-limitée par la liaison UART.
+Le firmware produit la séquence localement, finie ou continue jusqu'à STOP ;
+la vitesse UART ne limite pas la fréquence de ses fronts. La cadence de
+nouvelles commandes reste limitée par la liaison UART.
+En ligne de commande : `arty-frame send --port COM7 --profile trame.json
+--continuous` lance l'émission continue, `arty-frame stop --port COM7`
+l'arrête ; `--duration 10` envoie STOP après 10 s, `--wait` jusqu'à Ctrl+C.
 
 Licence MIT.
 Le pilote et la DLL FTDI D2XX restent des dépendances externes sous licence FTDI.

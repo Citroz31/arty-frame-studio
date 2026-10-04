@@ -101,8 +101,10 @@ selon le moteur, sans garantie de flux USB continu.
 Le paramètre N règle la fréquence à `200 MHz / N` et donne une durée de
 demi-cycle de `2,5 ns × N`. Les durées latch/pause sont des multiples de
 2,5 ns. L'application affiche la fréquence obtenue ; un diviseur entier ne
-permet pas toutes les valeurs réelles. Les répétitions sont finies, de 1 à
-65535, et STOP interrompt l'émission. Le latch peut être actif haut ou bas.
+permet pas toutes les valeurs réelles. Les répétitions vont de 1 à 65535, ou
+sont **continues** (firmware révision 3) : la trame se répète alors sans fin
+jusqu'à STOP, sans dépendre de l'UART ni du PC. STOP interrompt l'émission
+dans tous les cas. Le latch peut être actif haut ou bas.
 À la fin ou au STOP, CLK/DATA reviennent à zéro et le latch à son niveau
 inactif selon la polarité choisie. Pendant un reset physique, les ODDR sont
 remis à zéro : ne dépendre pas d'un latch actif bas restant inactif au reset.

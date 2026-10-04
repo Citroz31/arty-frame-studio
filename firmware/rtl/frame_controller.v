@@ -2,9 +2,10 @@
 module frame_controller #(
     parameter integer PACKET_TIMEOUT_CYCLES=40000000,
     // INFO pages 0-5: revision, CORE_HZ low/high, capabilities, BUILD_ID low/high.
-    parameter [15:0] FIRMWARE_REVISION=16'd2,
+    // Capabilities: bit 0 LED, bit 1 INFO, bit 2 continuous SEND (repeat 0).
+    parameter [15:0] FIRMWARE_REVISION=16'd3,
     parameter [31:0] CORE_HZ=32'd200000000,
-    parameter [15:0] CAPABILITIES=16'h0003,
+    parameter [15:0] CAPABILITIES=16'h0007,
     parameter [31:0] BUILD_ID=32'h0
 ) (
     input wire clk, reset,
@@ -114,10 +115,11 @@ module frame_controller #(
             // clock-enable for every configuration and validation bit.
             captured_valid <= request_valid;
             captured_empty <= length == 0;
+            // repeat_count (payload[103:88]) 0 selects continuous emission.
             captured_send_shape <= length == 14
                 && payload[39:32] >= 1 && payload[39:32] <= 26
                 && payload[55:40] != 0 && payload[71:56] != 0
-                && payload[103:88] != 0 && payload[111:104] <= 3;
+                && payload[111:104] <= 3;
             // LED: {manual, 3'b0, pattern[3:0]}. INFO: one page byte, 0 to 5.
             captured_led_shape <= length == 1 && payload[6:4] == 0;
             captured_info_shape <= length == 1 && payload[7:0] <= 5;

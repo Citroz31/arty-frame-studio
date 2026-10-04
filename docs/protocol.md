@@ -23,6 +23,8 @@ La charge utile est limitée à 32 octets.
 LED et INFO existent à partir de la **révision 2** du firmware. Un firmware de
 révision 1 répond « opcode inconnu » (status 1) ; l'application le traite
 alors comme le firmware historique à 200 MHz, sans test LED.
+L'émission continue (`repeat_count` = 0) existe à partir de la **révision 3** ;
+une révision 2 refuse ce SEND (status 2) et ne produit aucune trame.
 
 SEND correspond au format Python `struct.Struct("<IBHHHHB")` :
 
@@ -33,7 +35,7 @@ SEND correspond au format Python `struct.Struct("<IBHHHHB")` :
 | divider | uint16 | 1 à 65535, fréquence = horloge du cœur / divider |
 | latch_ticks | uint16 | 1 à 65535 |
 | gap_ticks | uint16 | 0 à 65535 |
-| repeat_count | uint16 | 1 à 65535 |
+| repeat_count | uint16 | 1 à 65535 trames, ou **0 : continu jusqu'à STOP** |
 | flags | uint8 | bit 0 : LSB first ; bit 1 : latch actif bas |
 
 Un tick est un demi-cycle de l'horloge du cœur : **2,5 ns** pour le firmware
@@ -55,11 +57,19 @@ La réponse reprend `sequence`, utilise `opcode | 0x80`, et porte la charge util
 | 4 | CRC invalide |
 | 5 | version incompatible |
 
-SEND accepté remet `completed` à zéro et lance une séquence finie. SEND pendant
+SEND accepté remet `completed` à zéro et lance la séquence : `repeat_count`
+trames, ou une répétition sans fin si `repeat_count` vaut 0. SEND pendant
 une émission est rejeté. PING et STATUS restent disponibles ; completed compte
 les répétitions dont le latch **et la pause** sont terminés. STOP préserve le
 compteur, interrompt la séquence et ramène les sorties au repos. La durée d’un
 frame est `((2 × bits + 1) × divider + latch_ticks + gap_ticks) × tick`.
+
+En **émission continue**, `busy` reste à 1 jusqu'à STOP (ou un reset/une
+coupure) : seule une commande STOP termine CLK, DATA et LATCH. `completed`
+compte alors modulo 65 536 et reboucle sans arrêter l'émission ; sa variation
+entre deux STATUS témoigne de l'activité, pas du total depuis SEND. Fermer le
+port série n'arrête pas la carte. La trame garde sa structure : CLK pulse
+`bit_count` fois, puis s'arrête pendant LATCH et la pause.
 
 Chronologie à partir du premier bit prêt (origine du chronogramme, indépendante
 de la latence de transport UART) : premier front montant à `divider` ticks,
@@ -104,10 +114,10 @@ de 16 bits de la page demandée :
 
 | Page | Contenu |
 | --- | --- |
-| 0 | révision du firmware (2) |
+| 0 | révision du firmware (3) |
 | 1 | horloge du cœur en Hz, bits 15-0 |
 | 2 | horloge du cœur en Hz, bits 31-16 |
-| 3 | capacités : bit 0 test LED, bit 1 INFO |
+| 3 | capacités : bit 0 test LED, bit 1 INFO, bit 2 émission continue |
 | 4 | identifiant de build, bits 15-0 |
 | 5 | identifiant de build, bits 31-16 |
 

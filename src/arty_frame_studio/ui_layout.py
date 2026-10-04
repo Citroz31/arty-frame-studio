@@ -127,6 +127,7 @@ def build_layout(s: Studio) -> ft.Control:
         _grid((s.frequency, 7), (s.divider, 5)),
         s.frequency_actual,
         _grid((s.latch_ns, 6), (s.gap_ns, 6), (s.repeat, 6)),
+        s.continuous,
         s.timing_summary,
         s.quantization_note,
         _section(

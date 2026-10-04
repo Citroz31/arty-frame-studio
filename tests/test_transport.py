@@ -485,3 +485,48 @@ def test_led_test_refuses_legacy_firmware_without_sending_led():
     with pytest.raises(TransportError, match="révision 1"):
         run_led_test(device, sleep=lambda _: None)
     assert not [p for p in endpoint.requests if p.opcode == Opcode.LED]
+
+
+def test_continuous_send_requires_the_capability_before_writing():
+    continuous = FrameConfig(repeat_count=0)
+    revision_two = [2, 200_000_000 & 0xFFFF, 200_000_000 >> 16, 3, 0, 0]
+    device, endpoint = make_serial(info_handler(revision_two))
+    device.connect()
+    device.identify()
+    with pytest.raises(ValueError, match="émission continue"):
+        device.send(continuous)
+    assert not [p for p in endpoint.requests if p.opcode == Opcode.SEND]
+    # Without INFO the firmware is treated as legacy: refused as well.
+    legacy, legacy_endpoint = make_serial()
+    legacy.connect()
+    with pytest.raises(ValueError, match="révision 1"):
+        legacy.send(continuous)
+    assert not [p for p in legacy_endpoint.requests if p.opcode == Opcode.SEND]
+
+    revision_three = [3, 200_000_000 & 0xFFFF, 200_000_000 >> 16, 7, 0, 0]
+    device, endpoint = make_serial(info_handler(revision_three))
+    device.connect()
+    assert device.identify().continuous
+    assert device.send(continuous).ok
+    send = [p for p in endpoint.requests if p.opcode == Opcode.SEND][0]
+    assert send.payload[11:13] == b"\x00\x00"
+
+
+def test_demo_continuous_emission_runs_until_stop_with_a_wrapping_counter():
+    clock = Clock()
+    demo = DemoDevice(clock=clock)
+    demo.connect()
+    assert demo.identify().continuous and demo.identify().revision == 3
+    config = FrameConfig(word=1, bit_count=1, divider=1, latch_ticks=1, gap_ticks=0, repeat_count=0)
+    duration = config.frame_duration_ns / 1e9
+    assert demo.send(config).busy
+    clock.now = duration * 70_000.5
+    status = demo.status()
+    assert status.busy and status.completed == 70_000 % 65_536
+    with pytest.raises(DeviceError) as error:
+        demo.send(config)
+    assert error.value.device_status.status == StatusCode.BUSY
+    stopped = demo.stop()
+    assert not stopped.busy
+    clock.now *= 2
+    assert not demo.status().busy and demo.status().completed == stopped.completed

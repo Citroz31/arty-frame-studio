@@ -29,7 +29,8 @@ from arty_frame_studio.simulation import export_csv, export_vcd, simulate, wavef
         ({"divider": 65536}, "divider"),
         ({"latch_ticks": 0}, "latch_ticks"),
         ({"gap_ticks": -1}, "gap_ticks"),
-        ({"repeat_count": 0}, "repeat_count"),
+        ({"repeat_count": -1}, "repeat_count"),
+        ({"repeat_count": 65536}, "repeat_count"),
         ({"word": -1}, "valeur"),
         ({"word": 1 << 26}, "valeur"),
         ({"word": True}, "valeur"),
@@ -257,3 +258,23 @@ def test_version_one_profiles_load_as_reference_firmware(tmp_path: Path) -> None
     path.write_text(json.dumps(saved), encoding="utf-8")
     with pytest.raises(ValueError, match="champs"):
         load_profile(path)
+
+
+def test_continuous_emission_has_no_end_and_previews_a_window(tmp_path):
+    import math
+
+    from arty_frame_studio.model import CONTINUOUS, load_profile, save_profile
+    from arty_frame_studio.simulation import waveform_svg
+
+    config = FrameConfig(word=0b101, bit_count=3, divider=2, repeat_count=CONTINUOUS)
+    assert config.continuous and not FrameConfig().continuous
+    assert math.isinf(config.total_duration_ns)
+    waveform = simulate(config, max_frames=3)
+    assert waveform.frames_simulated == 3 and waveform.truncated
+    # The window ends at the start of the next frame, never at an idle stop.
+    assert waveform.transitions[-1].data == 1
+    assert waveform.duration_ticks == 3 * config.frame_duration_ticks
+    assert "émission continue" in waveform_svg(waveform)
+    path = tmp_path / "continu.json"
+    save_profile(config, path)
+    assert load_profile(path) == config
