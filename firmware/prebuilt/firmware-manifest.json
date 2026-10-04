@@ -1,9 +1,9 @@
 {
-  "source_commit": "d588999403b7e9b4da954b160d5d79e2ed5f63d2",
-  "workflow_run": "https://github.com/Citroz31/arty-frame-studio/actions/runs/37142507552",
+  "source_commit": "822f09181a31635a31966f5813e7a77808149880",
+  "workflow_run": "https://github.com/Citroz31/arty-frame-studio/actions/runs/37207902391",
   "part": "xc7a100tcsg324-1",
   "idcode": "0x03631093",
-  "sha256": "859ad3674bcd2505c6f510436a5f123c3004f208be9fde969338a82e8f47effb",
+  "sha256": "0ef4ed13170ea9a719a44566177fc480450ff916e73f719af41ab5e452523a8f",
   "payload_bytes": 3825788,
   "tools": {
     "oss_cad_suite": {
@@ -58,14 +58,14 @@
   "firmware_summary": "c\u0153ur 200 MHz, DATA JB1 (E15), CLK JB2 (E16), LATCH JB3 (D15), LVCMOS33 8 mA FAST, build 0x00000000",
   "timing_scope": "nextpnr register paths; excludes physical GPIO/DDR validation",
   "timing_requirement_mhz": 200.0,
-  "routed_core_fmax_mhz": 206.14306640625,
-  "nextpnr_seed": 4,
+  "routed_core_fmax_mhz": 212.76596069335938,
+  "nextpnr_seed": 2,
   "hardware_validated": false,
   "source_sha256": {
     "firmware/constraints/arty_a7_100t.xdc": "f9ef2861af004291d081500ec96e9ab1982b5d65d68111615b05f256a7437785",
     "firmware/rtl/arty_top.v": "751bd4376233474b4d0e86f792079d7c00919873c9a549a924466318967f89ad",
-    "firmware/rtl/frame_controller.v": "323b6fd3559dc48854bb927450e9b83bfb2aa6ce3514e4d162edfa65b748702e",
-    "firmware/rtl/frame_engine.v": "fe3526aeea5581b61b2e6dd4a68ec242373c578cc2394a707e0aad3fead25b0b",
+    "firmware/rtl/frame_controller.v": "56b992661725887c3a42752726f424458f2f16ae9286a83408ec52e70cddf2e8",
+    "firmware/rtl/frame_engine.v": "a0a3f46c45224b9f36a1d06a24f8a3837f22e4af14cec1a127397239ae74f59b",
     "firmware/rtl/packet_rx.v": "5d0c44fa0e867ae519f7e78f88a6f5e2be61c73b5250d79f6b34ca11270d6587",
     "firmware/rtl/uart_rx.v": "8d609b14214787654cf21e86f13445192b880703d99bbcc9a89ba451e85ba616",
     "firmware/rtl/uart_tx.v": "c88696f9cdb6b7b16c44604ab33fd0934b7bfbfe58a2d23aa8be8fbc13478acd",
