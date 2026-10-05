@@ -20,6 +20,8 @@ fusions faites par le propriétaire du dépôt ne sont cités que pour le contex
 | CLK libre | Horloge sans interruption pendant LATCH et la pause (firmware révision 4). |
 | Timing 200 MHz | Chemins critiques réenregistrés, balayage des graines de placement avec marge de 3 %. |
 | Saisie de trame | Binaire par défaut, nombre de bits calculé automatiquement, 26 bits maximum. |
+| Journal Windows | Plus d'erreur « toolchain.json » ni de liaison UART fermée pour rien ; avertissements OneDrive et chemins longs. |
+| Oscilloscope | Onglet de mesure avec un Keysight InfiniiVision (DSOX1202A) en LAN ou USB, ou simulé : fréquence, période, déclenchement, Auto scale, Run/Single, curseurs, export. |
 | Revues | Revues des trois mises à jour de Codex et rapports PDF. |
 
 ## Chronologie des commits
@@ -75,6 +77,14 @@ Fusionné dans `main` par la pull request [#2](https://github.com/Citroz31/arty-
 | --- | --- |
 | [`86f3856`](https://github.com/Citroz31/arty-frame-studio/commit/86f38568a4a533f2cfec2fec63e23589a94e5eea) | Notation binaire par défaut. Le nombre de bits suit les chiffres saisis, zéros de tête compris, et est limité à 26 avec un message explicite. Les conversions entre notations conservent la longueur. Guide utilisateur et README mis à jour, 15 tests ajoutés. |
 
+### 6. Erreurs du journal Windows et oscilloscope (5 octobre)
+
+| Commit | Contenu |
+| --- | --- |
+| [`01bb7f0`](https://github.com/Citroz31/arty-frame-studio/commit/01bb7f0f3857c596d8392531cc719fdb660c1cd4) | Sans `toolchain.json` (cas normal sous Windows), les boutons de la chaîne locale sont désactivés avec une explication au lieu d'échouer ; la configuration est lue avant de fermer la liaison UART ; message explicite ; bandeau refermable ; avertissements OneDrive et chemins longs au démarrage. |
+| [`e5b0214`](https://github.com/Citroz31/arty-frame-studio/commit/e5b0214d85f3222fe81659dedf238bfdbe0b85a9) | Onglet **Oscilloscope** : pilote SCPI LAN (port 5025) et USB/VISA, oscilloscope simulé, mesures de fréquence et période, déclenchement, calibres avec loupes, Auto scale, préréglage de la trame, Run/Stop/Single, curseurs, export CSV et PNG, avertissements de sonde ; commandes `scope` et `scope-list`. |
+| [`e732b0e`](https://github.com/Citroz31/arty-frame-studio/commit/e732b0e2582882063e178fcccd12fae5dacf9e2f) | Documentation : [Oscilloscope](oscilloscope.md), guide utilisateur, guide Windows et README. |
+
 ## Détail des fonctions ajoutées
 
 ### Firmware (RTL)
@@ -114,12 +124,13 @@ Fusionné dans `main` par la pull request [#2](https://github.com/Citroz31/arty-
 
 ## Vérification
 
-| Niveau | Résultat sur le dernier commit (`86f3856`) |
+| Niveau | Résultat sur le dernier commit (`e732b0e`) |
 | --- | --- |
-| Tests Python | 501 tests, Linux et Windows natif ; Ruff et mypy |
+| Tests Python | 644 tests, Linux et Windows natif ; Ruff et mypy |
 | Bancs RTL | 6 bancs Icarus : moteur (≈ 2 millions de contrôles par demi-tick), ODDR, protocole, SIPO, carte complète par l'UART, UART à 200 MHz |
 | Compilation réelle | Firmware révision 4 : 210,79 MHz routés pour 200 MHz exigés |
-| Carte réelle | **Non testé** |
+| Carte réelle | Retour utilisateur : chargement SRAM sous Windows, firmware révision 4, test LED et DATA à 10 MHz sur JB1 observée au DSOX1202A |
+| Oscilloscope | Pilote validé avec l'oscilloscope simulé et des liaisons LAN/VISA simulées ; **à essayer sur le DSOX1202A** |
 
 ## Revues des mises à jour de Codex
 
@@ -130,10 +141,11 @@ Fusionné dans `main` par la pull request [#2](https://github.com/Citroz31/arty-
 
 ## Pistes restantes
 
-1. **Valider sur la carte** : PING, INFO (« révision 4 »), test LED, puis
-   CLK, DATA et LATCH à l'oscilloscope, en commençant à basse fréquence.
-2. **Refaire les captures d'écran** de la documentation, qui montrent encore
-   l'ancienne saisie en hexadécimal.
+1. **Essayer l'onglet Oscilloscope sur le DSOX1202A** en LAN puis en USB, et
+   mesurer CLK, DATA et LATCH avec des sondes ×10 et le ressort de masse.
+2. **Actualiser `uv.lock`** (`uv lock`) pour PyVISA : PyPI n'était pas
+   joignable depuis l'environnement de Claude. `pip` et `start-windows.cmd`
+   ne sont pas concernés.
 3. **Rendre la marge à 200 MHz indépendante du placement** : seules 3 graines
    sur 8 passent. Enregistrer un cycle plus tôt la décision de fin de trame.
 4. **Arrêt propre en fin de trame**, **mise à jour du mot sans arrêter CLK**,
