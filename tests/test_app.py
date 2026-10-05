@@ -56,7 +56,13 @@ def run_async(coroutine):
 def test_controls_construct_and_draw_chronogramme(tmp_path):
     studio = make_studio(tmp_path)
     assert studio.current_config == FrameConfig()
-    assert len(studio.tabs.tabs) == 4
+    assert [tab.text for tab in studio.tabs.tabs] == [
+        "Pilotage",
+        "Chronogramme",
+        "Oscilloscope",
+        "FPGA",
+        "Journal",
+    ]
     curves = {shape.data for shape in studio.wave_canvas.shapes if shape.data}
     assert curves == {"signal:data", "signal:clk", "signal:latch"}
     labels = {shape.text for shape in studio.wave_canvas.shapes if hasattr(shape, "text")}
@@ -1083,3 +1089,63 @@ def test_invalid_binary_draft_keeps_stop_available_for_an_active_emission(tmp_pa
         assert not studio.device_status.busy and not studio.page.messages
 
     run_async(exercise())
+
+
+def test_local_toolchain_buttons_wait_for_a_toolchain_file(tmp_path):
+    studio = make_studio(tmp_path)
+    # No toolchain.json: the Linux/WSL tools cannot run, so they are disabled
+    # with an explanation instead of failing after a click.
+    assert studio.build_button.disabled and studio.program_button.disabled
+    assert studio.doctor_button.disabled
+    assert studio.toolchain_note.visible
+    assert "Charger le .bit sous Windows" in studio.toolchain_note.value
+    (tmp_path / "toolchain.json").write_text("{}", encoding="utf-8")
+    studio._toolchain_path_changed()
+    assert not studio.toolchain_note.visible
+    assert not studio.doctor_button.disabled and not studio.program_button.disabled
+
+
+def test_programming_without_toolchain_keeps_the_uart_session(tmp_path, monkeypatch):
+    from arty_frame_studio.transport import SerialDevice
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        bitstream = tmp_path / "arty_frame.bit"
+        bitstream.write_bytes(b"bit")
+        studio.bitstream_path.value = str(bitstream)
+        monkeypatch.setattr(SerialDevice, "connected", property(lambda self: True))
+        studio.device = SerialDevice("COM7")
+        closed = []
+
+        async def toggle(_: object = None) -> None:
+            closed.append(True)
+
+        monkeypatch.setattr(studio, "_toggle_connection", toggle)
+        await studio._program(None)
+        assert not closed
+        assert any("non configurée" in line for line in studio.log_lines)
+        await studio._build(None)
+        assert not studio.tool_pending
+        assert sum("Chaîne FPGA locale non configurée" in line for line in studio.log_lines) == 2
+
+    run_async(exercise())
+
+
+def test_tool_messages_can_be_dismissed(tmp_path):
+    studio = make_studio(tmp_path)
+    studio.tool_panel.visible = True
+    studio._dismiss_tool_panel()
+    assert not studio.tool_panel.visible
+
+
+def test_workspace_warnings_flag_onedrive_and_long_paths():
+    from arty_frame_studio.app import workspace_warnings
+
+    assert workspace_warnings(Path("C:/Arty")) == []
+    synced = Path(
+        "C:/Users/utilisateur/OneDrive - Entreprise/Documents/Projets/"
+        "Programmation/Python/arty-frame-studio-main_v2/arty-frame-studio-main"
+    )
+    warnings = workspace_warnings(synced)
+    assert len(warnings) == 2
+    assert "OneDrive" in warnings[0] and "260" in warnings[1]

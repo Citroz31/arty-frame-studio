@@ -19,12 +19,14 @@ if errorlevel 1 goto failed
 ".venv\Scripts\python.exe" -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"
 if errorlevel 1 goto missing_python
 if /i "%~1"=="--setup-only" goto install
-if exist ".venv\arty-frame-studio.ready" goto launch
+rem Le numero du marqueur change avec les dependances (2 : PyVISA pour l'oscilloscope) :
+rem une installation existante est completee au lancement suivant.
+if exist ".venv\arty-frame-studio-2.ready" goto launch
 
 :install
 ".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -e .
 if errorlevel 1 goto failed
-type nul > ".venv\arty-frame-studio.ready"
+type nul > ".venv\arty-frame-studio-2.ready"
 if /i "%~1"=="--setup-only" exit /b 0
 
 :launch

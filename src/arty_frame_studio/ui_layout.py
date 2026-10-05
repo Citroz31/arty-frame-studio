@@ -343,8 +343,8 @@ def build_layout(s: Studio) -> ft.Control:
         ],
     )
     local = _section(
-        "Outils locaux",
-        "Facultatif : outils compatibles déjà configurés",
+        "Outils locaux (Linux / WSL)",
+        "Facultatif : chaîne open source configurée par toolchain.json",
         [
             ft.Text(
                 "Yosys → nextpnr/openXC7 → Project X-Ray. Ce parcours est réservé à "
@@ -352,6 +352,7 @@ def build_layout(s: Studio) -> ft.Control:
                 size=12,
                 color=MUTED,
             ),
+            s.toolchain_note,
             _path(s, s.toolchain_path, ["json"]),
             ft.Row([s.doctor_button, s.build_button], wrap=True),
             s.doctor_results,
@@ -389,6 +390,7 @@ def build_layout(s: Studio) -> ft.Control:
         tabs=[
             ft.Tab(text="Pilotage", icon=ft.Icons.TUNE, content=control_tab),
             ft.Tab(text="Chronogramme", icon=ft.Icons.SHOW_CHART, content=waveform_tab),
+            ft.Tab(text="Oscilloscope", icon=ft.Icons.MONITOR_HEART, content=s.scope_panel.build()),
             ft.Tab(text="FPGA", icon=ft.Icons.MEMORY, content=fpga_tab),
             ft.Tab(text="Journal", icon=ft.Icons.TERMINAL, content=journal_tab),
         ],
@@ -397,7 +399,17 @@ def build_layout(s: Studio) -> ft.Control:
         animation_duration=150,
     )
     s.tool_panel = ft.Container(
-        ft.Column([s.tool_progress, s.tool_message], spacing=8),
+        ft.Row(
+            [
+                ft.Column([s.tool_progress, s.tool_message], spacing=8, expand=True),
+                ft.IconButton(
+                    ft.Icons.CLOSE,
+                    tooltip="Masquer ce message (le journal le conserve)",
+                    on_click=s._dismiss_tool_panel,
+                ),
+            ],
+            vertical_alignment=ft.CrossAxisAlignment.START,
+        ),
         padding=12,
         bgcolor=PANEL,
         border_radius=12,

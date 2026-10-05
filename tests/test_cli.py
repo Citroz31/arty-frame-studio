@@ -19,6 +19,33 @@ def test_profile_simulation_and_demo_are_usable_from_cli(tmp_path: Path, capsys)
     assert "Terminé : 1 trame(s)" in capsys.readouterr().out
 
 
+def test_scope_demo_measures_the_profile_frame(tmp_path: Path, capsys) -> None:
+    profile = tmp_path / "frame.json"
+    points = tmp_path / "scope.csv"
+    assert main(["profile", str(profile)]) == 0
+    assert main(["scope", "--demo", "--profile", str(profile), "--csv", str(points)]) == 0
+    out = capsys.readouterr().out
+    assert "DSO-X 1202A" in out
+    assert "CH2 : fréquence 10.00 MHz · période 100.0 ns" in out
+    assert "CH1 : fréquence 5.000 MHz" in out
+    assert points.read_text(encoding="utf-8").startswith("temps_CH1_s,CH1_V,temps_CH2_s,CH2_V")
+    # The simulator has no screen to copy: reported as an error, not a crash.
+    assert main(["scope", "--demo", "--png", str(tmp_path / "screen.png")]) == 1
+    assert "Copie d'écran indisponible" in capsys.readouterr().err
+
+
+def test_scope_listing_and_bad_addresses(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "list_visa_resources", lambda: [])
+    assert main(["scope-list"]) == 1
+    assert "Keysight IO Libraries" in capsys.readouterr().err
+    resource = "USB0::0x2A8D::0x0396::CN12345678::0::INSTR"
+    monkeypatch.setattr(cli, "list_visa_resources", lambda: [resource])
+    assert main(["scope-list"]) == 0
+    assert capsys.readouterr().out.strip() == resource
+    assert main(["scope", "--lan", "bad host!"]) == 1
+    assert "Adresse IP" in capsys.readouterr().err
+
+
 def test_invalid_profile_and_missing_toolchain_return_errors(tmp_path: Path, capsys) -> None:
     assert main(["simulate", "--profile", str(tmp_path / "missing.json")]) == 1
     assert main(["doctor", "--toolchain", str(tmp_path / "absent.json")]) == 1

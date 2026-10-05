@@ -19,11 +19,15 @@ son chargement, PING et les sorties sur la carte réelle.
 ## Charger le fichier sous Windows
 
 1. [Télécharger le ZIP mis à jour](https://github.com/Citroz31/arty-frame-studio/archive/refs/heads/main.zip)
-   et l'extraire dans un dossier accessible à votre compte. Le ZIP contient
+   et l'extraire dans un dossier local court, **hors OneDrive**, par exemple
+   `C:\ArtyFrameStudio` : la synchronisation peut verrouiller `.venv` ou les
+   exports, et Windows limite les chemins à 260 caractères. Le journal le
+   signale au démarrage. Le ZIP contient
    `firmware/prebuilt/arty_frame.bit`. Installer Python **3.11 ou plus récent pour
    votre utilisateur**, puis double-cliquer sur **`start-windows.cmd`**.
-   Après une mise à jour, `start-windows.cmd --setup-only`, depuis un terminal
-   ordinaire, actualise les dépendances. La simulation fonctionne sans carte.
+   Après une mise à jour qui ajoute une dépendance, le lanceur la complète au
+   démarrage suivant ; `start-windows.cmd --setup-only`, depuis un terminal
+   ordinaire, actualise aussi les dépendances. La simulation fonctionne sans carte.
 2. Brancher l'Arty sur **USB PROG/UART** et fermer les autres applications JTAG
    ou série, notamment Adept et les terminaux qui utilisent COM7.
 3. Ouvrir **FPGA**, section **1 · Charger le firmware**, puis **Détecter le FPGA sous
@@ -52,8 +56,11 @@ son chargement, PING et les sorties sur la carte réelle.
 La programmation charge uniquement la **SRAM volatile**, pas la flash.
 **Recharger le `.bit` après chaque coupure d'alimentation.** Le programme
 présent en flash, par exemple une démonstration d'origine, peut revenir au
-redémarrage. Ne pas utiliser **Compiler localement** ou **Programmer la SRAM**
-du flux d'outils externes pour ce parcours de chargement Windows natif.
+redémarrage. Les boutons de la section **Outils locaux (Linux / WSL)**,
+**Vérifier les outils**, **Compiler localement** et **Programmer via la chaîne
+locale**, ne servent pas à ce parcours : ils restent grisés tant que
+`toolchain.json` n'existe pas, ce fichier étant créé par
+`scripts/bootstrap-fpga-tools.sh` sous Linux/WSL.
 
 Pour changer l'horloge du cœur ou les broches sans outil FPGA sur le PC :
 onglet **FPGA → Personnaliser le firmware**, choisir les réglages, renseigner un
@@ -111,6 +118,7 @@ nécessaire pour ce parcours.
 | PING expire après chargement | Vérifier le fichier chargé, COM7, la LED PLL et que le bouton rouge RESET n'est pas maintenu ; enregistrer le journal. |
 | Des octets sont reçus sans réponse compatible | Vérifier que le bon firmware a été chargé depuis la dernière coupure ; le texte d'une autre démo n'est pas une réponse PING. |
 | PING répond | Le firmware dialogue avec l'application ; commencer l'essai des sorties à fréquence réduite. |
+| « Chaîne FPGA locale non configurée : toolchain.json est absent » | Normal sous Windows : utiliser **Charger le .bit sous Windows** ou **Compiler sur GitHub**. Les anciennes versions affichaient « Configuration illisible … [Errno 2] » et fermaient la liaison UART ; ce n'est plus le cas. |
 
 Les chronogrammes de l'application sont idéaux. La compilation à 200 MHz
 ne remplace pas une mesure CLK/DATA/LATCH et des marges du récepteur.

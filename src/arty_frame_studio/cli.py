@@ -17,6 +17,18 @@ from .firmware_config import FirmwareBuildConfig
 from .model import CONTINUOUS, FrameConfig, load_profile, save_profile, with_free_clock
 from .prebuilt import validate_programming_image, verify_prebuilt_firmware
 from .remote_build import GitHubBuildClient, RemoteBuildTarget
+from .scope import (
+    KeysightScope,
+    SocketTransport,
+    VisaTransport,
+    describe,
+    frame_preset,
+    list_visa_resources,
+    measurement_warnings,
+    short_si,
+    write_acquisition_csv,
+)
+from .scope_sim import SimulatedKeysight, signal_source
 from .simulation import export_csv, export_vcd, simulate, waveform_svg
 from .toolchain import Toolchain, ToolchainConfig
 from .transport import (
@@ -134,6 +146,26 @@ def _parser() -> argparse.ArgumentParser:
         metavar="SECONDES",
         help="Envoyer STOP après cette durée (utile en émission continue)",
     )
+    scope = commands.add_parser(
+        "scope", help="Oscilloscope Keysight : fréquence, période et niveaux des voies"
+    )
+    link = scope.add_mutually_exclusive_group(required=True)
+    link.add_argument("--lan", metavar="ADRESSE", help="Adresse IP (SCPI, port 5025)")
+    link.add_argument("--visa", metavar="RESSOURCE", help="USB0::0x2A8D::…::INSTR (PyVISA)")
+    link.add_argument(
+        "--demo", action="store_true", help="Oscilloscope simulé : DATA sur CH1, CLK sur CH2"
+    )
+    scope.add_argument("--profile", type=Path, help="Trame observée en démonstration")
+    scope.add_argument(
+        "--preset",
+        action="store_true",
+        help="Régler pour la trame (1 V/div, 5 périodes de CLK, déclenchement sur CH2)",
+    )
+    scope.add_argument("--autoscale", action="store_true", help="Lancer Auto scale avant")
+    scope.add_argument("--timeout", type=float, default=2.0, help="Attente du déclenchement (s)")
+    scope.add_argument("--csv", type=Path, help="Exporter les points de l'acquisition")
+    scope.add_argument("--png", type=Path, help="Copie d'écran de l'oscilloscope réel")
+    commands.add_parser("scope-list", help="Lister les instruments VISA (USB et LAN)")
     for name in ("status", "stop"):
         item = commands.add_parser(name, help="Lire l’état" if name == "status" else "Arrêter")
         item.add_argument("--port", required=True)
@@ -165,12 +197,66 @@ def _firmware_settings(args: argparse.Namespace) -> FirmwareBuildConfig:
     return replace(firmware, **changes)
 
 
+def _scope(args: argparse.Namespace) -> int:
+    config = load_profile(args.profile) if args.profile else FrameConfig()
+    mapping: dict[int, str | None] = {1: "data", 2: "clk"}
+    transport: Any
+    if args.lan:
+        transport = SocketTransport(args.lan)
+    elif args.visa:
+        transport = VisaTransport(args.visa)
+    else:
+        source = signal_source(config)
+        transport = SimulatedKeysight(lambda: source, lambda: mapping)
+    scope = KeysightScope(transport)
+    try:
+        print(f"Oscilloscope : {scope.identify()}")
+        if args.preset or args.demo:
+            scope.apply_settings(frame_preset(config, mapping, scope.read_settings()))
+        if args.autoscale:
+            scope.autoscale()
+        acquisition = scope.capture(timeout=args.timeout)
+        settings = acquisition.settings
+        trigger = settings.trigger
+        print(
+            f"Base de temps {short_si(settings.time_scale, 's')}/div · déclenchement "
+            f"CH{trigger.source} {'montant' if trigger.slope == 'POS' else 'descendant'} "
+            f"{trigger.level:.3g} V · {'déclenchée' if acquisition.triggered else 'sans front'}"
+        )
+        for channel, values in sorted(acquisition.measurements.items()):
+            print(f"CH{channel} : {describe(values)}")
+        for warning in measurement_warnings(acquisition, mapping if args.demo else {}):
+            print(f"Attention : {warning}", file=sys.stderr)
+        if args.csv:
+            print(f"Points : {write_acquisition_csv(acquisition, args.csv)}")
+        if args.png:
+            args.png.parent.mkdir(parents=True, exist_ok=True)
+            args.png.write_bytes(scope.screenshot())
+            print(f"Copie d'écran : {args.png}")
+    finally:
+        scope.close()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "ports":
             for port in list_ports():
                 print(f"{port.device}\t{port.description}\t{port.hwid}")
+        elif args.command == "scope":
+            return _scope(args)
+        elif args.command == "scope-list":
+            resources = list_visa_resources()
+            for resource in resources:
+                print(resource)
+            if not resources:
+                print(
+                    "Aucun instrument VISA : vérifier le câble USB arrière et Keysight IO "
+                    "Libraries Suite, ou utiliser scope --lan ADRESSE.",
+                    file=sys.stderr,
+                )
+                return 1
         elif args.command == "firmware-check":
             manifest = verify_prebuilt_firmware(args.project_root)
             print("Firmware fourni : SHA256, sources RTL/XDC et timing du cœur vérifiés.")

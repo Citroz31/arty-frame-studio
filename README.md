@@ -22,6 +22,11 @@ Le guide détaille l'installation Windows, le chargement du firmware, le câblag
 et les chronogrammes. Deux boutons chargent directement un **exemple SIPO**
 ou une **CLK seule à 10 MHz**, sans lancer d'émission.
 
+L'onglet **[Oscilloscope](docs/oscilloscope.md)** affiche DATA et CLK depuis un
+**Keysight InfiniiVision** (DSOX1202A) en LAN ou USB, ou en simulation : mesures
+de **fréquence et période**, déclenchement, calibres et **Auto scale**,
+rafraîchissement **Run / Single** et **curseurs**, avec export CSV.
+
 Le [récapitulatif des apports de Claude](docs/recapitulatif-claude.md) liste
 chaque commit et ce qu'il apporte.
 
@@ -68,6 +73,7 @@ Voir [le matériel](docs/hardware.md) et [la chaîne FPGA](docs/toolchain.md).
 ![Interface de pilotage](docs/images/pilotage-interface.png)
 
 [Chronogramme](docs/images/chronogramme-interface.png) ·
+[Écran Oscilloscope](docs/images/oscilloscope-ecran.png) ·
 [Chargement Windows](docs/images/fpga-interface.png) ·
 [Petite fenêtre](docs/images/pilotage-petite-fenetre.png)
 
@@ -142,6 +148,10 @@ ou `--project-root` pour les commandes FPGA de la CLI.
    le firmware avant l'envoi de trames. Dans la configuration observée,
    ce port est **COM7**. L'application démarre connectée en démo : cliquer
    d'abord sur **Déconnecter** pour changer de mode.
+6. Pour vérifier les sorties, ouvrir l'onglet **Oscilloscope**, connecter le
+   Keysight (LAN ou USB), puis **Préréglage de la trame** et **Run** : la
+   fréquence et la période de CLK s'affichent sous l'écran. Voir
+   [Oscilloscope](docs/oscilloscope.md).
 
 La programmation proposée charge la **SRAM volatile** : il faut reprogrammer
 après une coupure d’alimentation. Une programmation de la flash n’est pas effectuée.
@@ -227,6 +237,9 @@ arty-frame stop --port /dev/ttyUSB1
 arty-frame doctor --toolchain toolchain.json
 arty-frame build --toolchain toolchain.json --firmware-config fw.json
 arty-frame program --toolchain toolchain.json
+arty-frame scope-list
+arty-frame scope --lan 192.168.1.50 --preset --csv exports/mesure.csv
+arty-frame scope --demo --profile examples/frame_sipo_8bits_10mhz.json
 ```
 
 Exemple de sortie idéale : [chronogramme SVG](examples/chronogramme.svg).

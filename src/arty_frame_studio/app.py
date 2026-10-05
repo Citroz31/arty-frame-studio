@@ -44,6 +44,7 @@ from .model import (
 from .prebuilt import validate_programming_image
 from .protocol import DeviceStatus, FirmwareInfo, Opcode
 from .remote_build import GitHubBuildClient, RemoteBuildTarget
+from .scope_view import ScopePanel
 from .simulation import Waveform, export_csv, export_vcd, simulate, waveform_svg
 from .toolchain import Toolchain, ToolchainConfig
 from .transport import CommandTimeout, DemoDevice, SerialDevice, list_ports, run_led_test
@@ -95,6 +96,30 @@ def pin_options() -> list[Any]:
         )
         for name, pin in PMOD_PINS.items()
     ]
+
+
+# Au-delà, un chemin de projet laisse peu de marge sous la limite Windows de
+# 260 caractères (.venv, Flet, build/runs/...).
+LONG_PROJECT_PATH = 100
+
+
+def workspace_warnings(root: Path) -> list[str]:
+    """Emplacements du projet qui causent souvent des erreurs sous Windows."""
+    text = str(root)
+    warnings = []
+    if "onedrive" in text.lower():
+        warnings.append(
+            "Projet placé dans OneDrive : la synchronisation peut verrouiller ou dupliquer "
+            ".venv, build et exports. Pour éviter ces erreurs, extraire le projet dans un "
+            "dossier local non synchronisé, par exemple C:\\ArtyFrameStudio."
+        )
+    if len(text) > LONG_PROJECT_PATH:
+        warnings.append(
+            f"Chemin du projet long ({len(text)} caractères) : la limite Windows de 260 "
+            "caractères peut faire échouer installations et compilations. Préférer un "
+            "chemin court."
+        )
+    return warnings
 
 
 def firmware_missing(info: FirmwareInfo) -> str:
@@ -305,6 +330,13 @@ class Studio:
         self.log_flush_handle: asyncio.TimerHandle | None = None
         self.chart_width = 1200.0
         self._create_controls()
+        # Onglet Oscilloscope ; en démo, il observe la trame décrite dans le Pilotage.
+        self.scope_panel = ScopePanel(
+            page,
+            project_root=self.project_root,
+            log=self._log,
+            frame_source=lambda: self.current_config,
+        )
 
     def _field(
         self,
@@ -506,8 +538,11 @@ class Studio:
             "Configuration de la chaîne open source (JSON)",
             str(self.project_root / "toolchain.json"),
             width=650,
-            on_change=lambda _: None,
+            on_change=self._toolchain_path_changed,
         )
+        # Shown while no toolchain.json exists: the local buttons stay disabled
+        # instead of failing (and closing the UART) after a click.
+        self.toolchain_note = ft.Text(size=12, color=AMBER, visible=False, selectable=True)
         self.bitstream_path = self._field(
             "Bitstream validé de ce projet (.bit)",
             str(self.project_root / "build" / "arty_frame.bit"),
@@ -525,7 +560,7 @@ class Studio:
             on_click=self._build,
         )
         self.program_button = ft.ElevatedButton(
-            "Programmer la SRAM",
+            "Programmer via la chaîne locale",
             icon=ft.Icons.MEMORY,
             on_click=self._program,
             style=ft.ButtonStyle(bgcolor=AMBER, color=BG),
@@ -653,7 +688,7 @@ class Studio:
         return build_layout(self)
 
     def _open_fpga(self, _: Any = None) -> None:
-        self.tabs.selected_index = 2
+        self.tabs.selected_index = 3
         self._update()
 
     def _open_control(self, _: Any = None) -> None:
@@ -1037,6 +1072,19 @@ class Studio:
         ):
             control.disabled = self.tool_pending
         self.program_button.disabled = self.tool_pending or self.serial_pending
+        # Local Yosys/nextpnr tools need toolchain.json (Linux/WSL bootstrap).
+        local_ready = self._toolchain_ready()
+        if not local_ready:
+            self.doctor_button.disabled = self.build_button.disabled = True
+            self.program_button.disabled = True
+        self.toolchain_note.visible = not local_ready
+        self.toolchain_note.value = (
+            ""
+            if local_ready
+            else "Chaîne locale non configurée (toolchain.json absent) : ces boutons servent "
+            "sous Linux/WSL après scripts/bootstrap-fpga-tools.sh. Sous Windows, utiliser "
+            "« Charger le .bit sous Windows » ou « Compiler sur GitHub »."
+        )
         self.jtag_probe_button.disabled = self.tool_pending or self.serial_pending
         self.jtag_program_button.disabled = self.tool_pending or self.serial_pending
         try:
@@ -1593,6 +1641,23 @@ class Studio:
         path = self._path(self.toolchain_path.value)
         return Toolchain(ToolchainConfig.from_json(path), self.project_root)
 
+    def _toolchain_ready(self) -> bool:
+        """A toolchain configuration file exists; its content is checked on use."""
+        try:
+            return self._path(self.toolchain_path.value).is_file()
+        except (OSError, ValueError, RuntimeError):
+            return False
+
+    def _toolchain_path_changed(self, _: Any = None) -> None:
+        self._buttons()
+        self._update()
+
+    def _dismiss_tool_panel(self, _: Any = None) -> None:
+        """Hide the last tool result once read; the journal keeps the details."""
+        if not self.tool_pending:
+            self.tool_panel.visible = False
+            self._update()
+
     def _worker_log(self, message: str) -> None:
         if self.loop is not None and not self.closing:
             self.loop.call_soon_threadsafe(self._queue_worker_log, str(message))
@@ -1773,13 +1838,14 @@ class Studio:
             return
         try:
             firmware = self._firmware_settings()
-        except ValueError as exc:
+            chain = self._toolchain()
+        except (ValueError, OSError, RuntimeError) as exc:
             self._error("Compilation FPGA", exc)
             return
         self._log(f"Compilation locale : {firmware.summary()}.")
         result = await self._tool_action(
             "Compilation FPGA",
-            lambda: self._toolchain().build(log=self._worker_log, firmware=firmware),
+            lambda: chain.build(log=self._worker_log, firmware=firmware),
         )
         if result is not None:
             self._select_firmware(Path(result), firmware)
@@ -1869,6 +1935,9 @@ class Studio:
                     "Bitstream introuvable. Compilez ce projet pour produire "
                     "un bitstream validé, puis utilisez le fichier créé."
                 )
+            # Read the toolchain configuration first: a missing toolchain.json
+            # must not close a working UART session for nothing.
+            chain = self._toolchain()
         except Exception as exc:
             self._error("Programmation FPGA", exc)
             return
@@ -1878,7 +1947,7 @@ class Studio:
             await self._toggle_connection()
 
         def program() -> bool:
-            self._toolchain().program(bitstream, log=self._worker_log)
+            chain.program(bitstream, log=self._worker_log)
             return True
 
         result = await self._tool_action("Programmation SRAM", program, blocks_uart=True)
@@ -1907,6 +1976,8 @@ class Studio:
 
     async def shutdown(self, _: Any = None) -> None:
         self.closing = True
+        # Rend la main à l'oscilloscope (Run) avant de fermer la carte.
+        await self.scope_panel.shutdown()
         if self.log_flush_handle is not None:
             self.log_flush_handle.cancel()
             self.log_flush_handle = None
@@ -1927,6 +1998,8 @@ class Studio:
         self.page.add(self.layout())
         self._changed()
         self._log("Arty Frame Studio · mode démo disponible sans carte et sans outils FPGA.", BLUE)
+        for warning in workspace_warnings(self.project_root):
+            self._log(warning, AMBER)
         await self._refresh_ports()
         await self._toggle_connection()
         self.poll_task = asyncio.create_task(self._poll())

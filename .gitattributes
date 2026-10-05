@@ -2,3 +2,4 @@
 *.xdc text eol=lf
 *.bit binary
 firmware/prebuilt/*.log -whitespace
+*.cmd text eol=crlf
