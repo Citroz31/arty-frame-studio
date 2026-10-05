@@ -142,6 +142,9 @@ def test_profile_and_waveform_exports_are_wired(tmp_path):
 
 def test_program_none_return_is_success(tmp_path, monkeypatch):
     class ProgrammingTool:
+        def validate_programming(self, bitstream):
+            assert bitstream == tmp_path / "test.bit"
+
         def program(self, bitstream, log=None):
             assert bitstream == tmp_path / "test.bit"
             return None
@@ -156,6 +159,166 @@ def test_program_none_return_is_success(tmp_path, monkeypatch):
         assert "Programmation SRAM : opération terminée" in studio.tool_message.value
         assert any("Le FPGA est configuré" in line for line in studio.log_lines)
         assert not studio.page.messages
+
+    run_async(exercise())
+
+
+def test_pilotage_preparation_snapshots_frame_without_programming_or_sending(tmp_path, monkeypatch):
+    from arty_frame_studio.model import load_profile, save_profile
+
+    calls = []
+
+    def prepare(root, frame, firmware, tools, *, log=None):
+        calls.append((root, frame, firmware))
+        profile = root / "profiles" / "pilotage-frame.json"
+        profile.parent.mkdir(parents=True)
+        save_profile(frame, profile)
+        return SimpleNamespace(
+            bitstream=root / "ready.bit",
+            firmware=firmware,
+            frame_profile=profile,
+            reused=True,
+        )
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.word.value = "00101"
+        studio._word_changed()
+        studio.core_clock.value = "150000000"
+        studio._core_changed(None)
+        studio.pilotage_pins["data_pin"].value = "JA1"
+        studio._pilotage_hardware_changed()
+        monkeypatch.setattr(app, "prepare_firmware", prepare)
+        monkeypatch.setattr(app, "program_arty", lambda *_args, **_kw: pytest.fail("JTAG"))
+        monkeypatch.setattr(
+            app, "ensure_local_toolchain", lambda *_a, **_kw: pytest.fail("install")
+        )
+        await studio._prepare_from_pilotage()
+        assert calls[0][0] == tmp_path
+        assert calls[0][1].word == 5 and calls[0][1].bit_count == 5
+        assert calls[0][2].data_pin == "JA1"
+        assert calls[0][1].core_hz == calls[0][2].core_hz == 150000000
+        assert load_profile(Path(studio.profile_path.value)) == calls[0][1]
+        assert studio.windows_bitstream_path.value == str(tmp_path / "ready.bit")
+        assert studio.last_sent is None and studio.device is None
+        assert "réutilisé" in studio.preparation_note.value
+        assert not studio.page.messages
+
+    run_async(exercise())
+
+
+def test_hardware_pin_edits_are_synchronized_and_duplicate_pins_block_preparation(tmp_path):
+    studio = make_studio(tmp_path)
+    studio.pilotage_pins["data_pin"].value = "JA1"
+    studio._pilotage_hardware_changed()
+    assert studio.fw_pins["data_pin"].value == "JA1"
+    studio.fw_pins["clock_pin"].value = "JA1"
+    studio._firmware_changed()
+    assert studio.pilotage_pins["clock_pin"].value == "JA1"
+    assert studio.prepare_local_button.disabled
+    studio.fw_pins["clock_pin"].value = "JA2"
+    studio.fw_core.value = "100000000"
+    studio._firmware_changed()
+    assert studio.core_hz == 100000000 and studio.core_clock.value == "100000000"
+    assert not studio.prepare_local_button.disabled
+
+
+def test_invalid_native_image_keeps_uart_open(tmp_path, monkeypatch):
+    class ConnectedSerial:
+        connected = True
+
+        def close(self):
+            pytest.fail("Invalid image must preserve the UART connection")
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        monkeypatch.setattr(app, "SerialDevice", ConnectedSerial)
+        device = ConnectedSerial()
+        studio.device = device
+        studio.mode.value = "uart"
+        image = tmp_path / "invalid.bit"
+        image.write_bytes(b"invalid FPGA file")
+        studio.windows_bitstream_path.value = str(image)
+        monkeypatch.setattr(app, "program_arty", lambda *_a, **_kw: pytest.fail("JTAG"))
+        await studio._jtag_program(None)
+        assert studio.device is device and device.connected
+        assert not studio.programming_pending and not studio.tool_pending
+        assert studio.page.messages
+
+    run_async(exercise())
+
+
+def test_native_local_output_without_successful_receipt_keeps_uart_open(tmp_path, monkeypatch):
+    import json
+    import shutil
+
+    class ConnectedSerial:
+        connected = True
+
+        def close(self):
+            pytest.fail("A revoked local build must preserve the UART connection")
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        monkeypatch.setattr(app, "SerialDevice", ConnectedSerial)
+        device = ConnectedSerial()
+        studio.device = device
+        studio.mode.value = "uart"
+        build = tmp_path / "build"
+        build.mkdir()
+        image = build / "arty_frame.bit"
+        source = Path(__file__).resolve().parents[1] / "firmware/prebuilt/arty_frame.bit"
+        shutil.copy2(source, image)
+        (tmp_path / "toolchain.json").write_text(json.dumps({"build_dir": str(build)}))
+        studio.windows_bitstream_path.value = str(image)
+        monkeypatch.setattr(app, "program_arty", lambda *_a, **_kw: pytest.fail("JTAG"))
+        await studio._jtag_program(None)
+        assert studio.device is device and device.connected
+        assert "recompilez avec succès" in studio.tool_message.value
+        assert not studio.programming_pending and not studio.tool_pending
+
+    run_async(exercise())
+
+
+def test_valid_native_image_is_checked_before_uart_closes(tmp_path, monkeypatch):
+    calls = []
+
+    class ConnectedSerial:
+        connected = True
+
+        def close(self):
+            calls.append("close")
+            self.connected = False
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        monkeypatch.setattr(app, "SerialDevice", ConnectedSerial)
+        studio.device = ConnectedSerial()
+        studio.mode.value = "uart"
+        studio.device_status = DeviceStatus(StatusCode.OK, False, 0)
+        bit = tmp_path / "valid.bit"
+        bit.write_bytes(b"validated by test double")
+        studio.windows_bitstream_path.value = str(bit)
+
+        def validate(path):
+            assert studio.device.connected and studio.programming_pending
+            assert studio.send_button.disabled and studio.connect_button.disabled
+            calls.append("validate")
+            return SimpleNamespace(
+                payload=b"frozen image", part="7a100tcsg324", sha256="hash"
+            ), None
+
+        def program(payload, **_kwargs):
+            assert studio.device is None
+            assert payload == b"frozen image"
+            calls.append("program")
+            return SimpleNamespace(serial="ARTY001", status=0x4010)
+
+        monkeypatch.setattr(studio, "_checked_windows_image", validate)
+        monkeypatch.setattr(app, "program_arty", program)
+        await studio._jtag_program(None)
+        assert calls == ["validate", "close", "program"]
+        assert studio.device is None and not studio.page.messages
 
     run_async(exercise())
 
@@ -1093,7 +1256,7 @@ def test_invalid_binary_draft_keeps_stop_available_for_an_active_emission(tmp_pa
 
 def test_local_toolchain_buttons_wait_for_a_toolchain_file(tmp_path):
     studio = make_studio(tmp_path)
-    # No toolchain.json: the Linux/WSL tools cannot run, so they are disabled
+    # No toolchain.json: local tools cannot run until portable installation,
     # with an explanation instead of failing after a click.
     assert studio.build_button.disabled and studio.program_button.disabled
     assert studio.doctor_button.disabled

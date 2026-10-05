@@ -56,15 +56,15 @@ class CommandTimeout(TransportError):
         message = f"Délai de réponse dépassé pour {opcode.name} (séquence {sequence})."
         if details:
             message += f" {details}"
+        if self.received_sample:
+            readable = "".join(
+                chr(value) if 32 <= value < 127 else "." for value in self.received_sample
+            )
+            message += (
+                f"\nDébut RX (32 octets max.) : {self.received_sample.hex(' ')}"
+                f" · ASCII : {readable}\n"
+            )
         if opcode == Opcode.PING:
-            if self.received_sample:
-                readable = "".join(
-                    chr(value) if 32 <= value < 127 else "." for value in self.received_sample
-                )
-                message += (
-                    f"\nDébut RX (32 octets max.) : {self.received_sample.hex(' ')}"
-                    f" · ASCII : {readable}\n"
-                )
             message += (
                 " Le port USB/UART a été ouvert, mais aucune confirmation compatible"
                 " n'a été reçue. Un port COM détecté ne suffit pas : le bitstream"
@@ -319,7 +319,9 @@ class SerialDevice:
             request = encode_request(opcode, sequence, config, argument=argument)
             self._sequence = (sequence + 1) & 0xFF
             crc_errors_before = self._decoder.crc_errors
+            length_errors_before = self._decoder.length_errors
             unmatched = 0
+            unmatched_sample: list[str] = []
             received_bytes = 0
             received_sample = bytearray()
             try:
@@ -334,11 +336,19 @@ class SerialDevice:
                     available = int(getattr(self._serial, "in_waiting", 0))
                     data = self._serial.read(max(1, min(available, 256)))
                     received_bytes += len(data)
-                    if opcode == Opcode.PING:
-                        received_sample.extend(data[: max(0, 32 - len(received_sample))])
+                    received_sample.extend(data[: max(0, 32 - len(received_sample))])
                     for packet in self._decoder.feed(data):
                         if packet.sequence != sequence or packet.opcode != (0x80 | opcode):
                             unmatched += 1
+                            if len(unmatched_sample) < 4:
+                                try:
+                                    response_name = Opcode(packet.opcode & 0x7F).name
+                                except ValueError:
+                                    response_name = "inconnu"
+                                unmatched_sample.append(
+                                    f"op 0x{packet.opcode:02X} ({response_name}), "
+                                    f"séquence {packet.sequence}"
+                                )
                             continue
                         try:
                             status = decode_response(packet)
@@ -350,6 +360,9 @@ class SerialDevice:
             except TransportError:
                 raise
             except Exception as exc:
+                # Un port peut rester is_open après débranchement ou erreur
+                # du pilote. Fermer l'objet évite d'annoncer une liaison active.
+                self.close()
                 raise TransportError(
                     f"Erreur de liaison UART pendant {opcode.name} : {exc}"
                 ) from exc
@@ -360,8 +373,13 @@ class SerialDevice:
             )
             if self._decoder.crc_errors > crc_errors_before:
                 details += " Des réponses avec un CRC invalide ont été ignorées."
-            elif unmatched:
-                details += " Des réponses ne correspondant pas à la commande ont été ignorées."
+            if self._decoder.length_errors > length_errors_before:
+                details += " Des paquets avec une longueur invalide ont été ignorés."
+            if unmatched:
+                details += (
+                    " Des réponses ne correspondant pas à la commande ont été ignorées"
+                    f" ({unmatched} paquet(s)) : {' ; '.join(unmatched_sample)}."
+                )
             raise CommandTimeout(
                 opcode,
                 sequence,

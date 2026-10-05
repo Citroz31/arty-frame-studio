@@ -5,7 +5,11 @@ import pytest
 
 from arty_frame_studio import cli
 from arty_frame_studio.cli import main
+from arty_frame_studio.model import FrameConfig
 from arty_frame_studio.protocol import DeviceStatus, FirmwareInfo, Opcode, StatusCode
+from arty_frame_studio.scope import KeysightScope
+from arty_frame_studio.scope_sim import SimulatedKeysight, signal_source
+from arty_frame_studio.toolchain import ToolchainConfig, ToolchainError
 from arty_frame_studio.transport import CommandTimeout, DeviceError, PortInfo, TransportError
 
 
@@ -19,7 +23,10 @@ def test_profile_simulation_and_demo_are_usable_from_cli(tmp_path: Path, capsys)
     assert "Terminé : 1 trame(s)" in capsys.readouterr().out
 
 
-def test_scope_demo_measures_the_profile_frame(tmp_path: Path, capsys) -> None:
+def test_scope_demo_measures_the_profile_frame(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        KeysightScope, "read_display", lambda *a, **k: pytest.fail("Demo must acquire its frame")
+    )
     profile = tmp_path / "frame.json"
     points = tmp_path / "scope.csv"
     assert main(["profile", str(profile)]) == 0
@@ -32,6 +39,63 @@ def test_scope_demo_measures_the_profile_frame(tmp_path: Path, capsys) -> None:
     # The simulator has no screen to copy: reported as an error, not a crash.
     assert main(["scope", "--demo", "--png", str(tmp_path / "screen.png")]) == 1
     assert "Copie d'écran indisponible" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("connection", ["lan", "visa"])
+def test_real_scope_reads_the_existing_stopped_screen_without_rearming(
+    connection, tmp_path, monkeypatch, capsys
+):
+    present = signal_source(FrameConfig())
+    instrument = SimulatedKeysight(lambda: present, noise=0)
+    KeysightScope(instrument).capture()
+    record = instrument.records[1]
+    instrument.write(":CHANnel2:DISPlay 0")
+    present = None  # A new acquisition would lose the completed frame.
+    instrument.commands.clear()
+    address = "192.0.2.1" if connection == "lan" else "USB0::KEYSIGHT::INSTR"
+    calls = []
+
+    def connect(selected):
+        calls.append(selected)
+        return instrument
+
+    monkeypatch.setattr(cli, "SocketTransport" if connection == "lan" else "VisaTransport", connect)
+    points = tmp_path / "stopped-screen.csv"
+    assert main(["scope", f"--{connection}", address, "--csv", str(points)]) == 0
+    output = capsys.readouterr().out
+    assert calls == [address]
+    assert "écran existant (origine du déclenchement inconnue)" in output
+    assert "sans front" not in output
+    assert "CH1 :" in output and "CH2 :" not in output
+    assert instrument.records[1] is record
+    assert instrument.closed and not instrument.running
+    assert not {":STOP", ":SINGle", ":TRIGger:FORCe", ":TER?", ":RUN"}.intersection(
+        instrument.commands
+    )
+    assert points.read_text(encoding="utf-8").startswith("temps_CH1_s,CH1_V\n")
+
+
+def test_real_scope_single_explicitly_acquires_with_the_requested_timeout(monkeypatch, capsys):
+    source = signal_source(FrameConfig())
+    instrument = SimulatedKeysight(lambda: source, noise=0)
+    monkeypatch.setattr(cli, "SocketTransport", lambda address: instrument)
+    monkeypatch.setattr(
+        KeysightScope, "read_display", lambda *a, **k: pytest.fail("Single must acquire")
+    )
+    capture = KeysightScope.capture
+    calls = []
+
+    def acquire(scope, **options):
+        calls.append(options)
+        return capture(scope, **options)
+
+    monkeypatch.setattr(KeysightScope, "capture", acquire)
+    assert main(["scope", "--lan", "192.0.2.1", "--single", "--timeout", "0.25"]) == 0
+    assert calls == [{"timeout": 0.25, "mapping": {1: "data", 2: "clk"}}]
+    assert ":SINGle" in instrument.commands
+    assert instrument.closed
+    output = capsys.readouterr().out
+    assert "déclenchée" in output and "écran existant" not in output
 
 
 def test_scope_listing_and_bad_addresses(monkeypatch, capsys) -> None:
@@ -72,6 +136,48 @@ def test_invalid_profile_and_missing_toolchain_return_errors(tmp_path: Path, cap
     assert main(["simulate", "--profile", str(tmp_path / "missing.json")]) == 1
     assert main(["doctor", "--toolchain", str(tmp_path / "absent.json")]) == 1
     assert "Erreur" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("options", ["defaults", "project", "custom"])
+def test_install_fpga_tools_forwards_paths_and_reports_local_configuration(
+    options, tmp_path, monkeypatch, capsys
+):
+    monkeypatch.chdir(tmp_path)
+    project = tmp_path if options == "defaults" else tmp_path / "project with spaces"
+    tools = Path("portable tools") if options == "custom" else None
+    configuration = Path("configuration/native.json") if options == "custom" else None
+    calls = []
+
+    def install(project_root, log=None, *, tools_dir=None, config_path=None):
+        calls.append((project_root, log, tools_dir, config_path))
+        log("Archives SHA256 vérifiées.")
+        return ToolchainConfig()
+
+    monkeypatch.setattr(cli, "ensure_local_toolchain", install)
+    arguments = ["install-fpga-tools"]
+    if options != "defaults":
+        arguments.extend(["--project-root", str(project)])
+    if options == "custom":
+        arguments.extend(["--tools-dir", str(tools), "--config", str(configuration)])
+    assert main(arguments) == 0
+    assert calls == [(project, print, tools, configuration)]
+    output = capsys.readouterr().out
+    expected = configuration or project / "toolchain.json"
+    assert "Archives SHA256 vérifiées." in output
+    assert f"Configuration locale prête : {expected.resolve()}" in output
+
+
+def test_install_fpga_tools_reports_failure_without_claiming_configuration_is_ready(
+    monkeypatch, capsys
+):
+    def unavailable(*args, **kwargs):
+        raise ToolchainError("L'installation portable exige Windows x64.")
+
+    monkeypatch.setattr(cli, "ensure_local_toolchain", unavailable)
+    assert main(["install-fpga-tools"]) == 1
+    output = capsys.readouterr()
+    assert "Windows x64" in output.err
+    assert "Configuration locale prête" not in output.out
 
 
 @pytest.mark.parametrize("outcome", ["valid", "timeout", "open_error"])

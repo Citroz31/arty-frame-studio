@@ -1,0 +1,222 @@
+name: Build firmware with native Windows tools
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - firmware/**
+      - src/arty_frame_studio/local_tools.py
+      - src/arty_frame_studio/toolchain.py
+      - src/arty_frame_studio/preparation.py
+      - src/arty_frame_studio/firmware_config.py
+      - src/arty_frame_studio/bitstream.py
+      - src/arty_frame_studio/cli.py
+      - tests/test_local_tools.py
+      - tests/test_toolchain.py
+      - scripts/bootstrap-windows.py
+      - .github/workflows/windows-firmware.yml
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+concurrency:
+  group: arty-windows-firmware-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bitstream:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Exercise Windows quoting for real RTL sources, not only test fixtures.
+          path: Arty Frame Studio native sources
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+      - name: Prepare paths outside the source checkout
+        run: |
+          $paths = @{
+            ARTY_PROJECT_ROOT = Join-Path $env:GITHUB_WORKSPACE 'Arty Frame Studio native sources'
+            ARTY_TOOLS_DIR = Join-Path $env:RUNNER_TEMP 'arty-windows-fpga-tools'
+            ARTY_CONFIG_FILE = Join-Path $env:RUNNER_TEMP 'arty-windows-config/toolchain.json'
+            ARTY_FIRMWARE_CONFIG = Join-Path $env:RUNNER_TEMP 'arty-windows-config/firmware-config.json'
+            ARTY_LOG_DIR = Join-Path $env:GITHUB_WORKSPACE 'windows-build-logs'
+          }
+          New-Item -ItemType Directory -Force $paths.ARTY_LOG_DIR | Out-Null
+          New-Item -ItemType Directory -Force (Split-Path $paths.ARTY_CONFIG_FILE) | Out-Null
+          foreach ($name in $paths.Keys) {
+            "$name=$($paths[$name])" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+          python -c "import platform, struct; assert platform.system() == 'Windows'; assert struct.calcsize('P') == 8; print(platform.platform())" |
+            Tee-Object -FilePath (Join-Path $paths.ARTY_LOG_DIR 'runner.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install the application and its tests from the path with spaces
+        run: |
+          python -m pip install -e "$($env:ARTY_PROJECT_ROOT)[dev]" 2>&1 |
+            Tee-Object -FilePath "$env:ARTY_LOG_DIR/application-install.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check Windows installation and subprocess behavior
+        run: |
+          Set-Location $env:ARTY_PROJECT_ROOT
+          python -m pytest tests/test_local_tools.py tests/test_toolchain.py -q 2>&1 |
+            Tee-Object -FilePath "$env:ARTY_LOG_DIR/python-tests.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install SHA256-pinned portable tools without WSL
+        run: |
+          python -m arty_frame_studio.cli install-fpga-tools `
+            --project-root "$env:ARTY_PROJECT_ROOT" --tools-dir "$env:ARTY_TOOLS_DIR" `
+            --config "$env:ARTY_CONFIG_FILE" 2>&1 |
+            Tee-Object -FilePath "$env:ARTY_LOG_DIR/bootstrap.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Reuse the validated installation and check the resulting configuration
+        run: |
+          python -m arty_frame_studio.cli install-fpga-tools `
+            --project-root "$env:ARTY_PROJECT_ROOT" --tools-dir "$env:ARTY_TOOLS_DIR" `
+            --config "$env:ARTY_CONFIG_FILE" 2>&1 |
+            Tee-Object -FilePath "$env:ARTY_LOG_DIR/bootstrap-reuse.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m arty_frame_studio.cli doctor --project-root "$env:ARTY_PROJECT_ROOT" `
+            --toolchain "$env:ARTY_CONFIG_FILE" 2>&1 |
+            Tee-Object -FilePath "$env:ARTY_LOG_DIR/doctor.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Create the custom 150 MHz firmware configuration
+        run: |
+          python -m arty_frame_studio.cli firmware-config --core-mhz 150 `
+            --output "$env:ARTY_FIRMWARE_CONFIG" 2>&1 |
+            Tee-Object -FilePath "$env:ARTY_LOG_DIR/firmware-config.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Synthesize and route with native Windows executables
+        run: |
+          python -m arty_frame_studio.cli build --project-root "$env:ARTY_PROJECT_ROOT" `
+            --toolchain "$env:ARTY_CONFIG_FILE" --firmware-config "$env:ARTY_FIRMWARE_CONFIG" 2>&1 |
+            Tee-Object -FilePath "$env:ARTY_LOG_DIR/firmware-build.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Validate the bitstream, current sources and custom-build receipt
+        run: |
+          @'
+          import hashlib
+          import json
+          import os
+          import platform
+          import shutil
+          from pathlib import Path
+          from arty_frame_studio.firmware_config import FirmwareBuildConfig
+          from arty_frame_studio.toolchain import Toolchain, ToolchainConfig
+
+          assert platform.system() == "Windows"
+          project = Path(os.environ["ARTY_PROJECT_ROOT"]).resolve()
+          config_path = Path(os.environ["ARTY_CONFIG_FILE"]).resolve()
+          config = ToolchainConfig.from_json(config_path)
+          chain = Toolchain(config, project)
+          assert " " in str(project)
+          assert not config_path.is_relative_to(project)
+          assert not chain.build_dir.is_relative_to(project)
+          assert config.nextpnr_seeds == (8,)
+          assert config.timing_margin == 0.03
+          firmware = FirmwareBuildConfig.load(os.environ["ARTY_FIRMWARE_CONFIG"])
+          assert firmware == FirmwareBuildConfig(core_hz=150_000_000)
+          image = chain.validate_programming(chain.bitstream)
+          receipt = json.loads(chain.receipt.read_text(encoding="utf-8"))
+          assert image.idcode == 0x03631093
+          assert receipt["build_id"] == firmware.build_id != 0
+          assert receipt["firmware_config"] == firmware.to_dict()
+          assert receipt["timing_clock"] == "core_clock"
+          assert receipt["timing_requirement_mhz"] == 150.0
+          assert receipt["nextpnr_seed"] == 8
+          timing_path = Path(receipt["run_dir"]) / "timing.json"
+          timing = json.loads(timing_path.read_text(encoding="utf-8"))["fmax"]["core_clock"]
+          assert timing["constraint"] >= 149.995
+          assert timing["achieved"] >= 150.0
+          installation = Path(config.yosys).parents[2]
+          manifest = {
+              "source_commit": os.environ["GITHUB_SHA"],
+              "workflow_run": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+              "platform": platform.platform(),
+              "part": image.part,
+              "idcode": f"0x{image.idcode:08X}",
+              "sha256": image.sha256,
+              "payload_bytes": len(image.payload),
+              "tools": json.loads((installation / "arty-tools.json").read_text(encoding="utf-8")),
+              "openxc7_build_info": json.loads((installation / "openxc7/BUILD-INFO.json").read_text(encoding="utf-8")),
+              "build_id": firmware.build_id,
+              "firmware_config": firmware.to_dict(),
+              "firmware_summary": firmware.summary(),
+              "timing_scope": receipt["timing_scope"],
+              "timing_requirement_mhz": 150.0,
+              "routed_core_fmax_mhz": timing["achieved"],
+              "nextpnr_seed": receipt["nextpnr_seed"],
+              "hardware_validated": False,
+              "source_sha256": {
+                  str(path.relative_to(project)): hashlib.sha256(path.read_bytes()).hexdigest()
+                  for path in sorted((project / "firmware").rglob("*"))
+                  if path.is_file() and path.suffix in (".v", ".xdc")
+              },
+          }
+          output = Path(os.environ["ARTY_LOG_DIR"]) / "firmware-artifact"
+          output.mkdir()
+          for source in (chain.bitstream, chain.receipt, chain.build_dir / "build.log",
+                         config_path, Path(os.environ["ARTY_FIRMWARE_CONFIG"]), timing_path):
+              shutil.copy2(source, output / source.name)
+          (output / "firmware-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          (output / "SHA256SUMS.txt").write_text(f"{image.sha256}  arty_frame.bit\n", encoding="utf-8")
+          print(f"Native Windows bitstream validated: {image.sha256}, build 0x{firmware.build_id:08X}")
+          '@ | python - 2>&1 | Tee-Object -FilePath "$env:ARTY_LOG_DIR/validation.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload only the validated native Windows firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: arty-a7-100t-windows-150mhz-${{ github.run_id }}
+          path: windows-build-logs/firmware-artifact/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Collect diagnostics even after installation or compilation failure
+        if: always()
+        run: |
+          @'
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          logs = Path(os.environ["ARTY_LOG_DIR"])
+          logs.mkdir(exist_ok=True)
+          for variable in ("ARTY_CONFIG_FILE", "ARTY_FIRMWARE_CONFIG"):
+              source = Path(os.environ[variable])
+              if source.is_file():
+                  shutil.copy2(source, logs / source.name)
+          config = Path(os.environ["ARTY_CONFIG_FILE"])
+          if config.is_file():
+              build = Path(json.loads(config.read_text(encoding="utf-8"))["build_dir"])
+              for name in ("build.log", "successful-build.json"):
+                  source = build / name
+                  if source.is_file():
+                      shutil.copy2(source, logs / name)
+              for pattern in ("timing.json", "*.xdc"):
+                  for source in (build / "runs").rglob(pattern):
+                      destination = logs / "runs" / source.relative_to(build / "runs")
+                      destination.parent.mkdir(parents=True, exist_ok=True)
+                      shutil.copy2(source, destination)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload Windows preparation and compilation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arty-a7-100t-windows-build-logs-${{ github.run_id }}
+          path: |
+            windows-build-logs/*.log
+            windows-build-logs/*.json
+            windows-build-logs/runs/
+          if-no-files-found: warn
+          retention-days: 30

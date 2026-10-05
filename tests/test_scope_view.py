@@ -6,9 +6,13 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from arty_frame_studio.app import Studio
 from arty_frame_studio.model import FrameConfig
 from arty_frame_studio.scope import (
+    ChannelSettings,
+    KeysightScope,
     Measurements,
     ScopeConnectionError,
     ScopeError,
@@ -16,6 +20,7 @@ from arty_frame_studio.scope import (
     Trace,
     TriggerSettings,
 )
+from arty_frame_studio.scope_sim import SimulatedKeysight, signal_source
 from arty_frame_studio.scope_view import (
     MARGIN_X,
     Cursors,
@@ -88,9 +93,130 @@ def test_demo_scope_measures_data_and_clock_then_disconnects(tmp_path):
 
     run_async(panel.disconnect())
     assert panel.scope is None and simulator.closed
-    assert simulator.commands[-1] == ":RUN"  # the instrument is handed back running
+    assert ":RUN" not in simulator.commands  # Closing the app never starts the instrument.
     assert panel.identity.value == "Non connecté"
     assert panel.run_button.disabled
+
+
+def hardware_panel(tmp_path, monkeypatch):
+    from arty_frame_studio import scope_view
+
+    present = [signal_source(FrameConfig())]
+    instrument = SimulatedKeysight(lambda: present[0], noise=0)
+    scope = KeysightScope(instrument)
+    scope.apply_settings(
+        ScopeSettings(time_scale=500e-9).with_channel(1, ChannelSettings(scale=10.0))
+    )
+    scope.capture()
+    # A single frame is over; only the stopped record remains on the instrument.
+    present[0] = None
+    instrument.commands.clear()
+    monkeypatch.setattr(scope_view, "VisaTransport", lambda resource: instrument)
+    panel, logs = make_panel(tmp_path)
+    panel.source.value = "visa"
+    panel._source_changed()
+    panel.address.value = "USB0::0x2A8D::0x0396::MY12345678::INSTR"
+    return panel, instrument, logs
+
+
+def test_hardware_connection_reads_stopped_screen_with_its_real_axes(tmp_path, monkeypatch):
+    panel, instrument, _ = hardware_panel(tmp_path, monkeypatch)
+    record = instrument.records[1]
+    assert panel.read_button.disabled
+    run_async(panel._toggle_connection())
+    assert panel.acquisition.from_display and panel.acquisition_kind == "visa"
+    assert panel.settings.time_scale == 500e-9
+    assert panel.settings.channel(1).scale == 10.0
+    assert panel.time_scale.value == repr(500e-9) and panel.vscale[1].value == repr(10.0)
+    texts = [getattr(shape, "text", "") for shape in panel.canvas.shapes]
+    assert any("10 V/div" in text for text in texts if text)
+    assert any("500 ns/div" in text for text in texts if text)
+    assert not any("Aucune acquisition" in text for text in texts if text)
+    assert {"trace:1", "trace:2"} <= {shape.data for shape in panel.canvas.shapes}
+    assert "écran existant lu" in panel.status.value
+    assert "sans réarmer" in panel.acquisition_note.value
+    assert not panel.read_button.disabled
+    assert instrument.records[1] is record and not instrument.running
+    assert not {":SINGle", ":TRIGger:FORCe", ":TER?", ":RUN"}.intersection(instrument.commands)
+
+
+def test_hardware_run_and_read_screen_preserve_the_stopped_single(tmp_path, monkeypatch):
+    panel, instrument, _ = hardware_panel(tmp_path, monkeypatch)
+    record = instrument.records[1]
+    panel.refresh.value = "0.2"
+
+    async def scenario():
+        await panel._toggle_connection()
+        await panel._toggle_run()
+        while panel.count < 3:
+            await asyncio.sleep(0.01)
+        await panel._toggle_run()
+        await panel._read_screen()
+
+    run_async(scenario())
+    assert panel.count == 4 and not panel.running
+    assert panel.acquisition.from_display
+    assert instrument.records[1] is record and not instrument.running
+    assert not {":STOP", ":SINGle", ":TRIGger:FORCe", ":TER?", ":RUN"}.intersection(
+        instrument.commands
+    )
+
+
+def test_hardware_single_explicitly_requests_a_new_capture(tmp_path, monkeypatch):
+    panel, instrument, _ = hardware_panel(tmp_path, monkeypatch)
+    run_async(panel._toggle_connection())
+    record = instrument.records[1]
+    instrument.commands.clear()
+    run_async(panel._single())
+    assert not panel.acquisition.from_display
+    assert ":SINGle" in instrument.commands
+    assert ":TRIGger:FORCe" in instrument.commands  # Auto, after the one-shot frame ended.
+    assert instrument.records[1] is not record
+    assert "forcée sans front" in panel.status.value
+
+
+@pytest.mark.parametrize("was_running", [False, True])
+@pytest.mark.parametrize("action", ["disconnect", "shutdown"])
+def test_hardware_close_keeps_the_instrument_run_state(tmp_path, monkeypatch, was_running, action):
+    panel, instrument, _ = hardware_panel(tmp_path, monkeypatch)
+    if was_running:
+        instrument.write(":RUN")
+    run_async(panel._toggle_connection())
+    assert instrument.running is was_running
+    instrument.commands.clear()
+    run_async(getattr(panel, action)())
+    assert panel.scope is None and instrument.closed
+    assert instrument.running is was_running
+    assert not {":RUN", ":STOP", ":SINGle", ":TRIGger:FORCe"}.intersection(instrument.commands)
+
+
+def test_rejected_hardware_connection_closes_without_starting_the_scope(tmp_path, monkeypatch):
+    panel, instrument, _ = hardware_panel(tmp_path, monkeypatch)
+    query = instrument.query
+    monkeypatch.setattr(
+        instrument, "query", lambda text: "PULS" if text == ":TRIGger:MODE?" else query(text)
+    )
+    run_async(panel._toggle_connection())
+    assert panel.scope is None and instrument.closed and not instrument.running
+    assert ":RUN" not in instrument.commands
+
+
+def test_front_panel_axes_are_drawn_even_when_screen_transfer_fails(tmp_path, monkeypatch):
+    panel, _, logs = hardware_panel(tmp_path, monkeypatch)
+
+    def unavailable(scope, **kwargs):
+        raise ScopeError("Pas de trace disponible")
+
+    monkeypatch.setattr(KeysightScope, "read_display", unavailable)
+    run_async(panel._toggle_connection())
+    assert panel.scope is not None and panel.acquisition is None
+    texts = [getattr(shape, "text", "") for shape in panel.canvas.shapes]
+    assert any("10 V/div" in text for text in texts if text)
+    assert any("500 ns/div" in text for text in texts if text)
+    assert any("Aucune acquisition" in text for text in texts if text)
+    assert "Pas de trace disponible" in panel.status.value
+    assert any("Pas de trace disponible" in message for message, _ in logs)
+    assert not panel.read_button.disabled
 
 
 def test_connection_choices_are_remembered(tmp_path):
@@ -351,7 +477,7 @@ def test_shutdown_waits_for_a_capture_thread_without_publishing_it(tmp_path, mon
 
     run_async(scenario())
     assert simulator.closed and panel.scope is None
-    assert simulator.commands[-1] == ":RUN"
+    assert ":RUN" not in simulator.commands
 
 
 def test_shutdown_during_connection_closes_the_new_scope(tmp_path, monkeypatch):
@@ -380,6 +506,7 @@ def test_shutdown_during_connection_closes_the_new_scope(tmp_path, monkeypatch):
 
     run_async(scenario())
     assert panel.scope is None and opened[0]._transport.closed
+    assert ":RUN" not in opened[0]._transport.commands
     assert panel.count == 0
 
 

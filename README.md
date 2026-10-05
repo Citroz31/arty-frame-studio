@@ -42,13 +42,23 @@ La [revue de la saisie binaire](docs/review-saisie-binaire.md) conserve le
 nombre de bits automatique, sécurise les conversions, améliore le
 copier-coller et préserve la longueur et la fréquence des profils.
 
-Depuis l'onglet **FPGA → Personnaliser le firmware**, un nouveau firmware peut
-être compilé avec une autre **horloge de cœur** (32 valeurs de 50 à 200 MHz,
-par exemple 150 MHz pour une CLK de 150 MHz) et d'autres **broches DATA, CLK
-et LATCH** sur les Pmod JA à JD. La compilation se fait localement ou sur
-**GitHub Actions**, sans outil FPGA sur le PC ; le `.bit` vérifié est
-téléchargé puis chargé sous Windows. La carte annonce ensuite son horloge et
-son identifiant de build ; l'application adapte la base de temps.
+Depuis **Pilotage → Préparer le firmware depuis Pilotage**, l'application
+conserve les paramètres de trame et réutilise un `.bit` compatible vérifié.
+Changer le mot, le diviseur de CLK, le latch ou les répétitions utilise UART :
+cela ne demande pas de recompilation. Pour changer l'**horloge du cœur**
+(32 valeurs de 50 à 200 MHz) ou les **broches DATA, CLK et LATCH** sur JA à JD,
+elle prépare une compilation locale. Par exemple, une CLK exacte de 150 MHz
+demande un cœur à 150 MHz ; le cœur de référence à 200 MHz réalise 100 MHz
+pour cette demande.
+
+Sous Windows x64, **Installer les outils Windows locaux** prépare Yosys,
+openXC7/nextpnr et Project X-Ray dans votre compte ; **Compiler sur ce PC**
+produit ensuite le `.bit` et ses rapports, sans Linux, WSL ni droits
+administrateur. Les outils et builds sont conservés sous `%LOCALAPPDATA%`
+pour éviter les chemins OneDrive. **Compiler sur GitHub** reste une option.
+La préparation ne programme pas la carte et n'envoie pas la trame : charger
+le `.bit`, puis connecter l'UART et cliquer sur **Envoyer**. La carte annonce
+son horloge et son identifiant de build ; l'application adapte la base de temps.
 
 Le bouton **Tester les LED** fait défiler un chenillard sur les LED vertes
 LD4 à LD7 : il confirme d'un coup d'œil que le bon firmware tourne sur la
@@ -70,9 +80,15 @@ régénéré par le workflow de compilation dès que le RTL change ; l'applicati
 et les tests refusent un `.bit` qui ne correspond plus aux sources. L'ancien
 fichier aux broches UART inversées est refusé même renommé.
 
-L'utilisateur rapporte un chargement SRAM réussi sous Windows, le dialogue
-UART, le test LED et une émission de 26 bits observée sur DATA à **10 MHz**.
-**Les sorties à 200 MHz et le pilotage SCPI d'un oscilloscope réel restent à valider.**
+Un précédent retour utilisateur rapportait un chargement SRAM, le dialogue
+UART, le test LED et DATA à **10 MHz**. Le retour plus récent montre DATA sur
+JB1 à l'écran du DSOX1202A, mais des délais PING/INFO et un tracé absent dans
+l'application. Voir le [diagnostic local](docs/rapport-diagnostic-local.md)
+et son [PDF](docs/rapport-diagnostic-local.pdf), qui distinguent ces constats
+des corrections et de leurs tests.
+**Le dialogue UART actuel, la compilation Windows native et les corrections
+SCPI restent à confirmer par les vérifications indiquées dans ce rapport.**
+Les sorties à 200 MHz restent à valider physiquement.
 Le rapport nextpnr ne certifie pas l'interface DDR ni la liaison Pmod externe.
 Voir [le matériel](docs/hardware.md) et [la chaîne FPGA](docs/toolchain.md).
 
@@ -85,7 +101,7 @@ Voir [le matériel](docs/hardware.md) et [la chaîne FPGA](docs/toolchain.md).
 
 ## Démarrage
 
-**Sous Windows :** installer Python 3.11 ou plus récent pour votre compte,
+**Sous Windows x64 :** installer Python 3.11 ou plus récent **64 bits** pour votre compte,
 [télécharger le ZIP du dépôt](https://github.com/Citroz31/arty-frame-studio/archive/refs/heads/main.zip),
 l'extraire avec son dossier `firmware/prebuilt/`, puis double-cliquer sur
 [`start-windows.cmd`](start-windows.cmd). Le lanceur installe les dépendances
@@ -140,7 +156,10 @@ ou `--project-root` pour les commandes FPGA de la CLI.
 3. Afficher le chronogramme idéal et exporter en SVG, CSV ou VCD (GTKWave). Le
    nombre de répétitions affichées est limité ; cette limite est indiquée sur
    le graphique et s’applique aussi aux exports.
-4. Pour la carte réelle sous Windows, utiliser l'onglet **FPGA**, section
+4. Dans **Pilotage**, **Préparer le firmware depuis Pilotage** vérifie un firmware
+   compatible ou le compile localement si l'horloge du cœur ou les broches changent.
+   Le firmware de référence suffit à l'exemple 10 MHz et ne demande aucun outil FPGA.
+   Pour la carte réelle sous Windows, utiliser ensuite **FPGA**, section
    **1 · Charger le firmware**. Indiquer `firmware/prebuilt/arty_frame.bit` dans le champ
    **Firmware existant pour l'Arty A7-100T (.bit)**, puis cliquer sur
    **Charger le .bit sous Windows** et attendre environ **30 à 60 secondes**.
@@ -155,8 +174,11 @@ ou `--project-root` pour les commandes FPGA de la CLI.
    ce port est **COM7**. L'application démarre connectée en démo : cliquer
    d'abord sur **Déconnecter** pour changer de mode.
 6. Pour vérifier les sorties, ouvrir l'onglet **Oscilloscope**, connecter le
-   Keysight (LAN ou USB), puis **Préréglage de la trame** et **Run** : la
-   fréquence et la période de CLK s'affichent sous l'écran. Voir
+   Keysight (LAN ou USB) et **Lire l'écran** pour récupérer la trace existante.
+   Pour un suivi répétitif, utiliser **Préréglage de la trame**, démarrer Run
+   sur l'instrument puis **Run** dans l'application : la fréquence et la période
+   de CLK s'affichent sous l'écran. Le Run du PC suit l'état de l'appareil ;
+   **Single** demande une nouvelle acquisition. Voir
    [Oscilloscope](docs/oscilloscope.md).
 
 La programmation proposée charge la **SRAM volatile** : il faut reprogrammer
@@ -196,9 +218,12 @@ Le pilote Digilent Adept Runtime, y compris 2.30.4, permet l'accès USB mais
 ne charge pas ce firmware. Un IDCODE `0x13631093` confirme l'Arty 100T ;
 il ne confirme pas que le protocole UART du projet est exécuté.
 
-La compilation peut être effectuée sur GitHub Actions avec les outils libres
-épinglés du projet. Le PC Windows ne fait ensuite que charger le fichier et
-envoyer les trames : aucun compilateur FPGA, Linux ou WSL n'y est requis.
+La compilation locale Windows utilise des outils libres épinglés, installés
+par **Installer les outils Windows locaux**. Prévoir environ 447 Mo de
+téléchargements et au moins 4 Go libres au premier usage. La compilation
+GitHub Actions reste facultative ; avec cette option, les outils FPGA ne sont
+pas installés sur le PC. Le chargement d'un `.bit` déjà fourni n'exige aucune
+chaîne de compilation.
 Voir [la chaîne et ses rapports](docs/toolchain.md).
 
 ## Vérification
@@ -231,6 +256,7 @@ arty-frame send --profile examples/horloge_seule_10mhz_continue.json --port COM7
 arty-frame ports
 arty-frame info --port COM7
 arty-frame led-test --port COM7
+arty-frame install-fpga-tools --project-root .
 arty-frame firmware-config --core-mhz 150 --clock JB1 --data JB3 --latch JB7 --output fw.json
 ARTY_GITHUB_TOKEN=… arty-frame remote-build --firmware-config fw.json
 arty-frame diagnose --port COM7 --timeout 2

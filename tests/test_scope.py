@@ -465,6 +465,70 @@ def test_single_synchronizes_stop_before_arming_and_never_blocks_on_opc_afterwar
     assert commands[single + 1] == ":OPERegister:CONDition?"
 
 
+def test_read_display_keeps_a_stopped_single_record_without_rearming():
+    present = signal_source(SIPO)
+    instrument = SimulatedKeysight(lambda: present, noise=0)
+    clock = Clock()
+    scope = KeysightScope(instrument, sleep=clock.sleep, clock=clock)
+    scope.apply_settings(
+        ScopeSettings(time_scale=500e-9).with_channel(1, ChannelSettings(scale=10.0, offset=0.0))
+    )
+    previous = scope.capture()
+    record = instrument.records[1]
+    event = instrument.trigger_event
+    # The frame has ended. Rearming would replace the saved waveform with a DC trace.
+    present = None
+    instrument.commands.clear()
+    acquisition = scope.read_display(points=500, mapping={1: "data", 2: "clk"})
+    assert acquisition.from_display and not acquisition.triggered
+    assert acquisition.settings.channel(1).scale == 10.0
+    assert acquisition.settings.time_scale == 500e-9
+    assert acquisition.settings.points == 500
+    assert acquisition.trace(1).times == previous.trace(1).times[::2]
+    assert acquisition.trace(1).volts == previous.trace(1).volts[::2]
+    assert acquisition.measurements[2] == previous.measurements[2]
+    assert instrument.records[1] is record and not instrument.running
+    assert instrument.trigger_event is event
+    assert not {":STOP", ":SINGle", ":TRIGger:FORCe", ":TER?", ":RUN"}.intersection(
+        instrument.commands
+    )
+
+
+def test_read_display_stops_then_restores_a_running_instrument():
+    scope, instrument = simulated()
+    instrument.write(":RUN")
+    record = instrument.records[1]
+    instrument.commands.clear()
+    acquisition = scope.read_display()
+    assert acquisition.from_display
+    stop = instrument.commands.index(":STOP")
+    assert instrument.commands[stop + 1] == "*OPC?"
+    assert instrument.commands[-1] == ":RUN" and instrument.running
+    assert instrument.records[1] is not record  # Run resumes after the saved data were read.
+    assert not {":SINGle", ":TRIGger:FORCe", ":TER?"}.intersection(instrument.commands)
+
+
+def test_read_display_restores_run_when_reading_fails(monkeypatch):
+    scope, instrument = simulated()
+    instrument.write(":RUN")
+
+    def unavailable(channel, points):
+        raise ScopeError("Lecture refusée")
+
+    monkeypatch.setattr(scope, "read_trace", unavailable)
+    with pytest.raises(ScopeError, match="Lecture refusée"):
+        scope.read_display()
+    assert instrument.running and instrument.commands[-1] == ":RUN"
+
+
+@pytest.mark.parametrize("points", [101, 2000, True])
+def test_invalid_read_display_points_send_no_commands(points):
+    scope, instrument = simulated()
+    with pytest.raises(ValueError, match="100, 250, 500 ou 1000"):
+        scope.read_display(points=points)
+    assert not instrument.commands
+
+
 @pytest.mark.parametrize("sweep", ["AUTO", "NORM"])
 def test_real_trigger_during_long_acquisition_is_never_replaced_by_force(monkeypatch, sweep):
     scope, instrument = simulated()

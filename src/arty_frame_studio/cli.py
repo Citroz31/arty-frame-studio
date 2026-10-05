@@ -14,6 +14,7 @@ from typing import Any
 
 from .bitstream import read_bitstream
 from .firmware_config import FirmwareBuildConfig
+from .local_tools import ensure_local_toolchain
 from .model import CONTINUOUS, FrameConfig, load_profile, save_profile, with_free_clock
 from .prebuilt import validate_programming_image, verify_prebuilt_firmware
 from .remote_build import GitHubBuildClient, RemoteBuildTarget
@@ -147,7 +148,12 @@ def _parser() -> argparse.ArgumentParser:
         help="Envoyer STOP après cette durée (utile en émission continue)",
     )
     scope = commands.add_parser(
-        "scope", help="Oscilloscope Keysight : fréquence, période et niveaux des voies"
+        "scope",
+        help="Lire l'écran courant de l'oscilloscope Keysight et les mesures des voies",
+        description=(
+            "Lit l'écran courant sans réarmer le déclenchement. "
+            "--single demande une nouvelle acquisition ; --demo simule une acquisition."
+        ),
     )
     link = scope.add_mutually_exclusive_group(required=True)
     link.add_argument("--lan", metavar="ADRESSE", help="Adresse IP (SCPI, port 5025)")
@@ -169,10 +175,26 @@ def _parser() -> argparse.ArgumentParser:
         help="Régler pour la trame (1 V/div, 5 périodes de CLK, déclenchement sur la voie CLK)",
     )
     scope.add_argument("--autoscale", action="store_true", help="Lancer Auto scale avant")
-    scope.add_argument("--timeout", type=float, default=2.0, help="Attente du déclenchement (s)")
+    scope.add_argument(
+        "--single", action="store_true", help="Armer une nouvelle acquisition unique"
+    )
+    scope.add_argument(
+        "--timeout",
+        type=float,
+        default=2.0,
+        help="Attente du déclenchement pour --single ou --demo (s)",
+    )
     scope.add_argument("--csv", type=Path, help="Exporter les points de l'acquisition")
     scope.add_argument("--png", type=Path, help="Copie d'écran de l'oscilloscope réel")
     commands.add_parser("scope-list", help="Lister les instruments VISA (USB et LAN)")
+    install = commands.add_parser(
+        "install-fpga-tools", help="Installer les outils FPGA portables Windows sans WSL"
+    )
+    install.add_argument("--project-root", type=Path, default=Path.cwd())
+    install.add_argument("--tools-dir", type=Path, help="Dossier des outils portables")
+    install.add_argument(
+        "--config", type=Path, help="JSON à écrire ; défaut : projet/toolchain.json"
+    )
     for name in ("status", "stop"):
         item = commands.add_parser(name, help="Lire l’état" if name == "status" else "Arrêter")
         item.add_argument("--port", required=True)
@@ -229,13 +251,24 @@ def _scope(args: argparse.Namespace) -> int:
             scope.apply_settings(frame_preset(config, mapping, scope.read_settings()))
         if args.autoscale:
             scope.autoscale()
-        acquisition = scope.capture(timeout=args.timeout, mapping=mapping)
+        acquisition = (
+            scope.capture(timeout=args.timeout, mapping=mapping)
+            if args.demo or args.single
+            else scope.read_display(mapping=mapping)
+        )
         settings = acquisition.settings
         trigger = settings.trigger
+        acquisition_state = (
+            "écran existant (origine du déclenchement inconnue)"
+            if acquisition.from_display
+            else "déclenchée"
+            if acquisition.triggered
+            else "sans front"
+        )
         print(
-            f"Base de temps {short_si(settings.time_scale, 's')}/div · déclenchement "
+            f"Base de temps {short_si(settings.time_scale, 's')}/div · déclenchement configuré "
             f"CH{trigger.source} {'montant' if trigger.slope == 'POS' else 'descendant'} "
-            f"{trigger.level:.3g} V · {'déclenchée' if acquisition.triggered else 'sans front'}"
+            f"{trigger.level:.3g} V · {acquisition_state}"
         )
         for channel, values in sorted(acquisition.measurements.items()):
             print(f"CH{channel} : {describe(values)}")
@@ -248,7 +281,7 @@ def _scope(args: argparse.Namespace) -> int:
             args.png.write_bytes(scope.screenshot())
             print(f"Copie d'écran : {args.png}")
     finally:
-        scope.close()
+        scope.close(resume=args.demo or args.single)
     return 0
 
 
@@ -374,6 +407,15 @@ def main(argv: list[str] | None = None) -> int:
             client = GitHubBuildClient(RemoteBuildTarget(args.repository, args.ref), token)
             remote_result = client.build(firmware, args.output_dir, progress=print)
             print(f"Firmware téléchargé et vérifié : {remote_result.bitstream}")
+        elif args.command == "install-fpga-tools":
+            ensure_local_toolchain(
+                args.project_root,
+                log=print,
+                tools_dir=args.tools_dir,
+                config_path=args.config,
+            )
+            config_path = args.config or args.project_root / "toolchain.json"
+            print(f"Configuration locale prête : {config_path.expanduser().resolve()}")
         elif args.command == "profile":
             save_profile(FrameConfig(), args.path)
             print(f"Profil créé : {args.path.resolve()}")

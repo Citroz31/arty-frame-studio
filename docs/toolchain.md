@@ -7,7 +7,9 @@ convertit FASM → frames → `.bit`. Aucun Vivado n'est appelé.
 Pour utiliser la carte **sous Windows**, un fichier précompilé permet de
 charger le FPGA depuis Flet avec le pilote FTDI existant. Aucun compilateur
 FPGA, WSL ou Linux n'est requis sur ce PC. Voir [le guide Windows](windows.md).
-La compilation décrite ci-dessous concerne les développeurs et GitHub Actions.
+Pour modifier l'horloge ou les broches, l'application peut aussi installer une
+chaîne libre **Windows native** et compiler sur ce même PC, sans WSL, Linux,
+Vivado ni droits administrateur. GitHub Actions reste disponible.
 
 Le [firmware précompilé](../firmware/prebuilt/arty_frame.bit) a été produit
 avec cette chaîne : synthèse, placement/routage et contrôle de timing réussis
@@ -34,11 +36,55 @@ et une chipdb cohérente avec son exécutable :
 - base Project X-Ray : `a90f27c1caefee5276f47440f4c730b50519a86f` ;
 - identifiant chipdb : `66c7425d4ef246f9`.
 
-Ces archives sont exécutées par l'environnement de compilation distant ;
-elles ne sont pas des prérequis du PC Windows. Un
+Ces archives Linux sont exécutées par l'environnement de compilation distant.
+L'installation locale Windows utilise la version Windows de la même OSS CAD
+Suite et le
 [bundle openXC7 Windows natif](https://github.com/cavearr/toolchain-openxc7-releases/releases/download/2026-09-30/openxc7-toolchain-windows-amd64-20260930.tgz)
-existe également. Sa compilation complète de ce projet sous Windows n'a pas
-été exécutée ici ; il reste un choix de développement facultatif.
+du 30 septembre 2026. Les versions et SHA256 sont épinglés dans
+[local_tools.py](../src/arty_frame_studio/local_tools.py) ; chaque archive est
+vérifiée avant extraction ou exécution.
+
+## Compiler sur le PC Windows
+
+Dans l'application, **Installer les outils Windows locaux** prépare les deux
+bundles portables et écrit `toolchain.json` à la racine du projet. Les outils
+sont rangés dans `%LOCALAPPDATA%\ArtyFrameStudio\fpga-tools`, à l'extérieur du
+dossier OneDrive du projet. Le téléchargement ne démarre que lors de cette
+installation ou d'une préparation demandant une compilation si `toolchain.json`
+est absent ; les compilations suivantes réutilisent les outils. Les deux
+archives représentent environ 447 Mo ; prévoir 4 Go libres pour les archives
+et les fichiers extraits. Les builds sont conservés séparément dans
+`%LOCALAPPDATA%\ArtyFrameStudio\builds\<identifiant-du-projet>`.
+
+Depuis **Pilotage**, **Préparer le firmware depuis Pilotage** réutilise le
+firmware compatible ou compile les réglages choisis sur ce PC. La compilation
+utilise Yosys ABC9, le backend nextpnr `himbaechel`, la graine 8 et une marge de
+timing recherchée de 3 %. Le `.bit` n'est disponible pour programmation que si
+le timing à l'horloge choisie, les resets ODDR et le format/cible du fichier
+sont validés. La marge est un objectif de placement ; un résultat qui atteint
+l'horloge demandée reste accepté même si sa marge est inférieure à 3 %.
+Les paramètres UART sont enregistrés dans `profiles/pilotage-frame.json` et
+la préparation dans `profiles/pilotage-preparation.json`. Aucun chargement
+du FPGA ni envoi de trame n'est lancé par cette préparation.
+
+Le convertisseur `fasm2frames` est exécuté par
+`oss-cad-suite/lib/python3.exe` avec les modules Python fournis par openXC7.
+Les dossiers des exécutables, DLL et modules sont ajoutés à `PATH` et
+`PYTHONPATH` uniquement dans les processus enfants. L'environnement Python du
+PC et celui de l'application restent inchangés. Les convertisseurs et
+`nextpnr-xilinx.exe` proviennent du bundle Windows, sans script Bash.
+
+La même installation est accessible en ligne de commande :
+
+```bat
+.venv\Scripts\arty-frame.exe install-fpga-tools --project-root .
+.venv\Scripts\arty-frame.exe doctor --toolchain toolchain.json
+.venv\Scripts\arty-frame.exe build --toolchain toolchain.json
+```
+
+`--tools-dir DOSSIER` permet de choisir le dossier des outils et
+`--config JSON` le fichier de configuration. Le chargement SRAM Windows
+utilise le pilote FTDI D2XX existant ; il ne nécessite pas openFPGALoader.
 
 ## Compilation sur GitHub Actions
 
@@ -92,8 +138,8 @@ python -m arty_frame_studio.cli build --toolchain build/toolchain.ci.json
 
 Aucune commande privilégiée, construction C++ ou caractérisation de puce
 n'est demandée par ce script. Les outils et les données occupent plusieurs
-Go. Le script de préparation est destiné au développement et à la CI ;
-il n'est pas une étape à effectuer pour piloter la carte sous Windows.
+Go. Le script de préparation Linux est destiné au développement et à la CI ;
+l'installation Windows ci-dessus est indépendante de ce script.
 
 La configuration accepte `nextpnr_backend` avec deux valeurs :
 
@@ -114,7 +160,9 @@ configurable par `"yosys_mapping": "abc9"`. Le choix historique
 contrôle de timing avant toute production de bitstream.
 
 Les chemins de données et d'exécutables sont résolus relativement au fichier
-JSON ; les noms simples sont cherchés dans le PATH. Les commandes sont
+JSON ; les noms simples sont cherchés dans le PATH. `tool_dirs` et
+`python_path` sont des listes de dossiers ajoutés au PATH et au PYTHONPATH des
+processus enfants ; leurs chemins relatifs suivent la même règle. Les commandes sont
 lancées sans shell. Un convertisseur Python peut être déclaré comme un tableau
 `["chemin/python", "chemin/fasm2frames.py"]`. Les exemples
 [historique](../examples/toolchain.example.json) et
@@ -138,18 +186,19 @@ fronts. La configuration par défaut reproduit exactement le firmware de
 référence et le XDC du dépôt, qu'un test compare octet par octet.
 
 Pour une autre configuration, le build écrit un XDC généré dans son dossier
-`build/runs/<id>/`, passe `CORE_HZ`, `PLL_MULT`, `PLL_OUT_DIV` et `BUILD_ID`
+`<build_dir>/runs/<id>/`, passe `CORE_HZ`, `PLL_MULT`, `PLL_OUT_DIV` et `BUILD_ID`
 à `arty_top` par `chparam` de Yosys, demande `--freq` à l'horloge choisie et
 exige le timing à cette horloge. Les sources du dépôt ne sont pas modifiées.
 Le reçu `successful-build.json` mémorise la configuration ; `program`
 vérifie la même configuration. Une incohérence entre `CORE_HZ` et le PLL
 arrête l'élaboration du RTL.
 
-Deux façons de compiler :
+Préparer ou compiler :
 
 | Bouton | Où | Prérequis |
 | --- | --- | --- |
-| **Compiler localement** | ce PC | chaîne libre configurée (`toolchain.json`, Linux/WSL) |
+| **Préparer le firmware depuis Pilotage** | ce PC Windows | firmware compatible, ou installation des outils pour un nouveau build |
+| **Compiler localement** | ce PC Windows | outils portables installés, `toolchain.json` |
 | **Compiler sur GitHub** | GitHub Actions, outils épinglés | jeton GitHub, dépôt avec ce workflow |
 
 La compilation GitHub déclenche `firmware.yml` avec la configuration en
@@ -229,6 +278,9 @@ celles qui respectent le timing : ses fichiers FASM, `timing.json` et
 arrête le build. La graine retenue figure dans le reçu et dans le manifeste.
 Le timing exigé reste le même : la graine ne change que le placement, jamais
 la contrainte ; `timing_margin` à 0 reprend la première graine qui passe.
+La configuration générée par l'installeur Windows utilise uniquement la
+graine 8, déjà retenue pour le firmware de référence ; `nextpnr_seeds` reste
+modifiable dans `toolchain.json` pour essayer d'autres placements.
 
 Avant chaque essai, les sorties de l'essai précédent sont supprimées ; les
 copies du meilleur résultat sont conservées séparément. Une sortie FASM,
@@ -245,10 +297,14 @@ l'interface DDR ni la liaison Pmod externe** : fronts, skew, câbles et marges
 setup/hold du récepteur doivent être mesurés. Le firmware n'a pas été testé
 sur carte ici. Le chronogramme représente le comportement idéal.
 
-Chaque build utilise un dossier neuf dans `build/runs/` et révoque le reçu
-précédent avant toute opération. Une sortie vide, un timing refusé ou des
-sources modifiées empêchent `arty-frame program` de charger une ancienne
-configuration au titre de ce build. `jtag-program` est distinct : il
+Chaque build utilise un dossier neuf dans `<build_dir>/runs/` et révoque le reçu
+précédent avant toute opération. Une sortie vide, un timing refusé, un `.bit`
+incompatible ou des sources modifiées empêchent `arty-frame program` de
+charger une ancienne configuration au titre de ce build. Avant programmation,
+le reçu doit correspondre aux sources, à la configuration, au SHA256 du
+bitstream, à son horloge et à son `BUILD_ID`. Cette vérification ne lance
+aucun outil FPGA et peut précéder la fermeture de la liaison UART.
+`jtag-program` est distinct : il
 contrôle la cible et le fichier, sans attester un build récent des sources.
 Le chargement est limité à la SRAM, perdue après coupure d'alimentation.
 

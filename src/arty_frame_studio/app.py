@@ -7,9 +7,11 @@ the FPGA; the host application never attempts to bit-bang GPIO pins.
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -17,7 +19,7 @@ from typing import Any
 import flet as ft  # type: ignore[import-untyped]
 import flet.canvas as cv  # type: ignore[import-untyped]
 
-from .bitstream import read_bitstream
+from .bitstream import BitstreamImage, read_bitstream
 from .firmware_config import (
     DRIVES_MA,
     PMOD_PINS,
@@ -25,6 +27,7 @@ from .firmware_config import (
     FirmwareBuildConfig,
     pll_settings,
 )
+from .local_tools import ensure_local_toolchain
 from .model import (
     CONTINUOUS,
     MAX_BITS,
@@ -42,6 +45,7 @@ from .model import (
     ticks_for_ns,
 )
 from .prebuilt import validate_programming_image
+from .preparation import prepare_firmware
 from .protocol import DeviceStatus, FirmwareInfo, Opcode
 from .remote_build import GitHubBuildClient, RemoteBuildTarget
 from .scope_view import ScopePanel
@@ -587,6 +591,33 @@ class Studio:
                 ("latch_pin", "Broche LATCH"),
             )
         }
+        self.pilotage_pins = {
+            field: ft.Dropdown(
+                label=label,
+                value=getattr(reference, field),
+                width=230,
+                options=pin_options(),
+                on_change=self._pilotage_hardware_changed,
+            )
+            for field, label in (
+                ("data_pin", "Sortie DATA"),
+                ("clock_pin", "Sortie CLK"),
+                ("latch_pin", "Sortie LATCH"),
+            )
+        }
+        self.local_install_button = ft.OutlinedButton(
+            "Installer les outils Windows locaux",
+            icon=ft.Icons.DOWNLOAD,
+            on_click=self._install_local_tools,
+            visible=self.is_windows,
+        )
+        self.prepare_local_button = ft.OutlinedButton(
+            "Préparer le firmware depuis Pilotage",
+            icon=ft.Icons.BUILD,
+            on_click=self._prepare_from_pilotage,
+            tooltip="Réutiliser le firmware compatible ou compiler en local ; aucun envoi",
+        )
+        self.preparation_note = ft.Text(size=12, color=MUTED, selectable=True)
         self.fw_drive = ft.Dropdown(
             label="Courant",
             value=str(reference.drive_ma),
@@ -913,7 +944,9 @@ class Studio:
 
     def _core_changed(self, _: Any) -> None:
         try:
+            self.fw_core.value = self.core_clock.value
             self._apply_core(int(self.core_clock.value or REFERENCE_HZ))
+            self._refresh_firmware_summary()
         except ValueError as exc:
             self._error("Horloge du cœur", exc)
 
@@ -1069,10 +1102,24 @@ class Studio:
             self.jtag_probe_button,
             self.jtag_program_button,
             self.remote_build_button,
+            self.local_install_button,
+            self.prepare_local_button,
         ):
             control.disabled = self.tool_pending
         self.program_button.disabled = self.tool_pending or self.serial_pending
-        # Local Yosys/nextpnr tools need toolchain.json (Linux/WSL bootstrap).
+        try:
+            self._firmware_settings()
+            hardware_valid = True
+        except (ValueError, TypeError):
+            hardware_valid = False
+        self.prepare_local_button.disabled = (
+            self.tool_pending or self.current_config is None or not hardware_valid
+        )
+        self.local_install_button.disabled = self.tool_pending or not self.is_windows
+        self.program_button.visible = not self.is_windows
+        for control in self.pilotage_pins.values():
+            control.disabled = self.tool_pending or self.programming_pending
+        # Native Windows installation creates this file without WSL or admin rights.
         local_ready = self._toolchain_ready()
         if not local_ready:
             self.doctor_button.disabled = self.build_button.disabled = True
@@ -1081,9 +1128,9 @@ class Studio:
         self.toolchain_note.value = (
             ""
             if local_ready
-            else "Chaîne locale non configurée (toolchain.json absent) : ces boutons servent "
-            "sous Linux/WSL après scripts/bootstrap-fpga-tools.sh. Sous Windows, utiliser "
-            "« Charger le .bit sous Windows » ou « Compiler sur GitHub »."
+            else "Chaîne locale non configurée (toolchain.json absent). Sous Windows, "
+            "utiliser « Installer les outils Windows locaux », puis compiler localement. "
+            "Le firmware fourni peut déjà être chargé avec « Charger le .bit sous Windows »."
         )
         self.jtag_probe_button.disabled = self.tool_pending or self.serial_pending
         self.jtag_program_button.disabled = self.tool_pending or self.serial_pending
@@ -1100,14 +1147,14 @@ class Studio:
             or self.programming_pending
         )
         # Une carte connectée impose l'horloge annoncée par son firmware.
-        self.core_clock.disabled = connected or self.serial_pending or self.programming_pending
+        self.core_clock.disabled = connected or self.serial_pending or self.tool_pending
         simulated = self.mode.value == "demo"
         self.core_clock.label = (
             "Horloge démo · déconnecter pour modifier"
             if simulated and connected
             else "Cœur identifié"
             if connected
-            else "Horloge de simulation"
+            else "Horloge cible du firmware"
         )
         self.prepare_button.visible = not simulated
         self.mode_badge.value = (
@@ -1180,8 +1227,8 @@ class Studio:
         except Exception as exc:
             self._error("Détection des ports", exc)
 
-    async def _toggle_connection(self, _: Any = None) -> None:
-        if self.serial_pending or self.programming_pending:
+    async def _toggle_connection(self, _: Any = None, *, disconnect_only: bool = False) -> None:
+        if self.serial_pending or (self.programming_pending and not disconnect_only):
             return
         self.serial_pending = True
         self._buttons()
@@ -1217,6 +1264,8 @@ class Studio:
                     self.hardware_status.color = AMBER if hardware_state_unknown else MUTED
                     self._log("Connexion fermée.")
                 else:
+                    if disconnect_only:
+                        return
                     device: SerialDevice | DemoDevice
                     if self.mode.value == "uart":
                         if not self.port.value:
@@ -1536,6 +1585,7 @@ class Studio:
             # Sans carte, l'interface adopte l'horloge prévue par le profil.
             self.core_hz = config.core_hz
             self.core_clock.value = str(config.core_hz)
+            self.fw_core.value = str(config.core_hz)
         # Le profil s'affiche dans la notation choisie ; en binaire, sur toute
         # sa longueur, zéros de tête compris.
         base = self.base.value or "bin"
@@ -1681,7 +1731,12 @@ class Studio:
             self._log(messages)
 
     async def _tool_action(
-        self, title: str, action: Callable[[], Any], *, blocks_uart: bool = False
+        self,
+        title: str,
+        action: Callable[[], Any],
+        *,
+        blocks_uart: bool = False,
+        before_action: Callable[[], Awaitable[None]] | None = None,
     ) -> Any:
         self.tool_pending = True
         self.programming_pending = blocks_uart
@@ -1692,6 +1747,8 @@ class Studio:
         self._buttons()
         self._update()
         try:
+            if before_action is not None:
+                await before_action()
             result = await asyncio.to_thread(action)
             self._flush_worker_logs()
             self.tool_message.value = f"{title} : opération terminée."
@@ -1754,8 +1811,6 @@ class Studio:
     async def _jtag_probe(self, _: Any) -> None:
         if self.tool_pending or self.serial_pending:
             return
-        if isinstance(self.device, SerialDevice) and self.device.connected:
-            await self._toggle_connection()
         dll = (self.ftdi_dll_path.value or "").strip()
         serial = (self.ftdi_serial.value or "").strip()
         self._log("JTAG : profil Digilent Arty · GPIO E8/EB et 00/60 · horloge 1 MHz.")
@@ -1802,9 +1857,89 @@ class Studio:
         self.fw_warnings.value = "\n".join(f"Attention : {note}" for note in firmware.warnings())
 
     def _firmware_changed(self, _: Any = None) -> None:
+        for field, control in self.pilotage_pins.items():
+            control.value = self.fw_pins[field].value
+        if self.device is None or not self.device.connected:
+            try:
+                core = int(self.fw_core.value or REFERENCE_HZ)
+                if core != self.core_hz:
+                    self._apply_core(core)
+            except ValueError:
+                pass
         self._refresh_firmware_summary()
         self._buttons()
         self._update()
+
+    def _pilotage_hardware_changed(self, _: Any = None) -> None:
+        for field, control in self.pilotage_pins.items():
+            self.fw_pins[field].value = control.value
+        self._firmware_changed()
+
+    async def _install_local_tools(self, _: Any = None) -> None:
+        if self.tool_pending:
+            return
+        try:
+            path = self._path(self.toolchain_path.value)
+        except ValueError as exc:
+            self._error("Installation locale", exc)
+            return
+        result = await self._tool_action(
+            "Installation des outils Windows locaux",
+            lambda: ensure_local_toolchain(self.project_root, self._worker_log, config_path=path),
+        )
+        if result is not None:
+            self.toolchain_path.value = str(path)
+            self._log(
+                "Outils locaux prêts. Les compilations suivantes se font sur ce PC, "
+                "sans jeton GitHub, WSL ni droits administrateur.",
+                GREEN,
+            )
+            self._buttons()
+            self._update()
+
+    async def _prepare_from_pilotage(self, _: Any = None) -> None:
+        if self.tool_pending:
+            return
+        try:
+            frame = self._config()
+            firmware = replace(self._firmware_settings(), core_hz=frame.core_hz)
+            configuration = self._path(self.toolchain_path.value)
+            self._set_firmware(firmware)
+        except ValueError as exc:
+            self._error("Préparation depuis Pilotage", exc)
+            return
+
+        def tools() -> Toolchain:
+            if not configuration.is_file():
+                ensure_local_toolchain(
+                    self.project_root,
+                    self._worker_log,
+                    config_path=configuration,
+                )
+            return Toolchain(ToolchainConfig.from_json(configuration), self.project_root)
+
+        self._log(
+            f"Préparation locale depuis Pilotage : {frame.bit_count} bits, "
+            f"CLK {frame.frequency_hz / 1e6:g} MHz ; {firmware.summary()}.",
+            BLUE,
+        )
+        result = await self._tool_action(
+            "Préparation locale du firmware",
+            lambda: prepare_firmware(
+                self.project_root, frame, firmware, tools, log=self._worker_log
+            ),
+        )
+        if result is not None:
+            self._select_firmware(result.bitstream, firmware)
+            self.profile_path.value = str(result.frame_profile)
+            self.preparation_note.value = (
+                f"Firmware {'réutilisé' if result.reused else 'compilé en local'} · "
+                f"trame {frame.bit_count} bits enregistrée. Charger le .bit dans FPGA, "
+                "puis connecter l'UART et Envoyer."
+            )
+            self.preparation_note.color = GREEN
+            self._log(self.preparation_note.value, GREEN)
+            self._update()
 
     def _set_firmware(self, firmware: FirmwareBuildConfig) -> None:
         self.fw_core.value = str(firmware.core_hz)
@@ -1890,26 +2025,37 @@ class Studio:
         except (OSError, ValueError) as exc:
             self._error("Chargement Windows", exc)
             return
-        if isinstance(self.device, SerialDevice) and self.device.connected:
-            await self._toggle_connection()
         dll = (self.ftdi_dll_path.value or "").strip()
         serial = (self.ftdi_serial.value or "").strip()
+        prepared: tuple[BitstreamImage, dict[str, Any] | None] | None = None
+
+        async def before_program() -> None:
+            nonlocal prepared
+            # Keep UART open if the image or its local build receipt is invalid.
+            prepared = await asyncio.to_thread(self._checked_windows_image, bitstream)
+            if isinstance(self.device, SerialDevice) and self.device.connected:
+                await self._toggle_connection(disconnect_only=True)
 
         def run() -> Any:
-            image = read_bitstream(bitstream)
-            manifest = validate_programming_image(image, self.project_root)
+            assert prepared is not None
+            image, manifest = prepared
             if manifest is not None:
-                self._worker_log(
-                    f"Firmware vérifié · sources {manifest['source_commit'][:7]} · "
-                    f"Fmax {manifest['routed_core_fmax_mhz']:.2f} MHz."
-                )
+                if "source_commit" in manifest:
+                    self._worker_log(
+                        f"Firmware vérifié · sources {manifest['source_commit'][:7]} · "
+                        f"Fmax {manifest['routed_core_fmax_mhz']:.2f} MHz."
+                    )
+                else:
+                    self._worker_log("Firmware local vérifié : reçu, sources, timing et SHA256.")
             self._worker_log(f"Bitstream {image.part} · SHA256 {image.sha256}")
             result = program_arty(
                 image.payload, serial=serial or None, dll_path=Path(dll) if dll else None
             )
             return result, manifest
 
-        outcome = await self._tool_action("Chargement SRAM Windows", run, blocks_uart=True)
+        outcome = await self._tool_action(
+            "Chargement SRAM Windows", run, blocks_uart=True, before_action=before_program
+        )
         if outcome is not None:
             result, manifest = outcome
             if manifest is not None and "firmware_config" in manifest:
@@ -1924,6 +2070,27 @@ class Studio:
                 BLUE,
             )
             self._update()
+
+    def _checked_windows_image(
+        self, bitstream: Path
+    ) -> tuple[BitstreamImage, dict[str, Any] | None]:
+        image = read_bitstream(bitstream)
+        manifest = validate_programming_image(image, self.project_root)
+        chain = None
+        if manifest is None and self._toolchain_ready():
+            chain = self._toolchain()
+        local_output = chain is not None and bitstream.resolve() == chain.bitstream.resolve()
+        if manifest is None and (
+            local_output or (bitstream.parent / "successful-build.json").is_file()
+        ):
+            if chain is None:
+                chain = self._toolchain()
+            image = chain.validate_programming(bitstream)
+            receipt = json.loads(chain.receipt.read_text(encoding="utf-8"))
+            manifest = {
+                "firmware_config": receipt.get("firmware_config", FirmwareBuildConfig().to_dict())
+            }
+        return image, manifest
 
     async def _program(self, _: Any) -> None:
         if self.tool_pending or self.serial_pending:
@@ -1941,16 +2108,19 @@ class Studio:
         except Exception as exc:
             self._error("Programmation FPGA", exc)
             return
-        # Reconfiguration resets the UART receiver. Closing the old session
-        # avoids interpreting a stale response as the next command's reply.
-        if isinstance(self.device, SerialDevice) and self.device.connected:
-            await self._toggle_connection()
+
+        async def before_program() -> None:
+            await asyncio.to_thread(chain.validate_programming, bitstream)
+            if isinstance(self.device, SerialDevice) and self.device.connected:
+                await self._toggle_connection(disconnect_only=True)
 
         def program() -> bool:
             chain.program(bitstream, log=self._worker_log)
             return True
 
-        result = await self._tool_action("Programmation SRAM", program, blocks_uart=True)
+        result = await self._tool_action(
+            "Programmation SRAM", program, blocks_uart=True, before_action=before_program
+        )
         if result is not None:
             self._log(
                 "Le FPGA est configuré. Connectez le port UART dans Pilotage "

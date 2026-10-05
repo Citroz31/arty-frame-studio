@@ -1,9 +1,14 @@
-# Windows : charger le firmware puis communiquer sur COM7
+# Windows natif : préparer, charger et piloter le firmware
 
 Conserver le pilote Digilent Adept Runtime déjà installé, notamment **2.30.4**.
 L'application utilise FTDI D2XX pour le JTAG et le port COM pour l'UART, avec
-votre compte Windows. Aucun WSL, Linux ou PowerShell administrateur n'est
-nécessaire pour charger un firmware précompilé et piloter la carte.
+votre compte Windows. Avec Windows x64 et Python 64 bits, la préparation,
+la compilation locale, le chargement et le pilotage se font sans WSL,
+Linux ou PowerShell administrateur. Un `.bit` déjà fourni n'exige aucun compilateur.
+
+**Préparer le firmware depuis Pilotage** réutilise un firmware compatible
+vérifié ou prépare une compilation sur ce PC. Cette action conserve la trame ;
+elle ne charge pas la carte et n'envoie pas SEND. GitHub reste facultatif.
 
 **Un IDCODE `0x13631093` confirme que le JTAG reconnaît l'Arty A7-100T.**
 COM7 permet l'accès série, mais PING ne répondra que si le firmware de ce
@@ -13,8 +18,10 @@ la carte. Ce ne sont pas des réponses au protocole Arty Frame Studio.
 
 Le [firmware précompilé](../firmware/prebuilt/arty_frame.bit) est fourni
 dans `firmware/prebuilt/`. Sa synthèse et son routage ont réussi avec une
-**Fmax de 210,79 MHz pour une contrainte de 200 MHz**. Il reste à tester
-son chargement, PING et les sorties sur la carte réelle.
+**Fmax de 210,79 MHz pour une contrainte de 200 MHz**. Un chargement SRAM
+réussi a été rapporté par l'utilisateur ; son retour récent contient encore
+des délais PING/INFO. Le dialogue courant et les sorties restent à confirmer
+par les essais du [diagnostic local](rapport-diagnostic-local.md).
 
 ## Charger le fichier sous Windows
 
@@ -23,8 +30,8 @@ son chargement, PING et les sorties sur la carte réelle.
    `C:\ArtyFrameStudio` : la synchronisation peut verrouiller `.venv` ou les
    exports, et Windows limite les chemins à 260 caractères. Le journal le
    signale au démarrage. Le ZIP contient
-   `firmware/prebuilt/arty_frame.bit`. Installer Python **3.11 ou plus récent pour
-   votre utilisateur**, puis double-cliquer sur **`start-windows.cmd`**.
+   `firmware/prebuilt/arty_frame.bit`. Installer Python **3.11 ou plus récent,
+   64 bits, pour votre utilisateur**, puis double-cliquer sur **`start-windows.cmd`**.
    Après une mise à jour qui ajoute une dépendance, le lanceur la complète au
    démarrage suivant ; `start-windows.cmd --setup-only`, depuis un terminal
    ordinaire, actualise aussi les dépendances. La simulation fonctionne sans carte.
@@ -56,17 +63,8 @@ son chargement, PING et les sorties sur la carte réelle.
 La programmation charge uniquement la **SRAM volatile**, pas la flash.
 **Recharger le `.bit` après chaque coupure d'alimentation.** Le programme
 présent en flash, par exemple une démonstration d'origine, peut revenir au
-redémarrage. Les boutons de la section **Outils locaux (Linux / WSL)**,
-**Vérifier les outils**, **Compiler localement** et **Programmer via la chaîne
-locale**, ne servent pas à ce parcours : ils restent grisés tant que
-`toolchain.json` n'existe pas, ce fichier étant créé par
-`scripts/bootstrap-fpga-tools.sh` sous Linux/WSL.
-
-Pour changer l'horloge du cœur ou les broches sans outil FPGA sur le PC :
-onglet **FPGA → Personnaliser le firmware**, choisir les réglages, renseigner un
-jeton GitHub (Actions : lecture et écriture) puis **Compiler sur GitHub**.
-Le `.bit` vérifié est téléchargé dans `builds\` et proposé au chargement.
-Voir [la compilation personnalisée](toolchain.md#firmware-personnalisé-depuis-linterface).
+redémarrage. Une modification du mot, du diviseur de CLK, de la durée du latch,
+de la pause ou des répétitions est envoyée par UART ; elle ne modifie pas le `.bit`.
 
 Avant le chargement natif, le firmware fourni est contrôlé : SHA256 du `.bit`,
 hashes des sources RTL/XDC et modèle de simulation, rapport de timing du cœur.
@@ -83,22 +81,78 @@ toujours pas avec le nouveau firmware, vérifier le cavalier JP2, le bouton
 RESET, LED0 et les autres applications qui peuvent ouvrir le port série.
 
 Le chargement Windows vérifie la cible, l'IDCODE embarqué et le statut DONE.
-Ce backend est testé avec une interface FTDI simulée ; la détection JTAG a été
-confirmée par un retour utilisateur. Le chargement de ce firmware et les
-sorties physiques restent à vérifier sur une carte réelle.
+Ce backend est testé avec une interface FTDI simulée ; la détection et le
+chargement SRAM ont été rapportés par l'utilisateur. Aucun essai matériel
+n'a été réalisé dans l'environnement de cette revue.
+
+## Compiler sur ce PC avec des outils Windows portables
+
+Le firmware de référence suffit pour les sorties JB1/JB2/JB3 à 10 MHz :
+avec son cœur à 200 MHz, le diviseur vaut 20. La préparation réutilise aussi
+une compilation locale déjà vérifiée quand sa configuration matérielle est
+identique. Une nouvelle compilation est nécessaire pour changer l'horloge
+du cœur, les broches DATA/CLK/LATCH, le courant de sortie ou le slew.
+
+1. Dans **FPGA**, cliquer sur **Installer les outils Windows locaux**. Prévoir
+   Internet au premier usage, environ **447 Mo** de téléchargements et au moins
+   **4 Go libres**. L'application installe des versions épinglées de
+   **OSS CAD Suite 2026-03-24** et **openXC7 2026-09-30**, vérifiées par taille et SHA256.
+2. Les outils sont extraits sous
+   `%LOCALAPPDATA%\ArtyFrameStudio\fpga-tools`. `toolchain.json` est créé dans
+   le projet ; les builds et leurs reçus vont sous
+   `%LOCALAPPDATA%\ArtyFrameStudio\builds`, dans un sous-dossier propre au projet.
+   Ces caches évitent les chemins OneDrive et réduisent la longueur des chemins.
+3. Cliquer sur **Vérifier les outils**. Choisir ensuite les broches et l'horloge
+   du cœur dans **Pilotage** puis **Préparer le firmware depuis Pilotage**, ou
+   utiliser **FPGA → Personnaliser le firmware → Compiler sur ce PC**.
+   Une préparation compatible avec le `.bit` fourni ne télécharge aucun outil.
+4. Attendre le résultat de synthèse et routage. Le timing final doit atteindre
+   l'horloge demandée ; le `.bit`, le manifeste et les rapports sont vérifiés.
+   Le résultat est sélectionné pour **Charger le .bit sous Windows**.
+5. Charger le résultat, reconnecter l'UART, vérifier PING puis INFO, et revenir
+   dans Pilotage pour **Envoyer** la trame conservée. Aucun SEND ni chargement
+   n'est effectué automatiquement par la préparation ou la compilation.
+
+La chaîne utilise Yosys ABC9, nextpnr/openXC7 et Project X-Ray natifs. Elle
+n'installe pas de pilote ni de PATH système et ne demande pas de jeton GitHub.
+Les archives peuvent être réutilisées depuis le cache vérifié. Une installation
+incomplète ou un hash incorrect interrompt le parcours avec un diagnostic.
+La compilation Windows native est en cours de validation dans cette revue ;
+les tests d'installation simulés et l'inspection des archives sont distincts
+d'une compilation réellement exécutée sous Windows.
+
+Depuis un terminal CMD ordinaire, à la racine du projet :
+
+```cmd
+.venv\Scripts\arty-frame.exe install-fpga-tools --project-root .
+.venv\Scripts\arty-frame.exe doctor --toolchain toolchain.json
+.venv\Scripts\arty-frame.exe firmware-config --core-mhz 150 --data JB1 --clock JB2 --latch JB3 --output fw.json
+.venv\Scripts\arty-frame.exe build --toolchain toolchain.json --firmware-config fw.json
+```
+
+Pour une CLK exacte de 150 MHz, choisir un cœur à 150 MHz. Avec le cœur de
+référence à 200 MHz, l'application retient 100 MHz pour une demande de 150 MHz
+afin de ne pas dépasser la fréquence demandée.
+
+### GitHub facultatif
+
+**Compiler sur GitHub** reste disponible dans la personnalisation du firmware.
+Cette option demande un jeton GitHub avec Actions en lecture/écriture et
+télécharge le `.bit` vérifié dans `builds\`. Aucun outil FPGA local n'est
+alors nécessaire. Voir [la chaîne et ses rapports](toolchain.md).
 
 ## Paramètres JTAG et UART
 
 Les champs **DLL FTDI D2XX (facultatif)** et **Série JTAG A (facultatif)**
 peuvent rester vides avec une seule carte. Si plusieurs interfaces sont
 présentes, sélectionner la série du **canal A/JTAG**, et conserver le
-**canal B/UART** pour COM7. Dans la configuration rapportée :
+**canal B/UART** pour le port COM choisi. Exemples anonymisés :
 
 | Interface | Identifiant |
 | --- | --- |
 | FPGA Arty A7-100T | IDCODE `0x13631093`, révision incluse |
-| FTDI canal A/JTAG | Série `210319BE770AA` |
-| FTDI canal B/UART | Série `210319BE770AB`, COM7, VID `0403`, PID `6010` |
+| FTDI canal A/JTAG | Série du canal A donnée par la détection JTAG |
+| FTDI canal B/UART | Série distincte du canal B, port COM courant, VID `0403`, PID `6010` |
 
 Le numéro COM et les séries varient selon la carte et le PC. La DLL D2XX et
 Python doivent avoir la même architecture, par exemple tous deux 64 bits.
@@ -117,8 +171,9 @@ nécessaire pour ce parcours.
 | JTAG reconnaît le 100T, PING expire | Charger le firmware du projet par JTAG ; la détection seule ne le fait pas. |
 | PING expire après chargement | Vérifier le fichier chargé, COM7, la LED PLL et que le bouton rouge RESET n'est pas maintenu ; enregistrer le journal. |
 | Des octets sont reçus sans réponse compatible | Vérifier que le bon firmware a été chargé depuis la dernière coupure ; le texte d'une autre démo n'est pas une réponse PING. |
+| Des paquets INFO à CRC valide arrivent pendant PING | Conserver opcode et séquence reçus/attendus dans le journal ; une réponse INFO ne confirme pas PING. Fermer les autres applications UART et tester une connexion isolée. |
 | PING répond | Le firmware dialogue avec l'application ; commencer l'essai des sorties à fréquence réduite. |
-| « Chaîne FPGA locale non configurée : toolchain.json est absent » | Normal sous Windows : utiliser **Charger le .bit sous Windows** ou **Compiler sur GitHub**. Les anciennes versions affichaient « Configuration illisible … [Errno 2] » et fermaient la liaison UART ; ce n'est plus le cas. |
+| « Chaîne FPGA locale non configurée : toolchain.json est absent » | Cliquer sur **Installer les outils Windows locaux** pour compiler sur ce PC ; le chargement du `.bit` fourni reste disponible sans chaîne. GitHub est facultatif. |
 
 Les chronogrammes de l'application sont idéaux. La compilation à 200 MHz
 ne remplace pas une mesure CLK/DATA/LATCH et des marges du récepteur.
@@ -164,10 +219,11 @@ start-windows.cmd --diagnose-com7
 
 Le diagnostic COM7 envoie uniquement PING, aucune commande SEND ou STOP.
 Les commandes `jtag-diagnose` et `jtag-program` acceptent les options
-`--serial "210319BE770AA"` et `--ftdi-dll "C:\FTDI\ftd2xx.dll"` si nécessaire.
+`--serial "SERIE_JTAG_A"` et `--ftdi-dll "C:\FTDI\ftd2xx.dll"` si nécessaire,
+en remplaçant le premier exemple par la série réelle du canal A.
 Aucun utilitaire `djtgcfg.exe` n'est requis.
 
-La compilation distante et les rapports sont décrits dans
+La chaîne locale, l'option de compilation distante et les rapports sont décrits dans
 [toolchain.md](toolchain.md). Le fichier précompilé est accompagné de
 [firmware-manifest.json](../firmware/prebuilt/firmware-manifest.json),
 [build.log](../firmware/prebuilt/build.log) et

@@ -5,10 +5,13 @@ import os
 import sys
 from copy import deepcopy
 from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
+from arty_frame_studio.bitstream import read_bitstream
+from arty_frame_studio.firmware_config import FirmwareBuildConfig
 from arty_frame_studio.toolchain import Toolchain, ToolchainConfig, ToolchainError
 
 FAKE_TOOL = r"""#!/usr/bin/env python3
@@ -17,7 +20,7 @@ import os
 import shlex
 import sys
 from pathlib import Path
-name = Path(sys.argv[0]).name
+name = Path(sys.argv[0]).stem
 args = sys.argv[1:]
 with open(os.environ["FAKE_HISTORY"], "a") as stream:
     stream.write(json.dumps([name, *args]) + "\n")
@@ -91,7 +94,19 @@ elif name == "fasm2frames":
     if os.environ.get("FAKE_MUTATE_SOURCE"):
         Path(os.environ["FAKE_MUTATE_SOURCE"]).write_text("changed during build")
 elif name == "xc7frames2bit":
-    Path(args[args.index("--output_file") + 1]).write_bytes(b"fresh bitstream bytes")
+    # A bounded parser fixture with matching IDCODE and FDRI, not a hardware image.
+    values = (0xFFFFFFFF, 0xAA995566, 0x30018001, 0x03631093,
+              0x30004001, 0x12345678, 0x20000000)
+    payload = b"".join(value.to_bytes(4, "big") for value in values)
+    raw = b"\x00\x09" + bytes.fromhex("0ff00ff00ff00ff000") + b"\x00\x01"
+    for tag, value in ((b"a", "arty_top"), (b"b", "7a100tcsg324"),
+                       (b"c", "2026/10/05"), (b"d", "12:00:00")):
+        value = value.encode() + b"\0"
+        raw += tag + len(value).to_bytes(2, "big") + value
+    raw += b"e" + len(payload).to_bytes(4, "big") + payload
+    if os.environ.get("FAKE_INVALID_BITSTREAM"):
+        raw = b"not a bitstream"
+    Path(args[args.index("--output_file") + 1]).write_bytes(raw)
 else:
     print("SRAM programming completed")
 """
@@ -133,7 +148,7 @@ def test_complete_flow_preserves_frames_and_programs_sram(toolchain: Toolchain) 
     assert all(result.ok for result in toolchain.doctor())
     bitstream = toolchain.build(log=logs.append)
     assert bitstream == toolchain.project_root / "build/arty_frame.bit"
-    assert bitstream.read_bytes() == b"fresh bitstream bytes"
+    assert read_bitstream(bitstream).idcode == 0x03631093
     assert toolchain.receipt.exists()
     frames = next((toolchain.build_dir / "runs").glob("*/arty_frame.frames"))
     assert frames.read_text() == "0x00000000 0x00000001\n"
@@ -155,6 +170,106 @@ def test_complete_flow_preserves_frames_and_programs_sram(toolchain: Toolchain) 
     assert calls[2][calls[2].index("--part") + 1] == "xc7a100tcsg324-1"
     assert calls[3][calls[3].index("--part_name") + 1] == "xc7a100tcsg324-1"
     assert calls[-1] == ["openFPGALoader", "-b", "arty_a7_100t", str(bitstream)]
+
+
+def test_programming_preflight_returns_the_checked_image_without_running_a_tool(
+    toolchain: Toolchain,
+) -> None:
+    bitstream = toolchain.build()
+    calls = history()
+    image = toolchain.validate_programming(bitstream)
+    assert image.path == bitstream
+    assert image.sha256 == sha256(bitstream.read_bytes()).hexdigest()
+    assert image.part == "7a100tcsg324"
+    assert image.idcode == 0x03631093
+    assert history() == calls
+    assert not (toolchain.build_dir / "program.log").exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("version", 2),
+        ("part", "xc7a35tcsg324-1"),
+        ("input_sha256", "0" * 64),
+        ("bitstream_sha256", "0" * 64),
+        ("timing_clock", "other_clock"),
+        ("timing_requirement_mhz", 150),
+        ("build_id", 1),
+        ("firmware_config", None),
+        ("firmware_config", FirmwareBuildConfig(data_pin="JC3").to_dict()),
+    ],
+)
+def test_inconsistent_build_receipt_blocks_preflight_and_programming(
+    toolchain: Toolchain, field: str, value: object
+) -> None:
+    bitstream = toolchain.build()
+    calls = history()
+    receipt = json.loads(toolchain.receipt.read_text())
+    receipt[field] = value
+    toolchain.receipt.write_text(json.dumps(receipt))
+    for operation in (toolchain.validate_programming, toolchain.program):
+        with pytest.raises(ToolchainError, match="invalide, modifié ou périmé"):
+            operation(bitstream)
+    assert history() == calls
+    assert not (toolchain.build_dir / "program.log").exists()
+
+
+def test_receipt_with_firmware_configuration_requires_a_build_id(toolchain: Toolchain) -> None:
+    bitstream = toolchain.build()
+    receipt = json.loads(toolchain.receipt.read_text())
+    del receipt["build_id"]
+    toolchain.receipt.write_text(json.dumps(receipt))
+    with pytest.raises(ToolchainError, match="recompilez"):
+        toolchain.validate_programming(bitstream)
+
+
+def test_legacy_reference_receipt_remains_readable(toolchain: Toolchain) -> None:
+    bitstream = toolchain.build()
+    receipt = json.loads(toolchain.receipt.read_text())
+    del receipt["firmware_config"]
+    del receipt["build_id"]
+    toolchain.receipt.write_text(json.dumps(receipt))
+    assert toolchain.validate_programming(bitstream).path == bitstream
+
+
+def test_invalid_conversion_never_publishes_or_authorizes_a_bitstream(
+    toolchain: Toolchain, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bitstream = toolchain.build()
+    previous = bitstream.read_bytes()
+    monkeypatch.setenv("FAKE_INVALID_BITSTREAM", "1")
+    with pytest.raises(ToolchainError, match="Bitstream produit invalide"):
+        toolchain.build()
+    assert bitstream.read_bytes() == previous
+    assert not toolchain.receipt.exists()
+    with pytest.raises(ToolchainError, match="recompilez"):
+        toolchain.program(bitstream)
+    assert all(call[0] != "openFPGALoader" for call in history())
+
+
+def test_invalid_bitstream_is_refused_even_when_its_receipt_hash_matches(
+    toolchain: Toolchain,
+) -> None:
+    bitstream = toolchain.build()
+    bitstream.write_bytes(b"invalid configuration payload")
+    receipt = json.loads(toolchain.receipt.read_text())
+    receipt["bitstream_sha256"] = sha256(bitstream.read_bytes()).hexdigest()
+    toolchain.receipt.write_text(json.dumps(receipt))
+    with pytest.raises(ToolchainError, match="invalide"):
+        toolchain.program(bitstream)
+    assert history()[-1][0] == "xc7frames2bit"
+
+
+@pytest.mark.parametrize("setting", ["tool_dirs", "python_path"])
+def test_changing_portable_tool_environment_revokes_programming_receipt(
+    toolchain: Toolchain, tmp_path: Path, setting: str
+) -> None:
+    bitstream = toolchain.build()
+    toolchain.config = replace(toolchain.config, **{setting: (tmp_path,)})
+    with pytest.raises(ToolchainError, match="périmé"):
+        toolchain.program(bitstream)
+    assert history()[-1][0] == "xc7frames2bit"
 
 
 def test_himbaechel_build_uses_device_vopts_and_report(toolchain: Toolchain) -> None:
@@ -425,6 +540,8 @@ def test_portable_tool_paths_resolve_from_json_directory(tmp_path: Path) -> None
                 "fasm2frames": [".venv/Scripts/python.exe", "tools/prjxray/utils/fasm2frames.py"],
                 "xc7frames2bit": "tools/bin/xc7frames2bit.exe",
                 "openfpgaloader": "tools/bin/openFPGALoader.exe",
+                "tool_dirs": ["tools/bin", "oss-cad-suite/bin"],
+                "python_path": ["tools/lib/python3.12/site-packages"],
             }
         )
     )
@@ -436,6 +553,112 @@ def test_portable_tool_paths_resolve_from_json_directory(tmp_path: Path) -> None
     )
     assert config.nextpnr_xilinx == str(folder / "tools/bin/nextpnr-xilinx.exe")
     assert config.openfpgaloader == str(folder / "tools/bin/openFPGALoader.exe")
+    assert config.tool_dirs == (folder / "tools/bin", folder / "oss-cad-suite/bin")
+    assert config.python_path == (folder / "tools/lib/python3.12/site-packages",)
+
+
+def test_python_converter_without_extension_resolves_from_configuration(tmp_path: Path) -> None:
+    configuration = tmp_path / "toolchain.json"
+    configuration.write_text(json.dumps({"fasm2frames": [sys.executable, "fasm2frames"]}))
+    assert ToolchainConfig.from_json(configuration).fasm2frames == (
+        sys.executable,
+        str(tmp_path / "fasm2frames"),
+    )
+
+
+def test_portable_build_uses_python_commands_and_its_own_modules_without_changing_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Python command vectors work on Windows without POSIX shebang execution.
+    root = tmp_path / "native project with spaces"
+    (root / "firmware/rtl").mkdir(parents=True)
+    (root / "firmware/constraints").mkdir(parents=True)
+    (root / "firmware/rtl/arty_top.v").write_text("module arty_top; endmodule\n")
+    (root / "firmware/constraints/arty_a7_100t.xdc").write_text("constraints\n")
+    tools = tmp_path / "portable tools"
+    tools.mkdir()
+    modules = tmp_path / "portable modules"
+    modules.mkdir()
+    (modules / "portable_fixture.py").write_text("AVAILABLE = True\n")
+    scripts = {}
+    for name in ("yosys", "nextpnr-xilinx", "fasm2frames", "xc7frames2bit", "openFPGALoader"):
+        script = tools / (name if name == "fasm2frames" else name + ".py")
+        script.write_text(
+            FAKE_TOOL.replace(
+                "name = Path(sys.argv[0]).stem",
+                "import portable_fixture\n"
+                "assert portable_fixture.AVAILABLE\n"
+                "assert 'PYTHONHOME' not in os.environ\n"
+                "assert os.environ['PYTHONNOUSERSITE'] == '1'\n"
+                "assert os.environ['FAKE_BIN'] in os.environ['PATH'].split(os.pathsep)\n"
+                "name = Path(sys.argv[0]).stem",
+            )
+        )
+        scripts[name] = (sys.executable, str(script))
+    db = tmp_path / "db"
+    (db / "xc7a100tcsg324-1").mkdir(parents=True)
+    (db / "xc7a100tcsg324-1/part.yaml").write_text("idcode: 0x03631093\n")
+    chipdb = tmp_path / "chipdb.bin"
+    chipdb.write_bytes(b"fixture")
+    monkeypatch.setenv("FAKE_HISTORY", str(tmp_path / "history.jsonl"))
+    monkeypatch.setenv("FAKE_BIN", str(tools))
+    monkeypatch.setenv("PYTHONHOME", str(tmp_path / "host python"))
+    monkeypatch.setenv("PYTHONNOUSERSITE", "0")
+    ambient = os.environ.copy()
+    candidate = Toolchain(
+        ToolchainConfig(
+            yosys=scripts["yosys"],
+            nextpnr_xilinx=scripts["nextpnr-xilinx"],
+            fasm2frames=scripts["fasm2frames"],
+            xc7frames2bit=scripts["xc7frames2bit"],
+            # The external programmer accepts only an executable; build does
+            # not require it. Native D2XX programming is checked separately.
+            openfpgaloader=str(tmp_path / "absent-openFPGALoader.exe"),
+            chipdb=chipdb,
+            prjxray_db=db,
+            nextpnr_backend="himbaechel",
+            tool_dirs=(tools,),
+            python_path=(modules,),
+        ),
+        root,
+    )
+    checks = {result.name: result for result in candidate.doctor()}
+    assert checks["fasm2frames script"].ok
+    assert checks["tool_dirs"].ok and checks["python_path"].ok
+    image = candidate.validate_programming(candidate.build())
+    assert image.idcode == 0x03631093
+    assert [call[0] for call in history()] == [
+        "yosys",
+        "nextpnr-xilinx",
+        "fasm2frames",
+        "xc7frames2bit",
+    ]
+    assert os.environ == ambient
+
+
+def test_doctor_checks_portable_directories_and_missing_python_script(tmp_path: Path) -> None:
+    candidate = Toolchain(
+        ToolchainConfig(
+            fasm2frames=(sys.executable, "missing_converter"),
+            tool_dirs=(Path("missing_bin"),),
+            python_path=(Path("missing_modules"),),
+        ),
+        tmp_path,
+    )
+    checks = {result.name: result for result in candidate.doctor()}
+    assert checks["fasm2frames"].ok
+    assert not checks["fasm2frames script"].ok
+    assert not checks["tool_dirs"].ok and not checks["python_path"].ok
+
+
+def test_tool_directories_are_used_for_executable_discovery_and_compilation(
+    toolchain: Toolchain, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tools = Path(os.environ["PATH"].split(os.pathsep)[0])
+    monkeypatch.setenv("PATH", str(Path(sys.executable).parent))
+    toolchain.config = replace(toolchain.config, tool_dirs=(tools,))
+    assert all(check.ok for check in toolchain.doctor())
+    assert toolchain.validate_programming(toolchain.build()).idcode == 0x03631093
 
 
 def test_native_process_keeps_paths_and_metacharacters_literal(tmp_path: Path) -> None:
@@ -461,6 +684,9 @@ def test_native_process_keeps_paths_and_metacharacters_literal(tmp_path: Path) -
         {"yosys": [123]},
         {"chipdb": ""},
         {"build_dir": None},
+        {"tool_dirs": "tools/bin"},
+        {"tool_dirs": [""]},
+        {"python_path": [None]},
         [],
     ],
 )
@@ -490,8 +716,6 @@ def test_argument_with_shell_metacharacters_is_literal(
 def test_custom_firmware_build_uses_generated_constraints_and_parameters(
     toolchain: Toolchain, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from arty_frame_studio.firmware_config import FirmwareBuildConfig
-
     firmware = FirmwareBuildConfig(
         core_hz=150_000_000, data_pin="JC3", clock_pin="JC1", latch_pin="JC7"
     )
@@ -517,8 +741,6 @@ def test_custom_firmware_build_uses_generated_constraints_and_parameters(
 def test_custom_firmware_requires_timing_at_its_own_core_clock(
     toolchain: Toolchain, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from arty_frame_studio.firmware_config import FirmwareBuildConfig
-
     monkeypatch.setenv(
         "FAKE_TIMING", "Info: Max frequency for clock 'core_clock': 175.00 MHz (PASS at 160.00 MHz)"
     )

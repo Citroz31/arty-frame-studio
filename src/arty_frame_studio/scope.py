@@ -494,6 +494,8 @@ class Acquisition:
     triggered: bool
     elapsed: float = 0.0
     local: dict[int, Measurements] = field(default_factory=dict)
+    # Écran déjà présent : son origine (front ou Force) n'est pas connue.
+    from_display: bool = False
 
     def trace(self, channel: int) -> Trace | None:
         return next((trace for trace in self.traces if trace.channel == channel), None)
@@ -1092,6 +1094,51 @@ class KeysightScope:
             self._check("Format de transfert")
             triggered = self.acquire(timeout)
             self._check("Acquisition")
+            return self._read_acquisition(start, points, mapping, triggered=triggered)
+
+    def read_display(
+        self,
+        *,
+        points: int = 1000,
+        mapping: dict[int, str | None] | None = None,
+    ) -> Acquisition:
+        """Lit les traces présentes sans réarmer ni forcer un déclenchement.
+
+        Un appareil en Run est arrêté le temps de lire les deux voies et leurs
+        mesures sur le même relevé, puis reprend Run. Un écran déjà arrêté reste
+        intact, notamment après une trame unique ; TER n'est pas lu ni effacé.
+        """
+        if type(points) is not int or points not in WAVEFORM_POINTS:
+            raise ValueError("Nombre de points NORMal : 100, 250, 500 ou 1000.")
+        start = self._clock()
+        with self._lock:
+            self._require_main_timebase()
+            was_running = bool(int(_number(self.query(":OPERegister:CONDition?"))) & _RUN_BIT)
+            try:
+                if was_running:
+                    self.write(":STOP")
+                    self.query("*OPC?")
+                self.write(":WAVeform:FORMat BYTE")
+                self.write(":WAVeform:UNSigned 1")
+                self.write(":WAVeform:POINts:MODE NORMal")
+                self.write(f":WAVeform:POINts {points}")
+                self._check("Format de transfert")
+                return self._read_acquisition(start, points, mapping, from_display=True)
+            finally:
+                if was_running and self.usable:
+                    self.write(":RUN")
+
+    def _read_acquisition(
+        self,
+        start: float,
+        points: int,
+        mapping: dict[int, str | None] | None,
+        *,
+        triggered: bool = False,
+        from_display: bool = False,
+    ) -> Acquisition:
+        """Lecture commune sous le verrou, sur une acquisition arrêtée."""
+        with self._lock:
             settings = replace(self.read_settings(), points=points)
             traces = tuple(
                 self.read_trace(number, points)
@@ -1133,7 +1180,13 @@ class KeysightScope:
                     source="oscilloscope" if remote_timing else "local",
                 )
         return Acquisition(
-            settings, traces, measurements, triggered, self._clock() - start, locals_
+            settings=settings,
+            traces=traces,
+            measurements=measurements,
+            triggered=triggered,
+            elapsed=self._clock() - start,
+            local=locals_,
+            from_display=from_display,
         )
 
     def screenshot(self) -> bytes:

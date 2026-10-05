@@ -239,7 +239,7 @@ def screen_shapes(
             cv.Text(
                 left + plot_width / 2,
                 top + plot_height / 2 - 30,
-                "Aucune acquisition · Connecter, puis Single ou Run",
+                "Aucune acquisition · Connecter, puis Lire l’écran ou Single",
                 style=ft.TextStyle(size=14, color=MUTED),
                 alignment=ft.alignment.center,
             )
@@ -461,10 +461,22 @@ class ScopePanel:
             "Run",
             icon=ft.Icons.PLAY_ARROW,
             on_click=self._toggle_run,
-            tooltip="Répéter les acquisitions depuis le PC ; Stop suspend ce rafraîchissement.",
+            tooltip="Actualiser l’écran dans l’application ; un scope arrêté reste arrêté. "
+            "Stop suspend ce rafraîchissement.",
         )
         self.single_button = ft.OutlinedButton(
-            "Single", icon=ft.Icons.LOOKS_ONE, on_click=self._single
+            "Single",
+            icon=ft.Icons.LOOKS_ONE,
+            on_click=self._single,
+            tooltip="Armer une nouvelle acquisition sur le scope et attendre un front ; "
+            "le mode Auto force une trace si aucun front n’arrive.",
+        )
+        self.read_button = ft.OutlinedButton(
+            "Lire l’écran",
+            icon=ft.Icons.REFRESH,
+            on_click=self._read_screen,
+            tooltip="Lire la trace présente sans réarmer ni forcer ; "
+            "une acquisition en cours est suspendue le temps du transfert.",
         )
         self.autoscale_button = ft.OutlinedButton(
             "Auto scale", icon=ft.Icons.AUTO_FIX_HIGH, on_click=self._autoscale
@@ -477,11 +489,11 @@ class ScopePanel:
             on_click=self._preset,
         )
         self.refresh = ft.Dropdown(
-            label="Pause entre acquisitions",
+            label="Pause entre lectures",
             value="0.5",
             width=170,
             options=[ft.dropdown.Option(repr(rate), f"{rate:g} s") for rate in REFRESH_RATES],
-            tooltip="Pause après chaque capture ; le déclenchement et le transfert s'y ajoutent.",
+            tooltip="Pause après chaque lecture ; le transfert s’y ajoute.",
         )
         self.status = ft.Text("Arrêté", size=12, color=MUTED)
         self.acquisition_note = ft.Text(size=12, color=MUTED)
@@ -730,9 +742,9 @@ class ScopePanel:
                     self.source_hint,
                     ft.Text(PINOUT_HINT, size=12, color=MUTED),
                     ft.Text(
-                        "Pour une trame envoyée une seule fois : lancer Run ici, puis aller dans "
-                        "Pilotage et cliquer Envoyer. Le mode Normal attend le prochain front ; "
-                        "Run réarme automatiquement après chaque attente de 2 s.",
+                        "Pour une trame unique : armer Single sur le scope en mode Normal, "
+                        "puis Envoyer dans Pilotage et Lire l’écran ici. Run suit l’écran réel ; "
+                        "Single ici demande une nouvelle acquisition.",
                         size=12,
                         color=MUTED,
                     ),
@@ -760,6 +772,7 @@ class ScopePanel:
             [
                 self.run_button,
                 self.single_button,
+                self.read_button,
                 self.autoscale_button,
                 self.preset_button,
                 self.refresh,
@@ -916,6 +929,7 @@ class ScopePanel:
         for button in (self.single_button, self.autoscale_button, self.preset_button):
             button.disabled = not connected or self.pending
         self.single_button.disabled |= self.capturing or self.stopping
+        self.read_button.disabled = not connected or self.pending or self.capturing or self.stopping
         self.autoscale_button.disabled |= self.capturing or self.stopping
         self.run_button.disabled = (
             not connected
@@ -1045,6 +1059,8 @@ class ScopePanel:
         if acquisition is not None:
             if simulation:
                 notes.append("Simulation · aucun signal réel mesuré.")
+            elif acquisition.from_display:
+                notes.append("Écran existant lu sans réarmer ni forcer de déclenchement.")
             if self.scope is None:
                 notes.append("Dernière acquisition conservée ; oscilloscope déconnecté.")
             elif acquisition.settings != self.settings:
@@ -1258,7 +1274,7 @@ class ScopePanel:
             async with self.io_lock:
                 scope, identity, settings = await asyncio.to_thread(self._open)
                 if self.closing or self.disconnecting:
-                    await asyncio.to_thread(scope.close)
+                    await asyncio.to_thread(scope.close, resume=False)
                     return
                 # Publier la connexion avant de libérer le verrou : shutdown ne
                 # peut pas passer entre l'ouverture et l'affectation du scope.
@@ -1280,8 +1296,11 @@ class ScopePanel:
         self._log(f"Oscilloscope connecté : {identity}", GREEN)
         self._save_preferences()
         self._show_settings(settings)
+        self._draw()
+        self._show_measurements()
         self._sync()
-        await self._acquire()
+        self._update()
+        await self._acquire(display=self.source.value != "demo")
 
     async def disconnect(self) -> None:
         if self.disconnecting:
@@ -1300,9 +1319,9 @@ class ScopePanel:
             async with self.io_lock:
                 scope, self.scope = self.scope, None
                 if scope is not None:
-                    await asyncio.to_thread(scope.close)
+                    await asyncio.to_thread(scope.close, resume=False)
             if scope is not None:
-                self._log("Oscilloscope déconnecté ; il reprend son acquisition (Run).", MUTED)
+                self._log("Oscilloscope déconnecté ; état d’acquisition conservé.", MUTED)
         finally:
             self.disconnecting = False
             self.pending = False
@@ -1351,12 +1370,12 @@ class ScopePanel:
         self.status.value = message
         self.status.color = RED
 
-    async def _acquire(self, *, continuous: bool = False) -> None:
+    async def _acquire(self, *, continuous: bool = False, display: bool = False) -> None:
         scope = self.scope
         if scope is None or self.capturing or self.pending or self.closing or self.disconnecting:
             return
         self.capturing = True
-        self.status.value = "Acquisition en cours…"
+        self.status.value = "Lecture de l’écran…" if display else "Acquisition en cours…"
         self.status.color = AMBER
         self._sync()
         self._update()
@@ -1366,12 +1385,18 @@ class ScopePanel:
                     return
                 config = self._frame_source() if self.source.value == "demo" else None
                 expected_clock_hz = config.frequency_hz if config is not None else None
-                acquisition = await asyncio.to_thread(
-                    scope.capture,
-                    timeout=self.trigger_wait,
-                    points=self.settings.points,
-                    mapping=self._mapping_values(),
-                )
+                mapping = self._mapping_values()
+                if display:
+                    acquisition = await asyncio.to_thread(
+                        scope.read_display, points=self.settings.points, mapping=mapping
+                    )
+                else:
+                    acquisition = await asyncio.to_thread(
+                        scope.capture,
+                        timeout=self.trigger_wait,
+                        points=self.settings.points,
+                        mapping=mapping,
+                    )
         except TriggerTimeout as exc:
             # Normal sans front : comme l'appareil, garder l'écran et attendre.
             if self.closing or self.disconnecting:
@@ -1406,10 +1431,16 @@ class ScopePanel:
             self._show_settings(self.settings)
         self.status.value = (
             f"Acquisition {self.count} · "
-            + ("déclenchée" if acquisition.triggered else "forcée sans front (Auto)")
+            + (
+                "écran existant lu"
+                if acquisition.from_display
+                else "déclenchée"
+                if acquisition.triggered
+                else "forcée sans front (Auto)"
+            )
             + f" · {acquisition.elapsed * 1000:.0f} ms"
         )
-        self.status.color = GREEN if acquisition.triggered else AMBER
+        self.status.color = GREEN if acquisition.triggered or acquisition.from_display else AMBER
         self._draw()
         self._show_measurements()
         self._sync()
@@ -1420,6 +1451,12 @@ class ScopePanel:
             return
         await self._stop_run()
         await self._acquire()
+
+    async def _read_screen(self, _: Any = None) -> None:
+        if self.pending or self.capturing or self.stopping or self.closing:
+            return
+        await self._stop_run()
+        await self._acquire(display=True)
 
     async def _toggle_run(self, _: Any = None) -> None:
         if self.scope is None or self.closing or self.disconnecting or self.stopping:
@@ -1449,7 +1486,7 @@ class ScopePanel:
     async def _run_loop(self) -> None:
         try:
             while self.running and not self.closing and self.scope is not None:
-                await self._acquire(continuous=True)
+                await self._acquire(continuous=True, display=self.source.value != "demo")
                 if not self.running:
                     break
                 if self._run_wakeup is not None:

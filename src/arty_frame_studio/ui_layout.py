@@ -67,7 +67,7 @@ def _path(studio: Studio, field: Any, extensions: list[str]) -> ft.Control:
 
 
 def build_layout(s: Studio) -> ft.Control:
-    """Build the four existing views around prepare/connect/test/send."""
+    """Build five views around prepare/connect/test/send."""
     s.setup_steps = ft.Container(
         ft.Row(
             [
@@ -141,21 +141,41 @@ def build_layout(s: Studio) -> ft.Control:
         ft.TextButton("Exemple CLK seule · 10 MHz", on_click=s._clock_example),
         s.timing_summary,
         s.quantization_note,
+    )
+    timing.col = {"xs": 12, "lg": 6}
+    preparation = s._card(
+        s._heading("Préparer le firmware", "Sur ce PC · sans jeton GitHub"),
+        ft.Text(
+            "Modifier la trame, sa cadence ou le latch se fait par UART, sans "
+            "recompiler. Changer l'horloge interne ou les broches nécessite un "
+            "firmware adapté. La préparation sélectionne le .bit compatible et "
+            "enregistre les paramètres de Pilotage.",
+            size=12,
+            color=MUTED,
+        ),
         _section(
-            "Base de temps",
-            "Lue automatiquement sur une carte connectée",
+            "Horloge interne et sorties",
+            "Référence : cœur 200 MHz · DATA JB1 · CLK JB2 · LATCH JB3",
             [
                 _grid((s.core_clock, 12)),
+                _grid(*[(control, 4) for control in s.pilotage_pins.values()]),
                 ft.Text(
-                    "Ce choix règle la simulation. Changer le cœur de la carte exige de "
-                    "compiler puis charger un firmware depuis l'onglet FPGA.",
+                    "Sur une carte connectée, le cœur affiché est celui du firmware "
+                    "chargé. Déconnecter pour choisir une autre horloge interne.",
                     size=12,
                     color=MUTED,
                 ),
             ],
         ),
+        ft.Row([s.prepare_local_button], wrap=True),
+        s.preparation_note,
+        ft.Text(
+            "Ensuite : charger le .bit dans FPGA, connecter le port UART, puis Envoyer. "
+            "La préparation ne lance aucune émission.",
+            size=12,
+            color=BLUE,
+        ),
     )
-    timing.col = {"xs": 12, "lg": 6}
     profiles = _section(
         "Profils de trame",
         "Charger ou enregistrer les paramètres d'une séquence",
@@ -182,6 +202,7 @@ def build_layout(s: Studio) -> ft.Control:
                 [
                     connection,
                     ft.ResponsiveRow([frame, timing], spacing=14, run_spacing=14),
+                    preparation,
                     profiles,
                 ],
                 expand=True,
@@ -331,37 +352,45 @@ def build_layout(s: Studio) -> ft.Control:
                     ),
                 ],
             ),
-            s._heading("Compiler sur GitHub", "Recommandé sous Windows sans chaîne FPGA locale"),
+        ],
+    )
+    local = s._card(
+        s._heading("Compiler sur ce PC", "Windows natif · outils libres · aucun WSL"),
+        ft.Text(
+            "Pour un firmware personnalisé, installer les outils une fois dans le "
+            "cache utilisateur. Téléchargement d'environ 447 Mo ; prévoir 4 Go libres. "
+            "Ni droits administrateur, ni jeton GitHub. Les compilations restent "
+            "hors du dossier du projet et de OneDrive.",
+            size=12,
+            color=MUTED,
+        ),
+        s.local_install_button,
+        s.toolchain_note,
+        _path(s, s.toolchain_path, ["json"]),
+        ft.Row([s.doctor_button, s.build_button], wrap=True),
+        s.doctor_results,
+        _path(s, s.bitstream_path, ["bit"]),
+        s.program_button,
+    )
+    remote = _section(
+        "Compilation GitHub (facultatif)",
+        "Alternative à la compilation locale · jeton Actions requis",
+        [
             _grid((s.gh_repository, 8), (s.gh_ref, 4), (s.gh_token, 12)),
             s.remote_build_button,
             ft.Text(
-                "Le résultat est téléchargé et vérifié, puis sélectionné au-dessus pour "
-                "le chargement. La compilation ne programme pas automatiquement la carte.",
+                "Le résultat est téléchargé et vérifié, puis sélectionné pour le "
+                "chargement. La compilation ne programme pas automatiquement la carte.",
                 size=12,
                 color=MUTED,
             ),
-        ],
-    )
-    local = _section(
-        "Outils locaux (Linux / WSL)",
-        "Facultatif : chaîne open source configurée par toolchain.json",
-        [
-            ft.Text(
-                "Yosys → nextpnr/openXC7 → Project X-Ray. Ce parcours est réservé à "
-                "une chaîne de compilation installée ; le firmware fourni suffit pour démarrer.",
-                size=12,
-                color=MUTED,
-            ),
-            s.toolchain_note,
-            _path(s, s.toolchain_path, ["json"]),
-            ft.Row([s.doctor_button, s.build_button], wrap=True),
-            s.doctor_results,
-            _path(s, s.bitstream_path, ["bit"]),
-            s.program_button,
         ],
     )
     fpga_tab = ft.Column(
-        [native, next_step, custom, local], expand=True, scroll=ft.ScrollMode.AUTO, spacing=14
+        [native, next_step, local, custom, remote],
+        expand=True,
+        scroll=ft.ScrollMode.AUTO,
+        spacing=14,
     )
     journal_tab = ft.Column(
         [

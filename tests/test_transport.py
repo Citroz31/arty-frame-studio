@@ -232,6 +232,66 @@ def test_unmatched_ack_is_never_accepted():
         device.status()
 
 
+def test_board_info_reply_cannot_confirm_ping_even_with_matching_sequence():
+    # Capturé sur COM7 : INFO page 0, révision 4, CRC correct. La seconde
+    # tentative de PING a la même séquence 1, mais attend impérativement 0x81.
+    stale_info = bytes.fromhex("a7 7a 01 86 01 04 00 00 04 00 53 7c")
+    device, endpoint = make_serial(lambda packet: stale_info)
+    with pytest.raises(CommandTimeout) as error:
+        device.connect()
+    assert error.value.received_sample == stale_info
+    assert "op 0x86 (INFO), séquence 1" in str(error.value)
+    assert error.value.received_bytes == 24
+    assert [packet.sequence for packet in endpoint.requests] == [0, 1]
+    assert not device.connected and not endpoint.is_open
+
+
+def test_info_timeout_keeps_rx_preview_and_reports_crc_and_unmatched_reply():
+    stale_info = bytes.fromhex("a7 7a 01 86 02 04 00 00 04 00 b3 b2")
+
+    def handler(packet):
+        if packet.opcode == Opcode.PING:
+            return response(packet)
+        bad_crc = bytearray(response(packet))
+        bad_crc[-1] ^= 1
+        return stale_info + response(packet, opcode=0x81) + bad_crc
+
+    device, _ = make_serial(handler)
+    device.connect()
+    # The captured seq2 must differ from both current attempts. The protocol
+    # cannot identify a stale reply whose opcode AND sequence match a request.
+    device._sequence = 3
+    with pytest.raises(CommandTimeout) as error:
+        device.info()
+    assert error.value.received_bytes == 72
+    assert error.value.received_sample.startswith(stale_info)
+    assert "Début RX" in str(error.value)
+    assert "CRC invalide" in str(error.value)
+    assert "op 0x86 (INFO), séquence 2" in str(error.value)
+    assert "op 0x81 (PING)" in str(error.value)
+    assert device.connected
+
+
+@pytest.mark.parametrize("operation", ["write", "read"])
+def test_uart_io_failure_closes_connection_without_retry(operation):
+    device, endpoint = make_serial(info_handler([4, 0xC200, 0x0BEB, 15, 0, 0]))
+    device.connect()
+    device.identify()
+    requests_before = len(endpoint.requests)
+
+    def disconnected(*args):
+        raise OSError("USB device disconnected")
+
+    setattr(endpoint, operation, disconnected)
+    with pytest.raises(TransportError, match="Erreur de liaison UART pendant STATUS"):
+        device.status()
+    assert len(endpoint.requests) == requests_before + (operation == "read")
+    assert not device.connected and not endpoint.is_open
+    assert device.firmware is None
+    with pytest.raises(TransportError, match="pas connectée"):
+        device.ping()
+
+
 def test_send_timeout_is_not_retried_and_explains_unknown_execution():
     def handler(packet):
         return response(packet) if packet.opcode == Opcode.PING else b""

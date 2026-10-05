@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import IO, Any, Literal
 
+from .bitstream import BitstreamError, BitstreamImage, read_bitstream
 from .firmware_config import FirmwareBuildConfig
 
 TARGET_PART = "xc7a100tcsg324-1"
@@ -53,6 +54,10 @@ class ToolchainConfig:
     prjxray_db: Path | None = None
     part: str = TARGET_PART
     build_dir: Path = Path("build")
+    # Portable bundles keep DLLs, ABC and Python modules outside the host
+    # installation. Extend only the child process environment, never the PC.
+    tool_dirs: tuple[Path, ...] = ()
+    python_path: tuple[Path, ...] = ()
     # Placement seeds tried in order. The core paths sit close to 5 ns and
     # placement alone moves the routed Fmax by ~15 %: the sweep stops at the
     # first seed with timing_margin above the requirement, otherwise keeps
@@ -97,6 +102,10 @@ class ToolchainConfig:
                 raise ValueError("build_dir doit être un chemin non vide.")
             if not isinstance(value, Path) and (value is not None or name == "build_dir"):
                 raise ValueError(f"{name} doit être un pathlib.Path.")
+        for name in ("tool_dirs", "python_path"):
+            value = getattr(self, name)
+            if not isinstance(value, tuple) or any(not isinstance(path, Path) for path in value):
+                raise ValueError(f"{name} doit être un tuple de pathlib.Path.")
 
     @classmethod
     def from_json(cls, path: Path | str) -> ToolchainConfig:
@@ -108,9 +117,10 @@ class ToolchainConfig:
             # The usual Windows case: the open-source toolchain is not installed.
             raise ToolchainError(
                 f"Chaîne FPGA locale non configurée : {path.name} est absent ({path.parent}). "
-                "Ce fichier est créé par scripts/bootstrap-fpga-tools.sh sous Linux/WSL. "
-                "Sous Windows, charger le firmware avec « Charger le .bit sous Windows » "
-                "et compiler un firmware personnalisé avec « Compiler sur GitHub »."
+                "Sous Windows, utilisez « Installer les outils Windows locaux » pour créer "
+                "la configuration sans Linux, WSL ni droits administrateur. "
+                "Le firmware existant reste disponible via « Charger le .bit sous Windows » ; "
+                "« Compiler sur GitHub » est une autre possibilité."
             ) from exc
         except (OSError, json.JSONDecodeError) as exc:
             raise ToolchainError(f"Configuration illisible : {path} : {exc}") from exc
@@ -127,15 +137,20 @@ class ToolchainConfig:
                 args = [value]
             else:
                 continue
+            if not args or any(not isinstance(argument, str) for argument in args):
+                raise ValueError(f"{name} : fournir un exécutable ou une liste d'arguments texte.")
+            interpreter = Path(args[0]).name.lower().removesuffix(".exe")
             for index, argument in enumerate(args):
                 # Portable tool folders need absolute executable/script paths:
                 # Windows does not use Popen(cwd=...) to resolve the executable.
-                is_file = index == 0 or (isinstance(argument, str) and argument.endswith(".py"))
+                is_script = index != 0 and (
+                    argument.lower().endswith(".py")
+                    or (index == 1 and interpreter.startswith("python"))
+                )
                 if (
-                    is_file
-                    and isinstance(argument, str)
+                    (index == 0 or is_script)
                     and not argument.startswith("-")
-                    and ("/" in argument or "\\" in argument)
+                    and (is_script or "/" in argument or "\\" in argument)
                 ):
                     candidate = Path(argument).expanduser()
                     if not candidate.is_absolute():
@@ -151,6 +166,21 @@ class ToolchainConfig:
                 data[name] = (
                     candidate if candidate.is_absolute() else path.parent / candidate
                 ).resolve()
+        for name in ("tool_dirs", "python_path"):
+            if name not in data:
+                continue
+            value = data[name]
+            if not isinstance(value, list) or any(
+                not isinstance(item, str) or not item.strip() for item in value
+            ):
+                raise ValueError(f"{name} doit être une liste de chemins non vides.")
+            directories = []
+            for item in value:
+                candidate = Path(item).expanduser()
+                directories.append(
+                    (candidate if candidate.is_absolute() else path.parent / candidate).resolve()
+                )
+            data[name] = tuple(directories)
         return cls(**data)
 
 
@@ -176,6 +206,25 @@ class Toolchain:
         value: Command = getattr(self.config, name)
         return [value] if isinstance(value, str) else list(value)
 
+    def _environment(self) -> dict[str, str]:
+        environment = os.environ.copy()
+        if self.config.python_path:
+            # A host virtualenv must not redirect the bundle's Python standard
+            # library or load packages from the user's unrelated installation.
+            environment.pop("PYTHONHOME", None)
+            environment["PYTHONNOUSERSITE"] = "1"
+        for variable, paths in (
+            ("PATH", self.config.tool_dirs),
+            ("PYTHONPATH", self.config.python_path),
+        ):
+            if paths:
+                prefix = os.pathsep.join(
+                    str(path if path.is_absolute() else self.project_root / path) for path in paths
+                )
+                existing = environment.get(variable, "")
+                environment[variable] = prefix + (os.pathsep + existing if existing else "")
+        return environment
+
     def _sources(self) -> list[Path]:
         return sorted((self.project_root / "firmware/rtl").glob("*.v"))
 
@@ -187,10 +236,27 @@ class Toolchain:
     def doctor(self) -> list[DoctorResult]:
         """Check local files/executables. Does not claim FPGA or timing validation."""
         results = []
+        environment = self._environment()
         for name in _TOOLS:
-            executable = self._args(name)[0]
-            found = shutil.which(executable)
+            arguments = self._args(name)
+            executable = arguments[0]
+            found = shutil.which(executable, path=environment.get("PATH"))
             results.append(DoctorResult(name, found is not None, found or f"Absent : {executable}"))
+            # A Python interpreter may exist even when its converter script
+            # is missing. Check the script before running synthesis/routing.
+            for index, argument in enumerate(arguments[1:], start=1):
+                interpreter = Path(executable).name.lower().removesuffix(".exe")
+                if argument.lower().endswith(".py") or (
+                    index == 1 and interpreter.startswith("python") and not argument.startswith("-")
+                ):
+                    script = Path(argument)
+                    if not script.is_absolute():
+                        script = self.project_root / script
+                    results.append(DoctorResult(f"{name} script", script.is_file(), str(script)))
+        for name in ("tool_dirs", "python_path"):
+            for directory in getattr(self.config, name):
+                path = directory if directory.is_absolute() else self.project_root / directory
+                results.append(DoctorResult(name, path.is_dir(), str(path)))
         chipdb = self.config.chipdb
         results.append(
             DoctorResult(
@@ -234,6 +300,10 @@ class Toolchain:
     def _input_digest(self, firmware: FirmwareBuildConfig | None = None) -> str:
         digest = hashlib.sha256()
         settings = asdict(self.config)
+        for name in ("tool_dirs", "python_path"):
+            if not settings[name]:
+                # Empty environment extensions preserve historical receipts.
+                del settings[name]
         digest.update(json.dumps(settings, sort_keys=True, default=str).encode())
         if firmware is not None and not firmware.is_reference:
             # The reference build keeps its historical digest; a custom build
@@ -242,14 +312,6 @@ class Toolchain:
         for path in [*self._sources(), self.constraints]:
             digest.update(str(path.relative_to(self.project_root)).encode())
             digest.update(path.read_bytes())
-        return digest.hexdigest()
-
-    @staticmethod
-    def _file_digest(path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
         return digest.hexdigest()
 
     def _run(
@@ -275,12 +337,15 @@ class Toolchain:
         stdout_path: Path | None = None,
         env: dict[str, str] | None = None,
     ) -> tuple[int, str]:
-        command_line = "$ " + shlex.join(args)
+        command_line = "$ " + (
+            subprocess.list2cmdline(args) if os.name == "nt" else shlex.join(args)
+        )
         journal.write(command_line + "\n")
         journal.flush()
         if log:
             log(command_line)
         try:
+            env = self._environment() if env is None else env
             if stdout_path is None:
                 process = subprocess.Popen(
                     args,
@@ -619,7 +684,7 @@ class Toolchain:
                 # Yosys has its own command interpreter: escape every path inside
                 # its double-quoted token syntax, independently of shell escaping.
                 def quote(path: Path) -> str:
-                    return '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
+                    return '"' + path.as_posix().replace('"', '\\"') + '"'
 
                 parameters = (
                     ""
@@ -642,8 +707,8 @@ class Toolchain:
                     + "-top arty_top; write_json "
                     + quote(netlist)
                 )
-                yosys_executable = shutil.which(self._args("yosys")[0])
-                yosys_env = os.environ.copy()
+                yosys_env = self._environment()
+                yosys_executable = shutil.which(self._args("yosys")[0], path=yosys_env.get("PATH"))
                 if yosys_executable:
                     # Also find ABC beside a portable absolute Yosys path.
                     yosys_env["PATH"] = (
@@ -732,6 +797,10 @@ class Toolchain:
                     journal,
                 )
                 self._require_output(bitstream)
+                try:
+                    image = read_bitstream(bitstream)
+                except BitstreamError as exc:
+                    raise ToolchainError(f"Bitstream produit invalide : {exc}") from exc
                 if self._input_digest(firmware) != source_digest:
                     raise ToolchainError(
                         "Les sources/configurations ont changé pendant la compilation."
@@ -742,7 +811,7 @@ class Toolchain:
                     "version": 1,
                     "part": self.config.part,
                     "input_sha256": source_digest,
-                    "bitstream_sha256": self._file_digest(self.bitstream),
+                    "bitstream_sha256": image.sha256,
                     "timing_clock": "core_clock",
                     "timing_requirement_mhz": firmware.core_hz / 1e6,
                     "timing_scope": "nextpnr register paths; excludes physical GPIO/DDR validation",
@@ -758,42 +827,57 @@ class Toolchain:
                 log(f"Bitstream validé : {self.bitstream}")
             return self.bitstream
 
+    def validate_programming(self, bitstream: Path) -> BitstreamImage:
+        """Read and validate the current build before touching hardware.
+
+        The UI can call this before closing an active UART connection. The
+        programmer repeats this check under the build lock, so a changed file
+        or receipt cannot gain authorization from an earlier preflight.
+        """
+        path = Path(bitstream).expanduser().resolve()
+        if path != self.bitstream:
+            raise ToolchainError(f"Programmez le bitstream validé de ce projet : {self.bitstream}")
+        try:
+            receipt: Any = json.loads(self.receipt.read_text(encoding="utf-8"))
+            firmware = (
+                FirmwareBuildConfig.from_dict(receipt["firmware_config"])
+                if isinstance(receipt, dict) and "firmware_config" in receipt
+                else FirmwareBuildConfig()
+            )
+            image = read_bitstream(path)
+            valid = (
+                isinstance(receipt, dict)
+                and receipt.get("version") == 1
+                and receipt.get("part") == self.config.part
+                and receipt.get("input_sha256") == self._input_digest(firmware)
+                and receipt.get("bitstream_sha256") == image.sha256
+                and receipt.get("timing_clock") == "core_clock"
+                and receipt.get("timing_requirement_mhz") == firmware.core_hz / 1e6
+                and (
+                    receipt.get("build_id") == firmware.build_id
+                    if "firmware_config" in receipt
+                    else receipt.get("build_id", firmware.build_id) == firmware.build_id
+                )
+            )
+        except (OSError, ValueError, TypeError, BitstreamError):
+            valid = False
+        if not valid:
+            raise ToolchainError(
+                "Bitstream absent, invalide, modifié ou périmé : "
+                "recompilez avec succès avant de programmer."
+            )
+        return image
+
     def program(self, bitstream: Path, log: Log | None = None) -> None:
         with self._exclusive():
-            path = Path(bitstream).expanduser().resolve()
-            if path != self.bitstream:
-                raise ToolchainError(
-                    f"Programmez le bitstream validé de ce projet : {self.bitstream}"
-                )
-            try:
-                receipt: Any = json.loads(self.receipt.read_text(encoding="utf-8"))
-                firmware = (
-                    FirmwareBuildConfig.from_dict(receipt["firmware_config"])
-                    if isinstance(receipt, dict) and "firmware_config" in receipt
-                    else FirmwareBuildConfig()
-                )
-                valid = (
-                    isinstance(receipt, dict)
-                    and receipt.get("version") == 1
-                    and receipt.get("part") == self.config.part
-                    and receipt.get("input_sha256") == self._input_digest(firmware)
-                    and receipt.get("bitstream_sha256") == self._file_digest(path)
-                    and receipt.get("timing_requirement_mhz") == firmware.core_hz / 1e6
-                )
-            except (OSError, ValueError, TypeError):
-                valid = False
-            if not valid:
-                raise ToolchainError(
-                    "Bitstream absent, modifié ou périmé : "
-                    "recompilez avec succès avant de programmer."
-                )
+            image = self.validate_programming(bitstream)
             with (self.build_dir / "program.log").open("w", encoding="utf-8") as journal:
                 self._run(
                     [
                         *self._args("openfpgaloader"),
                         "-b",
                         TARGET_BOARD,
-                        str(path),
+                        str(image.path),
                     ],
                     log,
                     journal,

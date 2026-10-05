@@ -101,6 +101,19 @@ def test_decode_response_fields():
 
 
 @pytest.mark.parametrize(
+    ("wire", "sequence"),
+    [
+        ("a7 7a 01 86 01 04 00 00 04 00 53 7c", 1),
+        ("a7 7a 01 86 02 04 00 00 04 00 b3 b2", 2),
+    ],
+)
+def test_board_captured_info_reply_is_revision_four(wire, sequence):
+    packets = PacketDecoder().feed(bytes.fromhex(wire))
+    assert packets == [Packet(1, 0x86, sequence, b"\x00\x00\x04\x00")]
+    assert decode_response(packets[0]) == DeviceStatus(StatusCode.OK, False, 4)
+
+
+@pytest.mark.parametrize(
     "packet",
     [
         Packet(2, 0x81, 0, b"\x00\x00\x00\x00"),

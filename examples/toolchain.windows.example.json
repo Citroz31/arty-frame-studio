@@ -1,14 +1,24 @@
 {
-  "yosys": "tools/bin/yosys.exe",
-  "nextpnr_xilinx": "tools/bin/nextpnr-xilinx.exe",
+  "yosys": "tools/oss-cad-suite/bin/yosys.exe",
+  "yosys_mapping": "abc9",
+  "nextpnr_xilinx": "tools/openxc7/bin/nextpnr-xilinx.exe",
+  "nextpnr_backend": "himbaechel",
   "fasm2frames": [
-    ".venv/Scripts/python.exe",
-    "tools/prjxray/utils/fasm2frames.py"
+    "tools/oss-cad-suite/lib/python3.exe",
+    "tools/openxc7/libexec/fasm2frames"
   ],
-  "xc7frames2bit": "tools/bin/xc7frames2bit.exe",
-  "openfpgaloader": "tools/bin/openFPGALoader.exe",
-  "chipdb": "tools/chipdb/xc7a100tcsg324-1.bin",
-  "prjxray_db": "tools/prjxray-db/artix7",
+  "xc7frames2bit": "tools/openxc7/bin/xc7frames2bit.exe",
+  "openfpgaloader": "tools/oss-cad-suite/bin/openFPGALoader.exe",
+  "tool_dirs": [
+    "tools/oss-cad-suite/bin",
+    "tools/oss-cad-suite/lib",
+    "tools/openxc7/bin"
+  ],
+  "python_path": ["tools/openxc7/lib/python3.12/site-packages"],
+  "chipdb": "tools/openxc7/chipdb/chipdb-xc7a100t.bin",
+  "prjxray_db": "tools/openxc7/share/nextpnr/external/prjxray-db/artix7",
   "part": "xc7a100tcsg324-1",
-  "build_dir": "build"
+  "build_dir": "build",
+  "nextpnr_seeds": [8],
+  "timing_margin": 0.03
 }

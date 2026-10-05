@@ -39,6 +39,11 @@ suivant ; `start-windows.cmd --setup-only` le fait sans lancer l'interface.
 L'application retient le dernier oscilloscope utilisé
 (`profiles/oscilloscope.json`).
 
+Avec un appareil réel, **Connecter** lit ses réglages et la trace déjà présente
+à l'écran. Cette lecture ne demande pas une nouvelle acquisition. Un appareil
+déjà arrêté reste arrêté ; un appareil actif est suspendu pendant le transfert
+des deux voies et des mesures, puis reprend **Run**.
+
 ## 2. Brancher les sondes
 
 Les sorties de l'Arty sont des signaux **3,3 V** sur le Pmod **JB** avec le
@@ -80,10 +85,10 @@ indices à vérifier, sans identifier automatiquement la cause physique.
   voies. Une fois connecté, l'identité de l'appareil s'affiche et les détails
   se replient. **Paramètres de connexion** les réaffiche ; les associations
   CH1/CH2 et **Déconnecter** restent accessibles.
-- **Barre d'acquisition** : **Run / Stop** (vert pour lancer, rouge pendant
-  les acquisitions répétées), **Single**, **Auto scale**, **Préréglage de la
-  trame**, **Pause entre acquisitions** (0,2 à 5 s) et état de la dernière
-  acquisition.
+- **Barre de lecture** : **Run / Stop** (vert pour lancer, rouge pendant le
+  rafraîchissement), **Single**, **Lire l'écran**, **Auto scale**,
+  **Préréglage de la trame**, **Pause entre lectures** (0,2 à 5 s) et état du
+  dernier relevé.
 - **Écran** : 10 × 8 divisions. CH1 en jaune, CH2 en vert ; repères de masse
   `1▶` et `2▶` à gauche, niveau de déclenchement `◀T` à droite, instant de
   déclenchement `▼` en haut. Le calibre, la base de temps et le
@@ -93,6 +98,15 @@ indices à vérifier, sans identifier automatiquement la cause physique.
 - **Colonne de réglages** (à droite sur grand écran, dessous sur petite
   fenêtre) : Voies, Base de temps, Déclenchement, Curseurs, Exporter.
 
+La grille reprend les réglages lus à la connexion, y compris si le transfert
+de la trace échoue : par exemple, **10 V/div et 500 ns/div** lus sur l'appareil
+sont aussi indiqués en haut de la grille. L'erreur reste visible dans l'état
+de lecture et le journal. Si une trace antérieure est conservée, elle garde
+ses propres axes ; une note le précise lorsqu'ils diffèrent des nouveaux
+réglages. Le compteur « Acquisition » compte les relevés réussis dans
+l'application ; « écran existant lu » indique la lecture d'une trace déjà
+présente, sans confirmer un nouveau déclenchement physique.
+
 ## 4. Mesurer une fréquence ou une période d'horloge
 
 1. Connecter, puis cliquer sur **Préréglage de la trame** : 1 V/div sur les
@@ -100,13 +114,24 @@ indices à vérifier, sans identifier automatiquement la cause physique.
    **cinq périodes** de la CLK du Pilotage, déclenchement **CLK, front
    montant, 1,65 V, Auto**. Le facteur de sonde de chaque voie est conservé.
    **Auto scale** convient aussi pour un signal inconnu.
-2. Cliquer sur **Single** pour une acquisition, ou **Run** pour un
-   rafraîchissement continu à la cadence choisie.
+2. Pour un signal continu ou des trames répétées, mettre l'oscilloscope en
+   **Run** sur sa face avant, puis cliquer sur **Run** dans l'application pour
+   suivre son écran à la cadence choisie. **Lire l'écran** relit une fois la
+   trace présente. **Single** dans l'application arme une nouvelle acquisition.
 3. Lire la carte de mesure de la voie CLK : **fréquence** et **période**.
    « Mesuré par l'oscilloscope » signifie que les valeurs viennent des
    mesures de l'appareil. Sur le DSOX1202A, fréquence et période portent sur le
    **cycle visible le plus proche de la référence de déclenchement**. Sinon,
    l'application les estime à partir des points relus.
+
+Pour une trame envoyée une seule fois, préparer les calibres et le
+déclenchement avant l'émission, puis :
+
+1. Sur l'oscilloscope, choisir **Normal** et armer **Single**.
+2. Dans le **Pilotage**, cliquer sur **Envoyer la trame**.
+3. Une fois la trace acquise sur l'appareil, cliquer sur **Lire l'écran** dans
+   l'application. Elle conserve la trace arrêtée sans réarmer ni forcer de
+   déclenchement.
 
 Les mesures locales utilisent les niveaux bas et haut du signal (centiles 5 et
 95 %), des croisements au mi-niveau avec hystérésis et une interpolation entre
@@ -128,24 +153,42 @@ des bits ; la cadence de répétition des trames se mesure sur LATCH.
 
 - **Déclenchement** : source CH1 ou CH2, front montant ou descendant, niveau en
   volts (`1.65`, `1,65` ou `500m` sont acceptés), bouton **50 %** pour placer le
-  niveau au milieu du signal de la source. Mode **Auto** : l'application peut
-  forcer l'acquisition sans front et l'indique dans son état. Mode **Normal** :
-  elle attend un front ; sans front avant le délai, l'écran garde la dernière
-  trace et indique « En attente de déclenchement ».
+  niveau au milieu du signal de la source. Pour une nouvelle acquisition
+  demandée par l'application, le mode **Auto** peut forcer la trace sans front
+  et l'indique dans l'état. En mode **Normal**, elle attend un front ; sans
+  front avant le délai, l'écran garde la dernière trace et indique
+  « En attente de déclenchement ». La lecture d'un écran existant ne force
+  aucun déclenchement.
 - **Calibres** : liste 1-2-5 de 1 mV/div à 100 V/div, entourée de loupes
   (**dézoomer / zoomer** d'un cran, comme un bouton rotatif). **Décalage** : tension
   au centre de l'écran. **Couplage** DC ou AC.
 - **Base de temps** : de 2 ns/div à 5 s/div, avec les mêmes loupes.
   **Position** : retard du centre de l'écran sur le déclenchement (`100n`,
   `-2u`, `0`…).
-- **Run / Stop / Single** : l'application commande des acquisitions uniques
-  (SINGLE) et les relit ; **Run** les enchaîne à la cadence de
-  **Rafraîchissement**. Sur le DSOX1202A, SINGLE attend un front même si le
-  déclenchement est en Auto ; l'application utilise **Force Trigger** après une courte
-  attente dans ce mode pour permettre la lecture d'un niveau continu. Une
-  modification faite sur la face avant est reprise à
-  l'acquisition suivante. À la déconnexion ou à la fermeture, l'oscilloscope
-  reprend son acquisition normale (RUN).
+- **Lire l'écran** : lire une fois les points et les mesures de la trace
+  présente. Aucun **SINGLE**, **Force Trigger** ni lecture du registre
+  d'événement de déclenchement n'est envoyé. Si l'appareil est actif, il reçoit
+  **STOP**, puis reprend **RUN** après le transfert ; s'il est déjà arrêté,
+  son état reste arrêté.
+- **Run / Stop dans l'application** : répéter ou suspendre ces lectures sur
+  un appareil réel. **Run** dans l'application laisse un scope arrêté dans cet
+  état ; il faut utiliser sa face avant pour lancer ses acquisitions. La
+  **Pause entre lectures** s'ajoute au temps de transfert. En **Simulation
+  (démo)**, Run continue de produire des acquisitions simulées successives.
+- **Single dans l'application** : commander une nouvelle acquisition unique
+  (**SINGLE**) et la lire. Sur le DSOX1202A, SINGLE attend un front même en
+  Auto ; dans ce mode, l'application utilise **Force Trigger** après une courte
+  attente pour permettre la lecture d'un niveau continu. Pour conserver une
+  trame unique déjà acquise, utiliser **Lire l'écran**.
+
+Les modifications faites sur la face avant sont reprises à la lecture
+suivante. Un changement de réglage envoyé depuis l'application, le
+**Préréglage de la trame** ou **Auto scale** demande ensuite une nouvelle
+acquisition lorsque le rafraîchissement est arrêté. Pendant Run, la prochaine
+lecture suit l'écran de l'appareil. À la déconnexion ou à la fermeture, la
+liaison est fermée sans envoyer **RUN** : un oscilloscope arrêté reste arrêté,
+et un oscilloscope actif continue son acquisition. Pour le relancer, utiliser
+sa face avant.
 
 ## 6. Curseurs
 
@@ -171,24 +214,29 @@ sur la voie choisie. Les instants sont comptés depuis le déclenchement.
 
 ```bash
 arty-frame scope-list                                   # ressources VISA (USB, LAN)
-arty-frame scope --lan 192.168.1.50 --preset            # réglages de la trame puis mesure
+arty-frame scope --lan 192.168.1.50 --csv exports/trace.csv  # lire l'écran existant
+arty-frame scope --lan 192.168.1.50 --preset --single  # réglages puis nouvelle acquisition
 arty-frame scope --visa USB0::0x2A8D::0x1797::CN12345678::0::INSTR --autoscale \
     --csv exports/mesure.csv --png exports/ecran.png
 arty-frame scope --demo --profile examples/frame_sipo_8bits_10mhz.json
 ```
 
 La commande affiche la fréquence, la période, Vpp et le rapport cyclique de
-chaque voie affichée. Pour USB, remplacer l'adresse d'exemple par la ressource
+chaque voie affichée. Avec un appareil réel, elle lit par défaut l'écran
+existant, puis ferme la liaison sans relancer un scope arrêté. **`--single`**
+demande une nouvelle acquisition ; la démo produit toujours une acquisition
+simulée. Avec `--single`, la CLI relance l'appareil en **RUN** avant de fermer
+la liaison. Pour USB, remplacer l'adresse d'exemple par la ressource
 réelle donnée par `scope-list` : identifiants et numéro de série varient.
 Les associations `--ch1 data --ch2 clk` sont celles par défaut. Si les câbles
 sont inversés, utiliser `--ch1 clk --ch2 data` ; cela change l'interprétation
-et le préréglage, pas le câblage. Le délai `--timeout` doit être compris entre
-0 exclus et 60 secondes inclus.
+et le préréglage, pas le câblage. Le délai `--timeout`, utilisé par `--single`
+et la démo, doit être compris entre 0 exclus et 60 secondes inclus.
 
 ## 9. Limites
 
-- Dans l'interface, l'attente par acquisition est de 2 secondes. Une base de
-  temps très lente peut empêcher la capture de se terminer dans ce délai,
+- Dans l'interface, l'attente d'une nouvelle acquisition est de 2 secondes.
+  Une base de temps très lente peut empêcher la capture de se terminer dans ce délai,
   même après un déclenchement. Réduire la base de temps ou utiliser la CLI
   avec un `--timeout` plus grand (au plus 60 secondes).
 - Deux voies, déclenchement sur front uniquement, **jusqu'à 1000 points
@@ -221,6 +269,9 @@ puis 10 MHz, et utiliser une chaîne de mesure adaptée aux fronts à vérifier.
 | « PyVISA est absent » | Relancer `start-windows.cmd --setup-only`. |
 | Base de temps ou déclenchement non pris en charge | Sur l'appareil, choisir le mode horizontal **Main** et un déclenchement **Edge** sur CH1 ou CH2, puis reconnecter. XY, Roll, Zoom, External et les fronts alternés ne sont pas pilotés par cette interface. |
 | « En attente de déclenchement (mode Normal) » | Vérifier la source et le niveau, cliquer sur **50 %** ou passer en **Auto**. |
+| La trace est visible sur le scope après une trame unique | Cliquer sur **Lire l'écran** pour récupérer cette trace arrêtée. **Single** dans l'application demanderait une nouvelle acquisition après la fin de la trame. |
+| Les réglages sont lus, mais « Aucune acquisition » reste affiché | Lire le message d'erreur dans l'état et le journal, puis réessayer **Lire l'écran**. Sans trace antérieure conservée, les calibres de la grille doivent correspondre aux valeurs lues, par exemple 10 V/div et 500 ns/div. |
+| Le compteur progresse, mais la grille ou le tracé reste figé | Conserver le journal, les calibres affichés sur l'appareil et une capture de l'application pour comparer les relevés. Ce symptôme seul ne permet pas d'identifier sa cause sous Windows. |
 | Fréquence « — » | Moins de deux fronts à l'écran : augmenter la base de temps ou utiliser **Préréglage de la trame**. |
 | Tensions ×10 ou ÷10 | Accorder le commutateur de la sonde (×1 / ×10) et le réglage **Sonde** de la voie. |
 | Pics ou oscillations à chaque front | Utiliser le ressort de masse court de la sonde, au plus près de JB5/JB11. |
