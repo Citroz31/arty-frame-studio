@@ -46,6 +46,28 @@ def test_scope_listing_and_bad_addresses(monkeypatch, capsys) -> None:
     assert "Adresse IP" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("timeout", ["nan", "inf", "0", "-1", "61"])
+def test_scope_rejects_invalid_timeout_before_contacting_instrument(timeout, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "SocketTransport", lambda *a: pytest.fail("Unexpected instrument I/O"))
+    assert main(["scope", "--lan", "192.0.2.1", "--timeout", timeout]) == 1
+    assert "délai de déclenchement" in capsys.readouterr().err
+
+
+def test_demo_screen_export_is_rejected_before_acquisition(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "SimulatedKeysight", lambda *a: pytest.fail("Unexpected acquisition"))
+    assert main(["scope", "--demo", "--png", str(tmp_path / "screen.png")]) == 1
+    assert "export CSV" in capsys.readouterr().err
+    assert not (tmp_path / "screen.png").exists()
+
+
+def test_scope_channel_assignment_controls_measurement_interpretation(capsys):
+    assert main(["scope", "--demo", "--ch1", "clk", "--ch2", "data"]) == 0
+    output = capsys.readouterr()
+    assert "CH1 : fréquence 10.00 MHz · période 100.0 ns" in output.out
+    assert "CH2 : fréquence 5.000 MHz" in output.out
+    assert "DATA" in output.err and "CLK" in output.err
+
+
 def test_invalid_profile_and_missing_toolchain_return_errors(tmp_path: Path, capsys) -> None:
     assert main(["simulate", "--profile", str(tmp_path / "missing.json")]) == 1
     assert main(["doctor", "--toolchain", str(tmp_path / "absent.json")]) == 1

@@ -153,13 +153,20 @@ def _parser() -> argparse.ArgumentParser:
     link.add_argument("--lan", metavar="ADRESSE", help="Adresse IP (SCPI, port 5025)")
     link.add_argument("--visa", metavar="RESSOURCE", help="USB0::0x2A8D::…::INSTR (PyVISA)")
     link.add_argument(
-        "--demo", action="store_true", help="Oscilloscope simulé : DATA sur CH1, CLK sur CH2"
+        "--demo", action="store_true", help="Oscilloscope simulé selon le profil et --ch1/--ch2"
     )
     scope.add_argument("--profile", type=Path, help="Trame observée en démonstration")
+    for channel, signal in ((1, "data"), (2, "clk")):
+        scope.add_argument(
+            f"--ch{channel}",
+            choices=("data", "clk", "latch", "other"),
+            default=signal,
+            help=f"Signal câblé sur CH{channel} (défaut : {signal}) ; ne change pas le câblage",
+        )
     scope.add_argument(
         "--preset",
         action="store_true",
-        help="Régler pour la trame (1 V/div, 5 périodes de CLK, déclenchement sur CH2)",
+        help="Régler pour la trame (1 V/div, 5 périodes de CLK, déclenchement sur la voie CLK)",
     )
     scope.add_argument("--autoscale", action="store_true", help="Lancer Auto scale avant")
     scope.add_argument("--timeout", type=float, default=2.0, help="Attente du déclenchement (s)")
@@ -198,8 +205,15 @@ def _firmware_settings(args: argparse.Namespace) -> FirmwareBuildConfig:
 
 
 def _scope(args: argparse.Namespace) -> int:
+    if not math.isfinite(args.timeout) or not 0 < args.timeout <= 60:
+        raise ValueError("Le délai de déclenchement doit être fini, supérieur à 0 et au plus 60 s.")
+    if args.demo and args.png:
+        raise ValueError("Copie d'écran indisponible en démonstration ; utilisez l'export CSV.")
     config = load_profile(args.profile) if args.profile else FrameConfig()
-    mapping: dict[int, str | None] = {1: "data", 2: "clk"}
+    mapping: dict[int, str | None] = {
+        channel: None if signal == "other" else signal
+        for channel, signal in ((1, args.ch1), (2, args.ch2))
+    }
     transport: Any
     if args.lan:
         transport = SocketTransport(args.lan)
@@ -215,7 +229,7 @@ def _scope(args: argparse.Namespace) -> int:
             scope.apply_settings(frame_preset(config, mapping, scope.read_settings()))
         if args.autoscale:
             scope.autoscale()
-        acquisition = scope.capture(timeout=args.timeout)
+        acquisition = scope.capture(timeout=args.timeout, mapping=mapping)
         settings = acquisition.settings
         trigger = settings.trigger
         print(
@@ -225,7 +239,7 @@ def _scope(args: argparse.Namespace) -> int:
         )
         for channel, values in sorted(acquisition.measurements.items()):
             print(f"CH{channel} : {describe(values)}")
-        for warning in measurement_warnings(acquisition, mapping if args.demo else {}):
+        for warning in measurement_warnings(acquisition, mapping):
             print(f"Attention : {warning}", file=sys.stderr)
         if args.csv:
             print(f"Points : {write_acquisition_csv(acquisition, args.csv)}")
@@ -253,7 +267,8 @@ def main(argv: list[str] | None = None) -> int:
             if not resources:
                 print(
                     "Aucun instrument VISA : vérifier le câble USB arrière et Keysight IO "
-                    "Libraries Suite, ou utiliser scope --lan ADRESSE.",
+                    "Libraries Suite, ou utiliser scope --lan ADRESSE si l'appareil dispose "
+                    "d'une prise LAN.",
                     file=sys.stderr,
                 )
                 return 1

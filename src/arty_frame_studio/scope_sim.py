@@ -1,8 +1,8 @@
 """Oscilloscope simulé : répond au sous-ensemble SCPI utilisé par ``KeysightScope``.
 
-Les voies observent les signaux de la trame courante (DATA, CLK ou LATCH),
-répétés à chaque période de trame comme en émission continue, avec un modèle
-électrique simple : niveaux LVCMOS 0–3,3 V, fronts d'environ 1,2 ns, léger
+Les voies observent une émission de la trame courante (DATA, CLK ou LATCH),
+avec son nombre de répétitions, puis le repos, ou sans fin en mode continu. Un modèle
+électrique simple ajoute des niveaux LVCMOS 0–3,3 V, des fronts d'environ 1,2 ns, un léger
 dépassement amorti et bruit. Il sert à la démonstration sans oscilloscope et
 aux tests ; il ne prédit pas le signal réel d'un montage.
 """
@@ -27,7 +27,6 @@ from .scope import (
     measure_trace,
     nice_ceiling,
 )
-from .simulation import simulate
 
 SIGNALS = ("data", "clk", "latch")
 IDENTITY = "KEYSIGHT TECHNOLOGIES,DSO-X 1202A,SIMULATION,02.12 (Arty Frame Studio, démo)"
@@ -43,45 +42,102 @@ class SignalSource:
     edges: dict[str, tuple[tuple[float, ...], tuple[int, ...]]]
     high: float = 3.3
     low: float = 0.0
+    duration: float | None = None
+    idle_latch: int = 0
+    free_clock_period: float | None = None
+
+    def transition(self, signal: str, time: float) -> tuple[float, int, int]:
+        """Dernier front, niveaux avant/après ; CLK libre est calculée sans aperçu."""
+        idle = self.idle_latch if signal == "latch" else 0
+        if time < 0:
+            return time, idle, idle
+        if self.duration is not None and time >= self.duration:
+            previous = self.level(signal, math.nextafter(self.duration, -math.inf))
+            return self.duration, previous, idle
+        if signal == "clk" and self.free_clock_period is not None:
+            half = self.free_clock_period / 2
+            index = math.floor(time / half)
+            level = index % 2
+            return index * half, 1 - level if index else 0, level
+        times, levels = self.edges[signal]
+        phase = time % self.period
+        index = bisect.bisect_right(times, phase) - 1
+        start = time - phase + times[index]
+        previous = levels[index - 1] if start > 0 else idle
+        if index == 0 and start > 0 and times[-1] >= self.period:
+            previous = levels[-2]
+        return start, previous, levels[index]
 
     def level(self, signal: str, time: float) -> int:
+        if time < 0 or (self.duration is not None and time >= self.duration):
+            return self.idle_latch if signal == "latch" else 0
+        if signal == "clk" and self.free_clock_period is not None:
+            return math.floor(time / (self.free_clock_period / 2)) % 2
         times, levels = self.edges[signal]
         index = bisect.bisect_right(times, time % self.period) - 1
         return levels[index]
 
     def rising_edges(self, signal: str) -> list[float]:
         times, levels = self.edges[signal]
-        return [t for i, t in enumerate(times) if levels[i] == 1 and levels[i - 1] == 0]
+        idle = self.idle_latch if signal == "latch" else 0
+        return [
+            t for i, t in enumerate(times) if levels[i] == 1 and (levels[i - 1] if i else idle) == 0
+        ]
 
     def falling_edges(self, signal: str) -> list[float]:
+        if signal == "clk" and self.free_clock_period is not None:
+            return [self.free_clock_period]
         times, levels = self.edges[signal]
-        return [t for i, t in enumerate(times) if levels[i] == 0 and levels[i - 1] == 1]
+        idle = self.idle_latch if signal == "latch" else 0
+        return [
+            t for i, t in enumerate(times) if levels[i] == 0 and (levels[i - 1] if i else idle) == 1
+        ]
 
 
 def signal_source(config: FrameConfig, *, high: float = 3.3) -> SignalSource:
-    """Une période de la trame, d'après le simulateur idéal du projet."""
-    waveform = simulate(config, max_frames=1)
-    if waveform.frames_simulated:
-        period = config.frame_duration_ns * 1e-9
-    else:  # very long free-CLK frame cropped by the preview budget
-        period = waveform.duration_ns * 1e-9
-    edges = {}
-    for signal in SIGNALS:
+    """Source exacte et bornée en mémoire, indépendante du budget de l'aperçu."""
+    tick = config.tick_ns * 1e-9
+    half = config.divider * tick
+    period = config.frame_duration_ticks * tick
+    idle = int(config.latch_active_low)
+    edges: dict[str, tuple[tuple[float, ...], tuple[int, ...]]] = {}
+
+    def compact(transitions: list[tuple[float, int]]) -> tuple[tuple[float, ...], tuple[int, ...]]:
         times: list[float] = []
         levels: list[int] = []
-        for transition in waveform.transitions:
-            at = transition.time_ns * 1e-9
-            level = int(getattr(transition, signal))
-            if at >= period - 1e-15:
-                break
+        for at, level in transitions:
             if not levels or level != levels[-1]:
                 times.append(at)
                 levels.append(level)
-        if not times or times[0] > 0:
-            times.insert(0, 0.0)
-            levels.insert(0, levels[-1] if levels else 0)
-        edges[signal] = (tuple(times), tuple(levels))
-    return SignalSource(period, edges, high=high)
+        return tuple(times), tuple(levels)
+
+    data = [(2 * index * half, bit) for index, bit in enumerate(config.bits)]
+    data.append((2 * config.bit_count * half, 0))
+    edges["data"] = compact(data)
+    if config.free_clock:
+        edges["clk"] = ((0.0, half), (0, 1))
+        latch_start = 2 * config.bit_count * half
+    else:
+        clock = [(0.0, 0)]
+        for index in range(config.bit_count):
+            clock.extend((((2 * index + 1) * half, 1), ((2 * index + 2) * half, 0)))
+        edges["clk"] = compact(clock)
+        latch_start = (2 * config.bit_count + 1) * half
+    edges["latch"] = compact(
+        [
+            (0.0, idle),
+            (latch_start, 1 - idle),
+            (latch_start + config.latch_active_ticks * tick, idle),
+        ]
+    )
+    return SignalSource(
+        period,
+        edges,
+        high=high,
+        duration=None if config.continuous else config.repeat_count * period,
+        idle_latch=idle,
+        free_clock_period=2 * half if config.free_clock else None,
+    )
 
 
 @dataclass
@@ -105,6 +161,9 @@ class _Trigger:
 class _Record:
     offset: float
     increment: float
+    start: float
+    span: float
+    dense: list[float] = field(default_factory=list)
     codes: list[int] = field(default_factory=list)
 
 
@@ -156,6 +215,9 @@ class SimulatedKeysight:
         self.channels = {1: _Channel(offset=-0.5), 2: _Channel(offset=3.8)}
         self.time_scale = 50e-9
         self.time_position = 0.0
+        self.time_reference = "CENT"
+        self.time_mode = "MAIN"
+        self.trigger_mode = "EDGE"
         self.trigger = _Trigger()
         self.wave_source = 1
         self.points = 1000
@@ -163,6 +225,8 @@ class SimulatedKeysight:
         self.running = False
         self.waiting = False
         self.trigger_event = False
+        self.single_armed = False
+        self.captured_mapping: dict[int, str | None] = {}
         self.records: dict[int, _Record] = {}
         self.analysis: dict[int, Trace] = {}
 
@@ -173,25 +237,31 @@ class SimulatedKeysight:
     def _voltage(self, source: SignalSource, signal: str | None, time: float) -> float:
         if signal is None:
             return 0.0
-        times, levels = source.edges[signal]
-        phase = time % source.period
-        index = bisect.bisect_right(times, phase) - 1
-        start = times[index]
-        new, previous = levels[index], levels[index - 1]
+        start, previous, new = source.transition(signal, time)
         span = source.high - source.low
         value = source.low + span * new
-        if new != previous:
-            elapsed = phase - start
+        # Superpose recent step responses. Starting every falling edge at the
+        # high rail would invent a voltage jump when a short pulse has not settled.
+        earliest = time - max(12 * self._tau, 24e-9)
+        while start >= earliest:
+            elapsed = time - start
             delta = span * (new - previous)
-            # First-order edge plus a small damped overshoot (probe and wiring).
             value -= delta * math.exp(-elapsed / self._tau)
             value += (
                 0.08 * delta * math.exp(-elapsed / 2e-9) * math.sin(2 * math.pi * 3.5e8 * elapsed)
             )
+            if start <= 0:
+                break
+            earlier = source.transition(signal, start - max(1e-15, abs(start) * 1e-14))
+            if earlier[0] >= start:
+                break
+            start, previous, new = earlier
         return value
 
-    def _trigger_time(self, source: SignalSource | None) -> float | None:
-        signal = self._mapping().get(self.trigger.source)
+    def _trigger_time(
+        self, source: SignalSource | None, mapping: dict[int, str | None]
+    ) -> float | None:
+        signal = mapping.get(self.trigger.source)
         level = self.trigger.level
         if source is None or signal is None or not source.low < level < source.high:
             return None
@@ -199,18 +269,43 @@ class SimulatedKeysight:
         edges = source.rising_edges(signal) if rising else source.falling_edges(signal)
         if not edges:
             return None
-        # Instant où le front exponentiel franchit le niveau choisi.
-        fraction = (level - source.low) / (source.high - source.low)
-        fraction = fraction if rising else 1 - fraction
-        delay = -self._tau * math.log(1 - fraction)
-        return edges[0] + delay + source.period  # une période d'historique avant
+        changes = sorted(set(source.rising_edges(signal) + source.falling_edges(signal)))
+        for start in edges:
+            following = next(
+                (value for value in changes if value > start), source.period + changes[0]
+            )
+            end = min(following, start + 12 * self._tau)
+            previous_time, previous = start, self._voltage(source, signal, start)
+            # Find the first actual crossing, including the damped overshoot. A
+            # narrow pulse need not reach an arbitrarily high trigger threshold.
+            for index in range(1, 193):
+                time = start + index * (end - start) / 192
+                value = self._voltage(source, signal, time)
+                crossed = previous <= level <= value if rising else value <= level <= previous
+                if crossed:
+                    left, right = previous_time, time
+                    for _ in range(24):
+                        middle = (left + right) / 2
+                        above = self._voltage(source, signal, middle) >= level
+                        if above == rising:
+                            right = middle
+                        else:
+                            left = middle
+                    return (left + right) / 2
+                previous_time, previous = time, value
+        return None
 
     def _record(
-        self, source: SignalSource | None, channel: int, origin: float, points: int
+        self,
+        source: SignalSource | None,
+        channel: int,
+        origin: float,
+        points: int,
+        mapping: dict[int, str | None],
     ) -> list[float]:
-        signal = self._mapping().get(channel)
+        signal = mapping.get(channel)
         step = 10 * self.time_scale / points
-        start = self.time_position - 5 * self.time_scale
+        start = self._record_start()
         values = [
             (self._voltage(source, signal, origin + start + index * step) if source else 0.0)
             + self._random.gauss(0.0, self._noise)
@@ -221,30 +316,34 @@ class SimulatedKeysight:
             values = [value - mean for value in values]
         return values
 
-    def _acquire(self) -> None:
+    def _record_start(self) -> float:
+        divisions = {"LEFT": 1, "CENT": 5, "RIGHT": 9}[self.time_reference]
+        return self.time_position - divisions * self.time_scale
+
+    def _acquire(self, *, single: bool = False, forced: bool = False) -> None:
         source = self._source()
-        trigger = self._trigger_time(source)
-        if trigger is None and self.trigger.sweep == "NORM":
+        mapping = self._mapping()
+        trigger = None if forced else self._trigger_time(source, mapping)
+        if trigger is None and not forced and (single or self.trigger.sweep == "NORM"):
             self.waiting = True
             return
         origin = trigger if trigger is not None else 0.0
         self.trigger_event = trigger is not None
         self.waiting = False
+        self.single_armed = False
+        self.captured_mapping = mapping
         self.records.clear()
         self.analysis.clear()
-        start = self.time_position - 5 * self.time_scale
+        start = self._record_start()
         for channel in CHANNELS:
             settings = self.channels[channel]
             increment = settings.scale * 10 / 256
-            values = self._record(source, channel, origin, self.points)
-            codes = [
-                max(0, min(255, round((value - settings.offset) / increment + 128)))
-                for value in values
-            ]
-            self.records[channel] = _Record(settings.offset, increment, codes)
             # Mesures « de l'oscilloscope » : enregistrement plus fin, comme sa mémoire.
             fine = 4 * self.points
-            dense = self._record(source, channel, origin, fine)
+            dense = self._record(source, channel, origin, fine, mapping)
+            self.records[channel] = _Record(
+                settings.offset, increment, start, 10 * self.time_scale, dense
+            )
             step = 10 * self.time_scale / fine
             self.analysis[channel] = Trace(
                 channel, tuple(start + index * step for index in range(fine)), tuple(dense)
@@ -268,7 +367,9 @@ class SimulatedKeysight:
                 source.low - 0.5 * scale if channel == 1 else source.high + 0.5 * scale
             )
             edges = source.rising_edges(signal)
-            if len(edges) >= 2:
+            if signal == "clk" and source.free_clock_period is not None:
+                period = source.free_clock_period
+            elif len(edges) >= 2:
                 gaps = sorted(b - a for a, b in zip(edges, edges[1:], strict=False))
                 period = gaps[len(gaps) // 2]
             elif edges:
@@ -332,11 +433,24 @@ class SimulatedKeysight:
         elif key == "TIM:POS":
             self.time_position = float(argument)
         elif key == "TIM:REF":
-            if argument not in ("CENT", "CENTER"):
-                raise ValueError(argument)
+            self.time_reference = {
+                "CENT": "CENT",
+                "CENTER": "CENT",
+                "LEFT": "LEFT",
+                "RIGHT": "RIGHT",
+            }[argument]
+        elif key == "TIM:MODE":
+            self.time_mode = {
+                "MAIN": "MAIN",
+                "WIND": "WIND",
+                "WINDOW": "WIND",
+                "XY": "XY",
+                "ROLL": "ROLL",
+            }[argument]
         elif key == "TRIG:MODE":
             if argument != "EDGE":
                 raise ValueError(argument)
+            self.trigger_mode = argument
         elif key == "TRIG:EDGE:SOUR":
             match = re.fullmatch(r"CHAN(?:NEL)?([12])", argument)
             if not match:
@@ -349,14 +463,20 @@ class SimulatedKeysight:
         elif key == "TRIG:SWE":
             self.trigger.sweep = {"AUTO": "AUTO", "NORM": "NORM", "NORMAL": "NORM"}[argument]
         elif key == "RUN":
+            self.single_armed = False
             self.running = True
             self._acquire()
         elif key == "STOP":
+            self.single_armed = False
             self.running = False
             self.waiting = False
         elif key == "SING":
             self.running = False
-            self._acquire()
+            self.single_armed = True
+            self._acquire(single=True)
+        elif key == "TRIG:FORC":
+            if self.running or self.waiting:
+                self._acquire(forced=True)
         elif key == "AUT":
             self._autoscale()
         elif key == "WAV:SOUR":
@@ -370,7 +490,6 @@ class SimulatedKeysight:
                 raise ValueError(argument)
             if value != self.points:
                 self.points = value
-                self.records.clear()
         elif key in ("WAV:FORM", "WAV:UNS", "WAV:POIN:MODE", "*CLS", "*RST"):
             if key == "*RST":
                 self._reset()
@@ -408,6 +527,12 @@ class SimulatedKeysight:
             return f"{self.time_scale:+.6E}"
         if key == "TIM:POS":
             return f"{self.time_position:+.6E}"
+        if key == "TIM:REF":
+            return self.time_reference
+        if key == "TIM:MODE":
+            return self.time_mode
+        if key == "TRIG:MODE":
+            return self.trigger_mode
         if key == "TRIG:EDGE:SOUR":
             return f"CHAN{self.trigger.source}"
         if key == "TRIG:EDGE:SLOP":
@@ -419,15 +544,15 @@ class SimulatedKeysight:
         if key == "OPER:COND":
             if self.waiting:
                 # Normal sweep: keep waiting, unless the settings now allow a trigger.
-                self._acquire()
+                self._acquire(single=self.single_armed)
             return "+8" if self.running or self.waiting else "+0"
         if key == "TER":
             event, self.trigger_event = self.trigger_event, False
             return "+1" if event else "+0"
         if key == "WAV:PRE":
             record = self._wave_record()
-            start = self.time_position - 5 * self.time_scale
-            step = 10 * self.time_scale / len(record.codes)
+            start = record.start
+            step = record.span / len(record.codes)
             return (
                 f"+0,+0,+{len(record.codes)},+1,{step:+.6E},{start:+.6E},+0,"
                 f"{record.increment:+.6E},{record.offset:+.6E},+128"
@@ -442,15 +567,40 @@ class SimulatedKeysight:
 
     def _wave_record(self) -> _Record:
         if self.wave_source not in self.records:
-            self._acquire()
+            self._acquire(single=self.single_armed)
         if self.wave_source not in self.records:
             raise ScopeError("Aucune acquisition disponible : déclenchement en attente.")
-        return self.records[self.wave_source]
+        captured = self.records[self.wave_source]
+        count = min(self.points, len(captured.dense))
+        codes = [
+            max(
+                0,
+                min(
+                    255,
+                    round(
+                        (captured.dense[index * len(captured.dense) // count] - captured.offset)
+                        / captured.increment
+                        + 128
+                    ),
+                ),
+            )
+            for index in range(count)
+        ]
+        return _Record(
+            captured.offset, captured.increment, captured.start, captured.span, codes=codes
+        )
 
     def _measure(self, channel: int, item: str) -> str:
         trace = self.analysis.get(channel)
-        floor = 0.5 * self.channels[channel].scale
-        values = measure_trace(trace, min_amplitude=floor) if trace is not None else None
+        record = self.records.get(channel)
+        floor = 0.5 * record.increment * 256 / 10 if record else 0.5 * self.channels[channel].scale
+        values = (
+            measure_trace(
+                trace, min_amplitude=floor, clock=self.captured_mapping.get(channel) == "clk"
+            )
+            if trace is not None
+            else None
+        )
         result = {
             "FREQ": values.frequency if values else None,
             "PER": values.period if values else None,

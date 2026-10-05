@@ -1,12 +1,21 @@
 """Onglet Oscilloscope sans navigateur : démo, Run/Stop, réglages, curseurs, export."""
 
 import asyncio
+import threading
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 from arty_frame_studio.app import Studio
 from arty_frame_studio.model import FrameConfig
-from arty_frame_studio.scope import ScopeSettings, TriggerSettings
+from arty_frame_studio.scope import (
+    Measurements,
+    ScopeConnectionError,
+    ScopeError,
+    ScopeSettings,
+    Trace,
+    TriggerSettings,
+)
 from arty_frame_studio.scope_view import (
     MARGIN_X,
     Cursors,
@@ -74,7 +83,7 @@ def test_demo_scope_measures_data_and_clock_then_disconnects(tmp_path):
     assert panel.status.value.startswith("Acquisition 1 · déclenchée")
     assert not panel.run_button.disabled and not panel.export_button.disabled
     assert panel.screenshot_button.disabled  # no screen to copy in the demo
-    assert not panel.warning.visible
+    assert panel.warning.visible and "fréquence DATA" in panel.warning.value
     assert any("Oscilloscope connecté" in message for message, _ in logs)
 
     run_async(panel.disconnect())
@@ -270,3 +279,333 @@ def test_scope_tab_is_part_of_the_studio_and_closes_with_it(tmp_path):
     assert panel.frequency_text[2].value == "5.000 MHz"
     run_async(studio.shutdown())
     assert simulator.closed and panel.scope is None
+
+
+async def wait_for_thread(event: threading.Event) -> None:
+    while not event.is_set():
+        await asyncio.sleep(0.005)
+
+
+def pause_capture(panel, monkeypatch):
+    started, release = threading.Event(), threading.Event()
+    capture = panel.scope.capture
+
+    def blocked_capture(**kwargs):
+        acquisition = capture(**kwargs)
+        started.set()
+        assert release.wait(3), "Test did not release the capture thread"
+        return acquisition
+
+    monkeypatch.setattr(panel.scope, "capture", blocked_capture)
+    return started, release
+
+
+def test_stop_waits_for_capture_and_a_restart_owns_one_loop(tmp_path, monkeypatch):
+    panel, _ = make_panel(tmp_path)
+    run_async(panel._toggle_connection())
+    started, release = pause_capture(panel, monkeypatch)
+
+    async def scenario():
+        await panel._toggle_run()
+        await wait_for_thread(started)
+        previous = panel.run_task
+        stop = asyncio.create_task(panel._toggle_run())
+        await asyncio.sleep(0.01)
+        assert panel.stopping and not stop.done()
+        assert panel.run_button.disabled
+        await panel._toggle_run()  # An event queued during Stop cannot restart early.
+        assert panel.run_task is previous
+        release.set()
+        await stop
+        assert previous.done() and not panel.running
+        panel.refresh.value = "5.0"
+        await panel._toggle_run()
+        assert panel.run_task is not previous
+        while panel.count < 3:
+            await asyncio.sleep(0.005)
+        await panel._toggle_run()  # Wakes the five-second refresh pause immediately.
+        assert panel.run_task.done()
+
+    run_async(scenario())
+    assert not panel.running
+
+
+def test_shutdown_waits_for_a_capture_thread_without_publishing_it(tmp_path, monkeypatch):
+    panel, _ = make_panel(tmp_path)
+    run_async(panel._toggle_connection())
+    simulator = panel.scope._transport
+    started, release = pause_capture(panel, monkeypatch)
+
+    async def scenario():
+        single = asyncio.create_task(panel._single())
+        await wait_for_thread(started)
+        assert panel.capturing and panel.single_button.disabled
+        assert panel.autoscale_button.disabled and panel.run_button.disabled
+        count = panel.count
+        close = asyncio.create_task(panel.shutdown())
+        await asyncio.sleep(0.01)
+        assert not close.done() and not simulator.closed
+        release.set()
+        await asyncio.gather(single, close)
+        assert panel.count == count  # No UI acquisition after shutdown began.
+
+    run_async(scenario())
+    assert simulator.closed and panel.scope is None
+    assert simulator.commands[-1] == ":RUN"
+
+
+def test_shutdown_during_connection_closes_the_new_scope(tmp_path, monkeypatch):
+    panel, _ = make_panel(tmp_path)
+    started, release = threading.Event(), threading.Event()
+    opened = []
+    open_scope = panel._open
+
+    def blocked_open():
+        started.set()
+        assert release.wait(3)
+        result = open_scope()
+        opened.append(result[0])
+        return result
+
+    monkeypatch.setattr(panel, "_open", blocked_open)
+
+    async def scenario():
+        connect = asyncio.create_task(panel._toggle_connection())
+        await wait_for_thread(started)
+        close = asyncio.create_task(panel.shutdown())
+        await asyncio.sleep(0.01)
+        assert not close.done()
+        release.set()
+        await asyncio.gather(connect, close)
+
+    run_async(scenario())
+    assert panel.scope is None and opened[0]._transport.closed
+    assert panel.count == 0
+
+
+def test_shutdown_joins_a_disconnect_already_waiting_for_a_capture(tmp_path, monkeypatch):
+    panel, _ = make_panel(tmp_path)
+    run_async(panel._toggle_connection())
+    started, release = pause_capture(panel, monkeypatch)
+
+    async def scenario():
+        single = asyncio.create_task(panel._single())
+        await wait_for_thread(started)
+        disconnect = asyncio.create_task(panel.disconnect())
+        await asyncio.sleep(0.01)
+        close = asyncio.create_task(panel.shutdown())
+        await asyncio.sleep(0.01)
+        assert not close.done() and not disconnect.done()
+        release.set()
+        await asyncio.gather(single, disconnect, close)
+
+    run_async(scenario())
+    assert panel.scope is None and not panel.disconnecting
+
+
+def test_pending_settings_survive_an_older_capture(tmp_path, monkeypatch):
+    panel, _ = make_panel(tmp_path)
+    run_async(panel._toggle_connection())
+    started, release = pause_capture(panel, monkeypatch)
+
+    async def scenario():
+        capture = asyncio.create_task(panel._single())
+        await wait_for_thread(started)
+        panel.time_scale.value = repr(100e-9)
+        apply = asyncio.create_task(panel._settings_changed())
+        await asyncio.sleep(0.01)
+        assert panel.applying == 1 and panel.settings.time_scale == 100e-9
+        assert panel._display_settings().time_scale == 50e-9
+        assert "Dernière trace conservée" in panel.acquisition_note.value
+        release.set()
+        await asyncio.gather(capture, apply)
+
+    run_async(scenario())
+    assert panel.settings.time_scale == panel.acquisition.settings.time_scale == 100e-9
+    assert panel.time_scale.value == repr(100e-9) and panel.applying == 0
+
+
+def test_disconnect_discards_settings_waiting_behind_a_capture(tmp_path, monkeypatch):
+    panel, _ = make_panel(tmp_path)
+    run_async(panel._toggle_connection())
+    simulator = panel.scope._transport
+    started, release = pause_capture(panel, monkeypatch)
+
+    async def scenario():
+        capture = asyncio.create_task(panel._single())
+        await wait_for_thread(started)
+        panel.time_scale.value = repr(100e-9)
+        apply = asyncio.create_task(panel._settings_changed())
+        await asyncio.sleep(0.01)
+        assert panel.applying == 1
+        close = asyncio.create_task(panel.disconnect())
+        await asyncio.sleep(0.01)
+        release.set()
+        await asyncio.gather(capture, apply, close)
+
+    run_async(scenario())
+    assert simulator.closed and simulator.time_scale == 50e-9
+    assert panel.scope is None and panel.applying == 0
+    assert "déconnecté" in panel.acquisition_note.value
+
+
+def test_transport_failure_disconnects_but_preserves_the_last_trace(tmp_path, monkeypatch):
+    panel, _ = make_panel(tmp_path)
+    run_async(panel._toggle_connection())
+    previous = panel.acquisition
+    simulator = panel.scope._transport
+
+    def interrupted(**kwargs):
+        raise ScopeConnectionError("Liaison interrompue.")
+
+    monkeypatch.setattr(panel.scope, "capture", interrupted)
+    run_async(panel._single())
+    assert panel.scope is None and simulator.closed and not panel.capturing
+    assert panel.acquisition is previous
+    assert "Reconnecter" in panel.status.value
+    assert panel.run_button.disabled and not panel.export_button.disabled
+
+
+def test_rejected_settings_restore_actual_instrument_values(tmp_path, monkeypatch):
+    panel, _ = make_panel(tmp_path)
+    run_async(panel._toggle_connection())
+    previous = panel.settings
+
+    def rejected(settings):
+        raise ScopeError("Réglage refusé")
+
+    monkeypatch.setattr(panel.scope, "apply_settings", rejected)
+    panel.time_scale.value = repr(100e-9)
+    run_async(panel._settings_changed())
+    assert panel.settings == previous and panel.time_scale.value == repr(previous.time_scale)
+    assert panel.status.value == "Réglage refusé" and panel.applying == 0
+    assert "nouveaux réglages" not in panel.acquisition_note.value
+
+
+def test_last_trace_axes_and_cursors_stay_on_the_acquisition_settings(tmp_path):
+    panel, _ = make_panel(tmp_path)
+    run_async(panel._toggle_connection())
+    previous = panel.acquisition
+    panel.trigger_wait = 0.05
+    panel.cursor_mode.value = "time"
+    panel._cursors_changed()
+    panel.trigger_sweep.value = "NORM"
+    panel.trigger_level.value = "10"
+    panel.time_scale.value = repr(100e-9)
+    run_async(panel._settings_changed())
+    assert panel.acquisition is previous and panel.settings.time_scale == 100e-9
+    assert panel.cursor_text.value == cursor_readout(panel.cursors, previous.settings)
+    texts = [getattr(shape, "text", "") for shape in panel.canvas.shapes]
+    assert any("50 ns/div" in text for text in texts if text)
+    assert "Dernière trace conservée" in panel.acquisition_note.value
+
+
+def test_nonstandard_readback_values_are_preserved_when_another_control_changes(tmp_path):
+    panel, _ = make_panel(tmp_path)
+    settings = ScopeSettings(time_scale=75e-9).with_channel(
+        1, replace(ScopeSettings().channel(1), scale=0.75, probe=20.0)
+    )
+    panel.settings = settings
+    panel._show_settings(settings)
+    panel.trigger_level.value = "2"
+    result = panel._settings_from_controls()
+    assert result.time_scale == 75e-9
+    assert result.channel(1).scale == 0.75 and result.channel(1).probe == 20.0
+
+
+def test_demo_measurements_and_exports_are_identified_and_exports_do_not_overwrite(tmp_path):
+    panel, _ = make_panel(tmp_path)
+    run_async(panel._toggle_connection())
+    assert "Simulation" in panel.detail_text[1].value
+    assert "aucun signal réel" in panel.acquisition_note.value
+    panel._export_csv()
+    panel._export_csv()
+    files = list((tmp_path / "exports").glob("oscilloscope-*-simulation.csv"))
+    assert len(files) == 2 and "simulés" in panel.export_note.value
+
+
+def test_empty_numeric_entry_is_rejected_and_bad_refresh_falls_back(tmp_path):
+    panel, _ = make_panel(tmp_path)
+    run_async(panel._toggle_connection())
+    sent = len(panel.scope._transport.commands)
+    panel.trigger_level.value = ""
+    run_async(panel._settings_changed())
+    assert panel.status.value.startswith("Niveau : Valeur numérique attendue")
+    assert len(panel.scope._transport.commands) == sent
+    for value in ("nan", "inf", "0", "-1", "oops"):
+        panel.refresh.value = value
+        assert panel._interval() == 0.5
+
+
+def test_demo_resolution_warning_uses_the_known_clock_not_an_aliased_local_value(tmp_path):
+    panel, _ = make_panel(tmp_path)
+    run_async(panel._toggle_connection())
+    panel.acquisition = replace(
+        panel.acquisition,
+        traces=(Trace(2, (0.0, 100e-9), (0.0, 3.3)),),
+        measurements={2: Measurements(frequency=1e6, source="local")},
+    )
+    panel._show_measurements()
+    assert panel.warning.visible and "au plus 1 points par période" in panel.warning.value
+
+
+def test_real_resolution_warning_uses_an_instrument_measurement(tmp_path):
+    panel, _ = make_panel(tmp_path)
+    run_async(panel._toggle_connection())
+    panel.acquisition_kind = "lan"
+    panel.acquisition_expected_clock_hz = None
+    panel.acquisition = replace(
+        panel.acquisition,
+        traces=(Trace(2, (0.0, 100e-9), (0.0, 3.3)),),
+        measurements={2: Measurements(frequency=10e6, source="oscilloscope")},
+    )
+    panel._show_measurements()
+    assert "des fronts peuvent manquer" in panel.warning.value
+
+
+def test_screenshot_file_error_is_reported_and_releases_busy_state(tmp_path, monkeypatch):
+    panel, _ = make_panel(tmp_path)
+    run_async(panel._toggle_connection())
+    panel.source.value = "lan"
+    monkeypatch.setattr(panel.scope, "screenshot", lambda: b"PNG")
+    (tmp_path / "exports").write_text("A file blocks the export directory", encoding="utf-8")
+    run_async(panel._screenshot())
+    assert not panel.pending and panel.status.value.startswith("Copie d'écran :")
+    assert not panel.screenshot_button.disabled
+
+
+def test_search_failure_is_reported_and_releases_busy_state(tmp_path, monkeypatch):
+    from arty_frame_studio import scope_view
+
+    panel, _ = make_panel(tmp_path)
+    panel.source.value = "visa"
+    panel._source_changed()
+
+    def failed_search():
+        raise ScopeError("VISA indisponible")
+
+    monkeypatch.setattr(scope_view, "list_visa_resources", failed_search)
+    run_async(panel._search())
+    assert panel.status.value == "Recherche VISA : VISA indisponible"
+    assert not panel.pending and not panel.search_button.disabled
+
+
+def test_connection_details_fold_after_connect_and_can_be_reopened(tmp_path):
+    panel, _ = make_panel(tmp_path)
+    assert panel.connection_details.visible and not panel.connection_toggle.visible
+    run_async(panel._toggle_connection())
+    assert not panel.connection_details.visible and panel.connection_toggle.visible
+    panel._toggle_connection_details()
+    assert panel.connection_details.visible
+    panel._toggle_connection_details()
+    assert not panel.connection_details.visible
+    run_async(panel.disconnect())
+    assert panel.connection_details.visible and not panel.connection_toggle.visible
+
+
+def test_changing_source_updates_address_controls_in_the_page(tmp_path):
+    panel, _ = make_panel(tmp_path)
+    updates = panel.page.updates
+    panel.source.value = "lan"
+    panel._source_changed(SimpleNamespace(control=panel.source))
+    assert not panel.address.disabled and panel.page.updates == updates + 1

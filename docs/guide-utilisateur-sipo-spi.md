@@ -405,10 +405,15 @@ simulation à une capture réelle de CLK, DATA et LATCH.
 
 ## 8. Mesurer les signaux avec l'oscilloscope
 
-L'onglet **Oscilloscope** pilote un Keysight InfiniiVision, par exemple un
-**DSOX1202A**, en **LAN** (adresse IP, port 5025, aucun logiciel à installer)
-ou en **USB** (Keysight IO Libraries Suite). Le choix **Simulation (démo)**
-montre les signaux de la trame du Pilotage sans appareil.
+L'onglet **Oscilloscope** propose un pilote pour le **Keysight DSOX1202A**, en
+**LAN** (prise RJ45 arrière, adresse IP, port 5025, aucun pilote supplémentaire)
+ou en **USB Device arrière** avec une bibliothèque VISA existante, par exemple
+Keysight IO Libraries Suite. PyVISA est fourni avec l'application, mais il
+n'installe pas le pilote USB/VISA du fabricant ; cette installation demande
+des droits administrateur. Sur un compte Windows sans ces droits, préférer le
+LAN. Le choix **Simulation (démo)** illustre les signaux de la trame du Pilotage
+sans mesurer la carte réelle ; le pilote matériel reste à vérifier avec un
+DSOX1202A réel.
 
 1. Relier la sonde CH1 à **JB1 (DATA)**, la sonde CH2 à **JB2 (CLK)** et leurs
    masses à **JB5 ou JB11**, avec le **ressort de masse court**. Mettre les
@@ -416,19 +421,26 @@ montre les signaux de la trame du Pilotage sans appareil.
 2. Choisir la liaison, saisir l'adresse (ou **Rechercher** en USB), puis
    **Connecter**. Cliquer sur **Préréglage de la trame** : 1 V/div, DATA en
    haut, CLK en bas, cinq périodes de CLK, déclenchement sur CLK à 1,65 V.
-3. **Single** fait une acquisition, **Run** rafraîchit en continu à la cadence
-   choisie, **Stop** arrête. **Auto scale** convient à un signal inconnu.
+3. Pour une CLK répétitive, **Single** fait une acquisition, **Run** rafraîchit
+   en continu à la cadence choisie, **Stop** arrête. **Auto scale** convient à
+   un signal inconnu. Pour une trame envoyée une seule fois, armer l'oscilloscope
+   en mode **Normal** avant l'envoi dans Pilotage ; l'attente de l'application
+   est limitée dans le temps.
 4. Lire la **fréquence** et la **période** de CLK sous l'écran. Avec `1010…`,
    DATA change tous les 100 ns à 10 MHz : sa fréquence affichée vaut 5 MHz.
 5. Pour une mesure manuelle, choisir des **curseurs**, puis **Mesurer une
    période** : ΔX et 1/ΔX s'affichent. Les curseurs se déplacent aussi en
    cliquant ou en glissant sur l'écran.
 
-Des tensions dix fois trop grandes (par exemple **66 V crête à crête** pour une
-sortie de 3,3 V) viennent d'un facteur de sonde différent entre la sonde et la
-voie ; des pics à chaque front, d'un long fil de masse. L'onglet signale ces
-deux cas. Le détail des réglages, de l'export CSV et de la ligne de commande
-figure dans [Oscilloscope](oscilloscope.md).
+Des tensions incohérentes avec une sortie 0/3,3 V ou des pics aux fronts sont
+des indices : vérifier le facteur de sonde, sa compensation, la masse courte
+et le câblage. **66 V crête à crête** ne prouve pas un facteur ×10, qui ferait
+apparaître environ 33 V sans dépassement. Les messages de l'onglet proposent
+des contrôles ; ils ne démontrent pas la cause. Une CLK à 200 MHz dépasse les
+conditions permettant de caractériser précisément ses fronts avec ce modèle,
+même dans sa version 200 MHz. Le détail des limites, des références Keysight,
+des exports et de la ligne de commande figure dans
+[Oscilloscope](oscilloscope.md).
 
 ## 9. Résoudre les difficultés fréquentes
 

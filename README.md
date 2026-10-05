@@ -26,6 +26,10 @@ L'onglet **[Oscilloscope](docs/oscilloscope.md)** affiche DATA et CLK depuis un
 **Keysight InfiniiVision** (DSOX1202A) en LAN ou USB, ou en simulation : mesures
 de **fréquence et période**, déclenchement, calibres et **Auto scale**,
 rafraîchissement **Run / Single** et **curseurs**, avec export CSV.
+Les captures de démonstration sont identifiées comme simulées. Après une
+perte de synchronisation SCPI, l'application demande une reconnexion plutôt
+que de réutiliser une réponse tardive. Voir la
+[revue du journal et de l'oscilloscope](docs/review-oscilloscope.md).
 
 Le [récapitulatif des apports de Claude](docs/recapitulatif-claude.md) liste
 chaque commit et ce qu'il apporte.
@@ -66,14 +70,16 @@ régénéré par le workflow de compilation dès que le RTL change ; l'applicati
 et les tests refusent un `.bit` qui ne correspond plus aux sources. L'ancien
 fichier aux broches UART inversées est refusé même renommé.
 
-**Le firmware et ses sorties à 200 MHz n'ont pas encore été testés sur carte.**
+L'utilisateur rapporte un chargement SRAM réussi sous Windows, le dialogue
+UART, le test LED et une émission de 26 bits observée sur DATA à **10 MHz**.
+**Les sorties à 200 MHz et le pilotage SCPI d'un oscilloscope réel restent à valider.**
 Le rapport nextpnr ne certifie pas l'interface DDR ni la liaison Pmod externe.
 Voir [le matériel](docs/hardware.md) et [la chaîne FPGA](docs/toolchain.md).
 
 ![Interface de pilotage](docs/images/pilotage-interface.png)
 
 [Chronogramme](docs/images/chronogramme-interface.png) ·
-[Écran Oscilloscope](docs/images/oscilloscope-ecran.png) ·
+[Interface Oscilloscope](docs/images/oscilloscope-interface.png) ·
 [Chargement Windows](docs/images/fpga-interface.png) ·
 [Petite fenêtre](docs/images/pilotage-petite-fenetre.png)
 

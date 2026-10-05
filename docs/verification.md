@@ -5,14 +5,22 @@ continue et CLK libre), a passé la synthèse, le placement/routage et le
 contrôle strict à 200 MHz : **Fmax après routage 210,79 MHz** avec la graine
 de placement 8. Les valeurs exactes de
 chaque publication sont dans [le manifeste](../firmware/prebuilt/firmware-manifest.json).
-Le chargement de ce firmware et ses sorties physiques restent à tester sur la
-carte.
+Le compte rendu utilisateur décrit un chargement réussi et DATA observée à
+10 MHz ; les sorties à 200 MHz et la qualification complète restent à tester.
 
 ## Logiciel et simulation
 
-Les **605 tests Python passent** : paramètres et profils, chronogrammes,
+Les **766 tests Python passent** : paramètres et profils, chronogrammes,
 protocole UART, transport, interface, CLI et protections du flux FPGA.
 Ruff, formatage et mypy vérifient le code Python.
+
+La [revue oscilloscope](review-oscilloscope.md) vérifie les commandes avec le
+guide 1200 X-Series, renforce la synchronisation LAN/VISA et les acquisitions,
+et ajoute des régressions de mesure et de simulation. L'installation figée
+`uv sync --extra dev --frozen` réussit avec PyVISA. Le rendu Flet/Chromium à
+1220 × 930 et 760 × 680 vérifie Run/Stop/reprise, Single, Auto scale, préréglage,
+connexion repliable, curseurs et CSV de 1000 points par voie. Il ne constitue
+pas une validation SCPI matérielle.
 
 La [revue de la saisie binaire](review-saisie-binaire.md) ajoute les contrôles
 du nombre de bits automatique, des conversions sans changement de longueur,
@@ -138,16 +146,18 @@ manifeste. Les broches UART sont RX=A9, TX=D10. Les fins de lignes LF des `.v`/`
 
 ## Retours matériels et essai à effectuer
 
-Un utilisateur a confirmé que le backend Windows reconnaît son Arty A7-100T
-par JTAG : IDCODE **`0x13631093`**. Son port **COM7**, canal FTDI B, reçoit des
-octets mais aucun PING compatible avant chargement du firmware du projet.
-Cette observation confirme l'accès JTAG et série ; elle ne valide pas le
-chargement de notre firmware ni ses sorties GPIO.
+Le compte rendu fourni le 5 octobre 2026 rapporte une programmation SRAM
+réussie sous Windows, le dialogue UART, le test LED et l'envoi de **26 bits**
+(`0x1E15470`) avec CLK réglée à **10 MHz**. DATA a été observée sur **JB1**.
+Le backend Windows reconnaît l'Arty A7-100T par JTAG : IDCODE **`0x13631093`**.
+Ces retours complètent le diagnostic initial de COM7 sans firmware chargé.
 
 Aucune Arty réelle n'est raccordée à l'environnement de développement.
-La programmation du `.bit`, la réponse PING après chargement et les mesures
-physiques restent donc à confirmer sur la carte. Le manifeste du firmware
-indique `hardware_validated: false`.
+Nous n'avons pas reproduit ces essais dans cet environnement. Le contrôle
+complet DATA/CLK/LATCH, les marges du récepteur, les sorties à 200 MHz et le
+pilotage SCPI d'un DSOX1202A réel restent à effectuer. Le manifeste conserve
+`hardware_validated: false` : ce retour à 10 MHz ne constitue pas une
+qualification de toute la conception.
 
 Après chargement sous Windows, vérifier la LED PLL puis PING avant tout SEND.
 Commencer à fréquence réduite, observer DATA/CLK/LATCH sur JB1/JB2/JB3 et

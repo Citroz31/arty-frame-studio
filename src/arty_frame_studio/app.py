@@ -1111,7 +1111,7 @@ class Studio:
         )
         self.prepare_button.visible = not simulated
         self.mode_badge.value = (
-            "Simulation · aucun signal physique"
+            "FPGA simulé · sorties virtuelles"
             if simulated
             else ("Carte connectée" if connected else "Carte · déconnectée")
         )
@@ -1976,8 +1976,6 @@ class Studio:
 
     async def shutdown(self, _: Any = None) -> None:
         self.closing = True
-        # Rend la main à l'oscilloscope (Run) avant de fermer la carte.
-        await self.scope_panel.shutdown()
         if self.log_flush_handle is not None:
             self.log_flush_handle.cancel()
             self.log_flush_handle = None
@@ -1987,10 +1985,15 @@ class Studio:
                 await self.poll_task
             except asyncio.CancelledError:
                 pass
-        async with self.serial_lock:
-            if self.device is not None:
-                await asyncio.to_thread(self.device.close)
-            self.device = None
+        # Each instrument must release its connection even if the other fails.
+        # ScopePanel waits for any active SCPI exchange before closing it.
+        try:
+            await self.scope_panel.shutdown()
+        finally:
+            async with self.serial_lock:
+                device, self.device = self.device, None
+                if device is not None:
+                    await asyncio.to_thread(device.close)
 
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()

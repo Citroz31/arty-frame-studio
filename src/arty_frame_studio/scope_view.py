@@ -29,6 +29,7 @@ from .scope import (
     Acquisition,
     ChannelSettings,
     KeysightScope,
+    ScopeConnectionError,
     ScopeError,
     ScopeSettings,
     SocketTransport,
@@ -375,6 +376,9 @@ class ScopePanel:
         self.running = False
         self.closing = False
         self.pending = False
+        self.capturing = False
+        self.stopping = False
+        self.disconnecting = False
         # Attente maximale d'un front en mode Normal pour une acquisition.
         self.trigger_wait = 2.0
         # Réglages en cours d'envoi : une acquisition lancée avant eux ne les écrase pas.
@@ -383,6 +387,13 @@ class ScopePanel:
         self.width = 900.0
         self.io_lock = asyncio.Lock()
         self.run_task: asyncio.Task[None] | None = None
+        self._run_wakeup: asyncio.Event | None = None
+        self._disconnect_done: asyncio.Event | None = None
+        self._step_buttons: list[ft.IconButton] = []
+        self.acquisition_kind: str | None = None
+        self.acquisition_expected_clock_hz: float | None = None
+        self.connection_expanded = True
+        self.connection_details: ft.Container | None = None
         self._cached_source: tuple[FrameConfig, SignalSource] | None = None
         # Grille et traces gardées entre deux déplacements de curseur.
         self._screen: list[Any] = []
@@ -426,6 +437,12 @@ class ScopePanel:
         self.connect_button = ft.ElevatedButton(
             "Connecter", icon=ft.Icons.LINK, on_click=self._toggle_connection
         )
+        self.connection_toggle = ft.TextButton(
+            "Paramètres de connexion",
+            icon=ft.Icons.EXPAND_MORE,
+            visible=False,
+            on_click=self._toggle_connection_details,
+        )
         self.identity = ft.Text("Non connecté", size=12, color=MUTED, selectable=True)
         self.source_hint = ft.Text(size=12, color=MUTED)
         self.mapping = {
@@ -433,6 +450,7 @@ class ScopePanel:
                 label=f"Sonde CH{channel} sur",
                 value=default,
                 width=200,
+                dense=True,
                 options=[ft.dropdown.Option(key, name) for key, name in SIGNAL_NAMES.items()],
                 on_change=self._mapping_changed,
             )
@@ -440,7 +458,10 @@ class ScopePanel:
         }
 
         self.run_button = ft.ElevatedButton(
-            "Run", icon=ft.Icons.PLAY_ARROW, on_click=self._toggle_run
+            "Run",
+            icon=ft.Icons.PLAY_ARROW,
+            on_click=self._toggle_run,
+            tooltip="Répéter les acquisitions depuis le PC ; Stop suspend ce rafraîchissement.",
         )
         self.single_button = ft.OutlinedButton(
             "Single", icon=ft.Icons.LOOKS_ONE, on_click=self._single
@@ -456,12 +477,14 @@ class ScopePanel:
             on_click=self._preset,
         )
         self.refresh = ft.Dropdown(
-            label="Rafraîchissement",
+            label="Pause entre acquisitions",
             value="0.5",
             width=170,
             options=[ft.dropdown.Option(repr(rate), f"{rate:g} s") for rate in REFRESH_RATES],
+            tooltip="Pause après chaque capture ; le déclenchement et le transfert s'y ajoutent.",
         )
         self.status = ft.Text("Arrêté", size=12, color=MUTED)
+        self.acquisition_note = ft.Text(size=12, color=MUTED)
         # Sans largeur fixe : le canevas suit son cadre et signale sa taille (on_resize).
         self.canvas = cv.Canvas(
             shapes=[],
@@ -643,22 +666,25 @@ class ScopePanel:
     def _stepper(self, target: str | int, dropdown: ft.Dropdown) -> ft.Row:
         """Calibre entouré de loupes : le cran voisin, comme un bouton rotatif."""
         unit = "s/div" if target == "time" else "V/div"
+        buttons = [
+            ft.IconButton(
+                ft.Icons.ZOOM_OUT,
+                tooltip=f"Dézoomer : {unit} supérieur",
+                data=(target, 1),
+                on_click=self._step,
+            ),
+            ft.IconButton(
+                ft.Icons.ZOOM_IN,
+                tooltip=f"Zoomer : {unit} inférieur",
+                data=(target, -1),
+                on_click=self._step,
+            ),
+        ]
+        self._step_buttons.extend(buttons)
+        for button in buttons:
+            button.disabled = self.scope is None or self.pending or self.closing
         return ft.Row(
-            [
-                ft.IconButton(
-                    ft.Icons.ZOOM_OUT,
-                    tooltip=f"Dézoomer : {unit} supérieur",
-                    data=(target, 1),
-                    on_click=self._step,
-                ),
-                dropdown,
-                ft.IconButton(
-                    ft.Icons.ZOOM_IN,
-                    tooltip=f"Zoomer : {unit} inférieur",
-                    data=(target, -1),
-                    on_click=self._step,
-                ),
-            ],
+            [buttons[0], dropdown, buttons[1]],
             spacing=0,
             tight=True,  # largeur du contenu : le champ voisin reste sur la même ligne
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -685,23 +711,50 @@ class ScopePanel:
         return ft.Column(controls, spacing=4)
 
     def build(self) -> ft.Control:
-        connection = self._card(
-            self._title(
-                "Oscilloscope",
-                "Keysight InfiniiVision (DSOX1202A) en LAN ou USB/VISA, ou signaux simulés "
-                "de la trame. Les commandes passent par le PC ; l'écran se met à jour à "
-                "chaque acquisition.",
-                size=18,
+        self.connection_details = ft.Container(
+            ft.Column(
+                [
+                    ft.Text(
+                        "Keysight InfiniiVision (DSOX1202A) en LAN ou USB/VISA, ou signaux simulés "
+                        "de la trame. Les commandes passent par le PC ; l'écran se met à jour à "
+                        "chaque acquisition.",
+                        size=12,
+                        color=MUTED,
+                    ),
+                    ft.Row(
+                        [self.source, self.address, self.search_button],
+                        wrap=True,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    self.resources,
+                    self.source_hint,
+                    ft.Text(PINOUT_HINT, size=12, color=MUTED),
+                    ft.Text(
+                        "Pour une trame envoyée une seule fois : lancer Run ici, puis aller dans "
+                        "Pilotage et cliquer Envoyer. Le mode Normal attend le prochain front ; "
+                        "Run réarme automatiquement après chaque attente de 2 s.",
+                        size=12,
+                        color=MUTED,
+                    ),
+                ],
+                spacing=10,
             ),
+            visible=self.scope is None or self.connection_expanded,
+        )
+        connection = self._card(
             ft.Row(
-                [self.source, self.address, self.search_button, self.connect_button],
+                [
+                    ft.Text("Oscilloscope", size=18, weight=ft.FontWeight.W_600),
+                    self.identity,
+                    self.connection_toggle,
+                    self.connect_button,
+                ],
                 wrap=True,
+                spacing=12,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            self.resources,
-            self.source_hint,
-            ft.Row([self.mapping[1], self.mapping[2], self.identity], wrap=True, spacing=12),
-            ft.Text(PINOUT_HINT, size=12, color=MUTED),
+            self.connection_details,
+            ft.Row([self.mapping[1], self.mapping[2]], wrap=True, spacing=12),
         )
         toolbar = ft.Row(
             [
@@ -753,6 +806,7 @@ class ScopePanel:
                     bgcolor=SCREEN_BG,
                 ),
                 measures,
+                self.acquisition_note,
                 self.warning,
             ],
             spacing=12,
@@ -848,12 +902,26 @@ class ScopePanel:
         self.connect_button.text = "Déconnecter" if connected else "Connecter"
         self.connect_button.icon = ft.Icons.LINK_OFF if connected else ft.Icons.LINK
         self.connect_button.disabled = self.pending
+        self.connection_toggle.visible = connected
+        self.connection_toggle.disabled = self.pending
+        self.connection_toggle.icon = (
+            ft.Icons.EXPAND_LESS if self.connection_expanded else ft.Icons.EXPAND_MORE
+        )
+        if self.connection_details is not None:
+            self.connection_details.visible = not connected or self.connection_expanded
         self.source.disabled = connected or self.pending
         self.address.disabled = connected or demo or self.pending
         self.search_button.disabled = connected or self.source.value != "visa" or self.pending
+        self.resources.disabled = connected or self.pending
         for button in (self.single_button, self.autoscale_button, self.preset_button):
             button.disabled = not connected or self.pending
-        self.run_button.disabled = not connected
+        self.single_button.disabled |= self.capturing or self.stopping
+        self.autoscale_button.disabled |= self.capturing or self.stopping
+        self.run_button.disabled = (
+            not connected
+            or self.stopping
+            or (not self.running and (self.pending or self.capturing))
+        )
         self.run_button.text = "Stop" if self.running else "Run"
         self.run_button.icon = ft.Icons.STOP if self.running else ft.Icons.PLAY_ARROW
         # Vert pour lancer, rouge pendant l'acquisition continue, comme la touche de l'appareil.
@@ -862,8 +930,25 @@ class ScopePanel:
             if connected
             else None
         )
-        self.screenshot_button.disabled = not connected or demo or self.pending
+        self.screenshot_button.disabled = not connected or demo or self.pending or self.capturing
         self.export_button.disabled = self.acquisition is None
+        controls = [
+            *self.enabled.values(),
+            *self.vscale.values(),
+            *self.offset.values(),
+            *self.probe.values(),
+            *self.coupling.values(),
+            self.time_scale,
+            self.time_position,
+            self.trigger_source,
+            self.trigger_slope,
+            self.trigger_level,
+            self.trigger_sweep,
+            self.trigger_half,
+            *self._step_buttons,
+        ]
+        for control in controls:
+            control.disabled = not connected or self.pending or self.closing
         self.cursor_channel.disabled = not self.cursors.volt
         for name, slider in self.sliders.items():
             slider.disabled = not (self.cursors.time if name.startswith("x") else self.cursors.volt)
@@ -874,11 +959,20 @@ class ScopePanel:
         for channel in CHANNELS:
             channel_settings = settings.channel(channel)
             self.enabled[channel].value = channel_settings.enabled
-            self.vscale[channel].value = _closest(channel_settings.scale, VOLT_SCALES)
+            self._show_scale(self.vscale[channel], channel_settings.scale, VOLT_SCALES, "V")
             self.offset[channel].value = f"{channel_settings.offset:.6g}"
-            self.probe[channel].value = _closest(channel_settings.probe, PROBES)
+            self.probe[channel].options = [
+                ft.dropdown.Option(repr(value), f"{value:g}:1") for value in PROBES
+            ]
+            if channel_settings.probe not in PROBES:
+                self.probe[channel].options.append(
+                    ft.dropdown.Option(
+                        repr(channel_settings.probe), f"{channel_settings.probe:g}:1"
+                    )
+                )
+            self.probe[channel].value = repr(channel_settings.probe)
             self.coupling[channel].value = channel_settings.coupling
-        self.time_scale.value = _closest(settings.time_scale, TIME_SCALES)
+        self._show_scale(self.time_scale, settings.time_scale, TIME_SCALES, "s")
         self.time_position.value = (
             "0" if settings.time_position == 0 else format_si(settings.time_position, "s")
         )
@@ -889,9 +983,18 @@ class ScopePanel:
         self.trigger_sweep.value = trigger.sweep
 
     @staticmethod
+    def _show_scale(
+        control: ft.Dropdown, value: float, choices: tuple[float, ...], unit: str
+    ) -> None:
+        control.options = _options(choices, unit)
+        if value not in choices:
+            control.options.append(ft.dropdown.Option(repr(value), f"{short_si(value, unit)}/div"))
+        control.value = repr(value)
+
+    @staticmethod
     def _value(name: str, text: str | None, unit: str) -> float:
         try:
-            return parse_si(text or "0", unit)
+            return parse_si(text or "", unit)
         except ValueError as exc:
             raise ValueError(f"{name} : {exc}") from exc
 
@@ -925,13 +1028,31 @@ class ScopePanel:
         # les curseurs modifiés, ce qui garde le glisser fluide.
         if not cursors_only or not self._screen:
             self._screen = screen_shapes(
-                self.acquisition, self.settings, self.width, labels=self._labels()
+                self.acquisition, self._display_settings(), self.width, labels=self._labels()
             )
         self.canvas.shapes = self._screen + cursor_shapes(self.cursors, self.width)
-        self.cursor_text.value = cursor_readout(self.cursors, self.settings)
+        self.cursor_text.value = cursor_readout(self.cursors, self._display_settings())
+
+    def _display_settings(self) -> ScopeSettings:
+        # Une trace conservée garde ses propres axes, même après un réglage refusé
+        # ou un déclenchement Normal qui n'a pas encore produit de nouveaux points.
+        return self.acquisition.settings if self.acquisition is not None else self.settings
 
     def _show_measurements(self) -> None:
         acquisition = self.acquisition
+        simulation = self.acquisition_kind == "demo"
+        notes = []
+        if acquisition is not None:
+            if simulation:
+                notes.append("Simulation · aucun signal réel mesuré.")
+            if self.scope is None:
+                notes.append("Dernière acquisition conservée ; oscilloscope déconnecté.")
+            elif acquisition.settings != self.settings:
+                notes.append(
+                    "Dernière trace conservée : les nouveaux réglages "
+                    "n'ont pas encore produit de trace."
+                )
+        self.acquisition_note.value = " ".join(notes)
         mapping = self._mapping_values()
         for channel in CHANNELS:
             signal = mapping.get(channel)
@@ -947,14 +1068,16 @@ class ScopePanel:
                 continue
             self.frequency_text[channel].value = format_si(values.frequency, "Hz")
             self.period_text[channel].value = (
-                f"T = {format_si(values.period, 's')}" if values.period else "pas de front"
+                f"T = {format_si(values.period, 's')}" if values.period else "période indisponible"
             )
             duty = "—" if values.duty is None else f"{values.duty * 100:.1f} %"
             lines = [
                 f"Rapport cyclique {duty}",
                 f"Vpp {format_si(values.vpp, 'V')} · Min {format_si(values.vmin, 'V')} · "
                 f"Max {format_si(values.vmax, 'V')}",
-                "Mesuré par l'oscilloscope"
+                "Simulation · valeurs calculées"
+                if simulation
+                else "Mesures de l'oscilloscope ; valeurs indisponibles complétées sur les points"
                 if values.source == "oscilloscope"
                 else "Calculé sur les points affichés",
             ]
@@ -970,7 +1093,13 @@ class ScopePanel:
                     "(l'appareil mesure le premier cycle, CLK en salves possible)"
                 )
             self.detail_text[channel].value = "\n".join(lines)
-        warnings = measurement_warnings(acquisition, mapping) if acquisition else []
+        warnings = (
+            measurement_warnings(
+                acquisition, mapping, expected_clock_hz=self.acquisition_expected_clock_hz
+            )
+            if acquisition
+            else []
+        )
         self.warning.value = "\n".join(warnings)
         self.warning.visible = bool(warnings)
 
@@ -1020,7 +1149,7 @@ class ScopePanel:
         return self._cached_source[1]
 
     # -- événements -----------------------------------------------------------------
-    def _source_changed(self, _: Any = None) -> None:
+    def _source_changed(self, event: Any = None) -> None:
         kind = self.source.value
         self.resources.visible = False
         if kind == "lan":
@@ -1028,7 +1157,8 @@ class ScopePanel:
             self.address.hint_text = "192.168.1.50"
             self.source_hint.value = (
                 "SCPI sur le port 5025, sans logiciel supplémentaire. L'adresse se lit sur "
-                "l'oscilloscope : Utility → I/O → LAN."
+                "l'oscilloscope : Utility → I/O → LAN, "
+                "si le port LAN est présent sur cette version."
             )
         elif kind == "visa":
             self.address.label = "Ressource VISA"
@@ -1042,9 +1172,16 @@ class ScopePanel:
             self.address.hint_text = "Inutile en simulation"
             self.source_hint.value = (
                 "Simulation : les voies montrent les signaux de la trame du Pilotage, avec "
-                "des fronts LVCMOS 3,3 V réalistes. Aucun appareil n'est piloté."
+                "un modèle illustratif LVCMOS 3,3 V. Aucun appareil n'est piloté."
             )
         self._sync()
+        if event is not None:
+            self._update()
+
+    def _toggle_connection_details(self, _: Any = None) -> None:
+        self.connection_expanded = not self.connection_expanded
+        self._sync()
+        self._update()
 
     def _resource_chosen(self, _: Any = None) -> None:
         if self.resources.value:
@@ -1052,13 +1189,23 @@ class ScopePanel:
             self._update()
 
     async def _search(self, _: Any = None) -> None:
+        if self.pending or self.scope is not None or self.closing:
+            return
         self.pending = True
         self._sync()
         self._update()
         try:
             found = await asyncio.to_thread(list_visa_resources)
+        except (ScopeError, OSError, ValueError) as exc:
+            self._report(f"Recherche VISA : {exc}")
+            self._log(self.status.value, RED)
+            return
         finally:
             self.pending = False
+            self._sync()
+            self._update()
+        if self.closing:
+            return
         self.resources.options = [ft.dropdown.Option(resource) for resource in found]
         self.resources.visible = bool(found)
         if found:
@@ -1098,7 +1245,7 @@ class ScopePanel:
         return scope, identity, settings
 
     async def _toggle_connection(self, _: Any = None) -> None:
-        if self.pending:
+        if self.pending or self.closing or self.disconnecting:
             return
         if self.scope is not None:
             await self.disconnect()
@@ -1110,6 +1257,14 @@ class ScopePanel:
         try:
             async with self.io_lock:
                 scope, identity, settings = await asyncio.to_thread(self._open)
+                if self.closing or self.disconnecting:
+                    await asyncio.to_thread(scope.close)
+                    return
+                # Publier la connexion avant de libérer le verrou : shutdown ne
+                # peut pas passer entre l'ouverture et l'affectation du scope.
+                self.scope = scope
+                self.settings = settings
+                self.connection_expanded = False
         except (ScopeError, ValueError, OSError) as exc:
             self.status.value = "Non connecté"
             self._log(f"Oscilloscope : {exc}", RED)
@@ -1119,8 +1274,6 @@ class ScopePanel:
             self.pending = False
             self._sync()
             self._update()
-        self.scope = scope
-        self.settings = settings
         fields = [part.strip() for part in identity.split(",")]
         self.identity.value = " · ".join(fields[:3]) if len(fields) >= 3 else identity
         self.identity.color = BLUE if self.source.value == "demo" else GREEN
@@ -1131,20 +1284,68 @@ class ScopePanel:
         await self._acquire()
 
     async def disconnect(self) -> None:
-        self.running = False
-        if self.run_task is not None:
-            await asyncio.gather(self.run_task, return_exceptions=True)
-            self.run_task = None
-        scope, self.scope = self.scope, None
-        if scope is not None:
+        if self.disconnecting:
+            if self._disconnect_done is not None:
+                await self._disconnect_done.wait()
+            return
+        self.disconnecting = True
+        self._disconnect_done = asyncio.Event()
+        self.pending = True
+        if self.scope is not None:
+            self._save_preferences()
+        self._sync()
+        self._update()
+        try:
+            await self._stop_run()
             async with self.io_lock:
-                await asyncio.to_thread(scope.close)
-            self._log("Oscilloscope déconnecté ; il reprend son acquisition (Run).", MUTED)
+                scope, self.scope = self.scope, None
+                if scope is not None:
+                    await asyncio.to_thread(scope.close)
+            if scope is not None:
+                self._log("Oscilloscope déconnecté ; il reprend son acquisition (Run).", MUTED)
+        finally:
+            self.disconnecting = False
+            self.pending = False
+            self._disconnect_done.set()
         self.identity.value = "Non connecté"
         self.identity.color = MUTED
         self.status.value = "Arrêté"
+        self.status.color = MUTED
+        self._show_measurements()
         self._sync()
         self._update()
+
+    async def _stop_run(self) -> None:
+        self.running = False
+        if self._run_wakeup is not None:
+            self._run_wakeup.set()
+        task = self.run_task
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            self.stopping = True
+            self._sync()
+            self._update()
+            try:
+                # Annuler to_thread ne termine pas son échange SCPI. Attendre
+                # l'acquisition en cours conserve l'exclusion avec close/settings.
+                await asyncio.gather(task, return_exceptions=True)
+            finally:
+                self.stopping = False
+                self._sync()
+                self._update()
+
+    async def _lost_connection(self, scope: KeysightScope, message: str) -> None:
+        self.running = False
+        if self._run_wakeup is not None:
+            self._run_wakeup.set()
+        async with self.io_lock:
+            if self.scope is scope:
+                self.scope = None
+                await asyncio.to_thread(scope.close, resume=False)
+        self.identity.value = "Non connecté"
+        self.identity.color = MUTED
+        self._report(f"{message} Reconnecter l'oscilloscope.")
+        self._log(self.status.value, RED)
+        self._show_measurements()
 
     def _report(self, message: str) -> None:
         self.status.value = message
@@ -1152,37 +1353,60 @@ class ScopePanel:
 
     async def _acquire(self, *, continuous: bool = False) -> None:
         scope = self.scope
-        if scope is None:
+        if scope is None or self.capturing or self.pending or self.closing or self.disconnecting:
             return
+        self.capturing = True
+        self.status.value = "Acquisition en cours…"
+        self.status.color = AMBER
+        self._sync()
+        self._update()
         try:
             async with self.io_lock:
+                if self.scope is not scope or self.closing or self.disconnecting:
+                    return
+                config = self._frame_source() if self.source.value == "demo" else None
+                expected_clock_hz = config.frequency_hz if config is not None else None
                 acquisition = await asyncio.to_thread(
-                    scope.capture, timeout=self.trigger_wait, points=self.settings.points
+                    scope.capture,
+                    timeout=self.trigger_wait,
+                    points=self.settings.points,
+                    mapping=self._mapping_values(),
                 )
         except TriggerTimeout as exc:
             # Normal sans front : comme l'appareil, garder l'écran et attendre.
+            if self.closing or self.disconnecting:
+                return
             self.status.value = "En attente de déclenchement (mode Normal)"
             self.status.color = AMBER
+            self._show_measurements()
             if not continuous:
                 self._log(f"Oscilloscope : {exc}", AMBER)
-            self._update()
+            return
+        except ScopeConnectionError as exc:
+            await self._lost_connection(scope, f"Acquisition impossible : {exc}")
             return
         except (ScopeError, OSError, ValueError) as exc:
             self.running = False
             self._report(f"Acquisition impossible : {exc}")
             self._log(f"Oscilloscope : {exc}", RED)
+            return
+        finally:
+            self.capturing = False
             self._sync()
             self._update()
+        if self.scope is not scope or self.closing or self.disconnecting:
             return
         self.acquisition = acquisition
+        self.acquisition_kind = self.source.value
+        self.acquisition_expected_clock_hz = expected_clock_hz
         self.count += 1
-        if acquisition.settings != self.settings and not self.applying:
+        if acquisition.settings != self.settings and not self.applying and not self.pending:
             # Réglages modifiés sur la face avant : l'écran suit l'appareil.
             self.settings = acquisition.settings
             self._show_settings(self.settings)
         self.status.value = (
             f"Acquisition {self.count} · "
-            + ("déclenchée" if acquisition.triggered else "sans front (Auto)")
+            + ("déclenchée" if acquisition.triggered else "forcée sans front (Auto)")
             + f" · {acquisition.elapsed * 1000:.0f} ms"
         )
         self.status.color = GREEN if acquisition.triggered else AMBER
@@ -1192,40 +1416,56 @@ class ScopePanel:
         self._update()
 
     async def _single(self, _: Any = None) -> None:
-        if self.running:
-            self.running = False
+        if self.pending or self.capturing or self.stopping or self.closing:
+            return
+        await self._stop_run()
         await self._acquire()
 
     async def _toggle_run(self, _: Any = None) -> None:
-        if self.scope is None:
+        if self.scope is None or self.closing or self.disconnecting or self.stopping:
             return
         if self.running:
-            self.running = False
-            self._sync()
-            self._update()
+            await self._stop_run()
+            if self.scope is not None and not self.disconnecting:
+                self.status.value = f"Arrêté · dernière acquisition {self.count} conservée"
+                self.status.color = MUTED
+                self._update()
+            return
+        if self.pending or self.capturing:
             return
         self.running = True
+        self._run_wakeup = asyncio.Event()
         self._sync()
         self._update()
         self.run_task = asyncio.create_task(self._run_loop())
 
     def _interval(self) -> float:
         try:
-            return float(self.refresh.value or "0.5")
+            interval = float(self.refresh.value or "0.5")
         except ValueError:
             return 0.5
+        return interval if interval in REFRESH_RATES else 0.5
 
     async def _run_loop(self) -> None:
         try:
             while self.running and not self.closing and self.scope is not None:
                 await self._acquire(continuous=True)
-                await asyncio.sleep(self._interval())
+                if not self.running:
+                    break
+                if self._run_wakeup is not None:
+                    try:
+                        await asyncio.wait_for(self._run_wakeup.wait(), timeout=self._interval())
+                    except TimeoutError:
+                        pass
         finally:
-            self.running = False
+            if self.run_task is asyncio.current_task():
+                self.running = False
             self._sync()
             self._update()
 
     async def _settings_changed(self, _: Any = None) -> None:
+        if self.pending or self.closing or self.disconnecting:
+            return
         try:
             settings = self._settings_from_controls()
         except ValueError as exc:
@@ -1236,28 +1476,48 @@ class ScopePanel:
             return
         self.settings = settings
         self._draw()
+        self._show_measurements()
         self._update()
         await self._apply(settings)
 
     async def _apply(self, settings: ScopeSettings) -> None:
         scope = self.scope
-        if scope is None:
+        if scope is None or self.closing or self.disconnecting:
             return
         self.applying += 1
         try:
             async with self.io_lock:
-                await asyncio.to_thread(scope.apply_settings, settings)
-        except (ScopeError, OSError) as exc:
+                if self.scope is not scope or self.closing or self.disconnecting:
+                    return
+                try:
+                    await asyncio.to_thread(scope.apply_settings, settings)
+                except ScopeConnectionError:
+                    raise
+                except ScopeError:
+                    # Une commande rejetée peut suivre des commandes acceptées.
+                    # Relire l'état effectif plutôt que conserver une fiction.
+                    recovered = await asyncio.to_thread(scope.read_settings)
+                    if self.settings == settings and self.applying == 1:
+                        self.settings = recovered
+                        self._show_settings(recovered)
+                        self._show_measurements()
+                    raise
+        except ScopeConnectionError as exc:
+            await self._lost_connection(scope, f"Réglage impossible : {exc}")
+            return
+        except (ScopeError, OSError, ValueError) as exc:
             self._report(str(exc))
             self._log(f"Oscilloscope : {exc}", RED)
             self._update()
             return
         finally:
             self.applying -= 1
-        if not self.running:
+        if not self.running and self.scope is scope:
             await self._acquire()
 
     async def _step(self, event: Any) -> None:
+        if self.pending or self.closing or self.disconnecting:
+            return
         target, direction = event.control.data
         if target == "time":
             dropdown, values = self.time_scale, TIME_SCALES
@@ -1269,7 +1529,7 @@ class ScopePanel:
 
     async def _autoscale(self, _: Any = None) -> None:
         scope = self.scope
-        if scope is None or self.pending:
+        if scope is None or self.pending or self.capturing or self.closing or self.disconnecting:
             return
         self.pending = True
         self.status.value = "Auto scale en cours…"
@@ -1278,7 +1538,12 @@ class ScopePanel:
         self._update()
         try:
             async with self.io_lock:
+                if self.scope is not scope or self.closing or self.disconnecting:
+                    return
                 settings = await asyncio.to_thread(scope.autoscale)
+        except ScopeConnectionError as exc:
+            await self._lost_connection(scope, f"Auto scale : {exc}")
+            return
         except (ScopeError, OSError) as exc:
             self._report(f"Auto scale : {exc}")
             self._log(f"Oscilloscope : {exc}", RED)
@@ -1287,12 +1552,17 @@ class ScopePanel:
             self.pending = False
             self._sync()
             self._update()
+        if self.scope is not scope or self.closing or self.disconnecting:
+            return
         self.settings = settings
         self._show_settings(settings)
         self._log("Oscilloscope : Auto scale appliqué.", BLUE)
-        await self._acquire()
+        if not self.running:
+            await self._acquire()
 
     async def _preset(self, _: Any = None) -> None:
+        if self.pending or self.closing or self.disconnecting:
+            return
         settings = frame_preset(self._frame_source(), self._mapping_values(), self.settings)
         self.settings = settings
         self._show_settings(settings)
@@ -1301,6 +1571,8 @@ class ScopePanel:
         await self._apply(settings)
 
     async def _trigger_middle(self, _: Any = None) -> None:
+        if self.pending or self.closing or self.disconnecting:
+            return
         source = int(self.trigger_source.value or "1")
         values = self.acquisition.local.get(source) if self.acquisition else None
         if values is not None and values.high is not None and values.low is not None:
@@ -1361,23 +1633,24 @@ class ScopePanel:
         acquisition = self.acquisition
         if acquisition is None:
             return
+        settings = acquisition.settings
         mapping = self._mapping_values()
         preferred = [channel for channel, signal in mapping.items() if signal == "clk"]
-        order = preferred + [self.settings.trigger.source, 1, 2]
+        order = preferred + [settings.trigger.source, 1, 2]
         found = None
         for channel in order:
             trace = acquisition.trace(channel)
             if trace is None:
                 continue
-            floor = 0.5 * self.settings.channel(channel).scale
-            found = period_cursors(trace, self.settings.time_position, min_amplitude=floor)
+            floor = 0.5 * settings.channel(channel).scale
+            found = period_cursors(trace, settings.time_position, min_amplitude=floor)
             if found:
                 break
         if found is None:
             self._report("Pas deux fronts montants à l'écran : élargir la base de temps.")
             self._update()
             return
-        scale, position = self.settings.time_scale, self.settings.time_position
+        scale, position = settings.time_scale, settings.time_position
         mode = "both" if self.cursors.volt else "time"
         self._set_cursors(
             mode=mode,
@@ -1398,42 +1671,62 @@ class ScopePanel:
         acquisition = self.acquisition
         if acquisition is None:
             return
-        path = self.project_root / "exports" / f"oscilloscope-{datetime.now():%Y%m%d-%H%M%S}.csv"
+        suffix = "-simulation" if self.acquisition_kind == "demo" else ""
+        path = (
+            self.project_root
+            / "exports"
+            / (f"oscilloscope-{datetime.now():%Y%m%d-%H%M%S-%f}{suffix}.csv")
+        )
         try:
             write_acquisition_csv(acquisition, path)
         except OSError as exc:
             self._report(f"Export CSV : {exc}")
             self._update()
             return
-        self.export_note.value = f"Points exportés : {path}"
+        origin = " simulés" if self.acquisition_kind == "demo" else ""
+        self.export_note.value = f"Points{origin} de l'acquisition {self.count} exportés : {path}"
         self._log(self.export_note.value, GREEN)
         self._update()
 
     async def _screenshot(self, _: Any = None) -> None:
         scope = self.scope
-        if scope is None:
+        if (
+            scope is None
+            or self.source.value == "demo"
+            or self.pending
+            or self.capturing
+            or self.closing
+            or self.disconnecting
+        ):
             return
+        self.pending = True
+        self._sync()
+        self._update()
         try:
             async with self.io_lock:
+                if self.scope is not scope or self.closing or self.disconnecting:
+                    return
                 image = await asyncio.to_thread(scope.screenshot)
+            if self.closing or self.disconnecting:
+                return
+            folder = self.project_root / "exports"
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / f"oscilloscope-{datetime.now():%Y%m%d-%H%M%S-%f}.png"
+            path.write_bytes(image)
+        except ScopeConnectionError as exc:
+            await self._lost_connection(scope, f"Copie d'écran : {exc}")
+            return
         except (ScopeError, OSError) as exc:
             self._report(f"Copie d'écran : {exc}")
-            self._update()
             return
-        folder = self.project_root / "exports"
-        folder.mkdir(parents=True, exist_ok=True)
-        path = folder / f"oscilloscope-{datetime.now():%Y%m%d-%H%M%S}.png"
-        path.write_bytes(image)
-        self.export_note.value = f"Copie d'écran : {path}"
+        finally:
+            self.pending = False
+            self._sync()
+            self._update()
+        self.export_note.value = f"Écran actuel de l'appareil (distinct des points CSV) : {path}"
         self._log(self.export_note.value, GREEN)
         self._update()
 
     async def shutdown(self) -> None:
         self.closing = True
-        self.running = False
-        if self.run_task is not None:
-            self.run_task.cancel()
-            await asyncio.gather(self.run_task, return_exceptions=True)
-        scope, self.scope = self.scope, None
-        if scope is not None:
-            await asyncio.to_thread(scope.close)
+        await self.disconnect()

@@ -123,6 +123,34 @@ nécessaire pour ce parcours.
 Les chronogrammes de l'application sont idéaux. La compilation à 200 MHz
 ne remplace pas une mesure CLK/DATA/LATCH et des marges du récepteur.
 
+## Ajouter l'oscilloscope sans modifier le parcours Windows
+
+L'onglet **Oscilloscope** fonctionne aussi depuis `start-windows.cmd`, avec
+le même compte Windows. **Simulation (démo)** permet de préparer les réglages
+sans appareil ; ses signaux ne sont pas des mesures de l'Arty.
+
+Pour un **DSOX1202A** réel, choisir **Keysight · réseau LAN** si l'appareil
+possède sa prise RJ45 arrière : le LAN est donné standard dans la fiche
+Keysight actuelle. Relier le PC et l'oscilloscope au même réseau, lire l'adresse
+dans **Utility → I/O → Configure → LAN → LAN Settings**, saisir cette adresse
+dans l'application et **Connecter**. Le port TCP est **5025**. Cette liaison
+utilise l'application Python et ne demande pas de pilote VISA ni de terminal
+administrateur.
+
+La liaison **Keysight · USB / VISA** utilise le port **USB Device arrière**
+et une bibliothèque VISA avec pilote USB déjà présents. PyVISA, installé par
+le lanceur, est seulement l'interface Python. L'installation de
+[Keysight IO Libraries Suite](https://www.keysight.com/us/content/lib/software-detail/computer-software/io-libraries-suite-downloads-2175637/keysight-io-libraries-suite-2025.html)
+demande des droits administrateur : sans ces droits et sans VISA existante,
+utiliser le LAN ou la simulation. Les pilotes Digilent/FTDI de l'Arty sont
+indépendants et restent ceux du parcours décrit ci-dessus.
+
+Commencer la mesure à **1 MHz**, puis 10 MHz avec les sondes adaptées, les
+facteurs sonde/voie accordés et une masse courte. La bande passante du
+DSOX1202A est **70 MHz de base**, 100 ou 200 MHz selon l'option ; une fréquence
+CLK de 200 MHz n'y suffit pas pour valider la forme des fronts et les marges
+du récepteur. Voir [le guide Oscilloscope et ses sources Keysight](oscilloscope.md).
+
 ## Diagnostics facultatifs depuis un terminal ordinaire
 
 Depuis le dossier du projet, dans CMD :

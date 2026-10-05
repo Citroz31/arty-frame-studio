@@ -8,11 +8,13 @@ Deux transports sont proposés :
 
 ``scope_sim.SimulatedKeysight`` répond aux mêmes commandes pour la démo et les
 tests. Les mesures locales et les curseurs travaillent sur les points lus ; les
-mesures de l'oscilloscope portent sur son enregistrement complet.
+mesures de l'oscilloscope utilisent les données affichées et, pour la fréquence
+et la période, le cycle le plus proche du déclenchement.
 """
 
 from __future__ import annotations
 
+import bisect
 import csv
 import importlib
 import math
@@ -44,11 +46,16 @@ TIME_SCALES = tuple(
     if 2e-9 <= mantissa * 10.0**exponent <= 5.0
 )
 PROBES = (1.0, 10.0, 100.0)
+# Le mode NORMal du DSOX1202A accepte ces seules tailles de transfert.
+WAVEFORM_POINTS = (100, 250, 500, 1000)
 # Bit « Run » du registre d'opération : acquisition en cours ou en attente.
 _RUN_BIT = 8
 # Niveau haut attendu des sorties LVCMOS33 de l'Arty.
 LOGIC_HIGH = 3.3
 _HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.\-]{0,252}")
+_MAX_BLOCK_BYTES = 64 * 1024 * 1024
+_MAX_LINE_BYTES = 1024 * 1024
+_VISA_RESOURCE = re.compile(r"(?:USB|TCPIP|GPIB)\d*::[^\r\n\0]+::INSTR", re.IGNORECASE)
 
 
 class ScopeError(RuntimeError):
@@ -57,6 +64,14 @@ class ScopeError(RuntimeError):
 
 class ScopeTimeout(ScopeError):
     """Aucune réponse de l'oscilloscope dans le délai."""
+
+
+class ScopeConnectionError(ScopeError):
+    """Liaison inutilisable : une nouvelle connexion est nécessaire."""
+
+
+class ScopeConnectionTimeout(ScopeTimeout, ScopeConnectionError):
+    """Délai de liaison dépassé ; la session a été fermée."""
 
 
 class TriggerTimeout(ScopeTimeout):
@@ -84,9 +99,13 @@ def parse_ieee_block(data: bytes) -> bytes:
     if len(header) != digits or not header.isdigit():
         raise ScopeError("En-tête de bloc binaire invalide.")
     length = int(header)
+    if length > _MAX_BLOCK_BYTES:
+        raise ScopeError("Bloc binaire trop volumineux.")
     payload = data[2 + digits : 2 + digits + length]
     if len(payload) != length:
         raise ScopeError(f"Bloc binaire incomplet : {len(payload)} octets sur {length}.")
+    if data[2 + digits + length :] not in (b"", b"\n", b"\r\n"):
+        raise ScopeError("Fin de bloc binaire invalide.")
     return payload
 
 
@@ -106,6 +125,8 @@ class SocketTransport:
             raise ValueError("Adresse IP ou nom d'hôte de l'oscilloscope invalide.")
         if type(port) is not int or not 1 <= port <= 65535:
             raise ValueError("Port TCP entre 1 et 65535 requis.")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("Délai de liaison positif et fini requis.")
         self.host, self.port = host, port
         try:
             self._socket = connect((host, port), timeout)
@@ -117,19 +138,41 @@ class SocketTransport:
         self._socket.settimeout(timeout)
         self._timeout = timeout
         self._buffer = bytearray()
-        self._stale = False
+        self._closed = False
+        self._deadline: float | None = None
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise ScopeConnectionError("Liaison LAN fermée : reconnecter l'oscilloscope.")
+
+    @property
+    def usable(self) -> bool:
+        return not self._closed
+
+    def _fail(self, error: ScopeError) -> None:
+        self.close()
+        raise error
 
     def _receive(self) -> None:
         try:
+            if self._deadline is not None:
+                remaining = self._deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                self._socket.settimeout(remaining)
             chunk = self._socket.recv(65536)
         except TimeoutError as exc:
-            # Une réponse tardive décalerait toutes les suivantes : elle sera jetée.
-            self._stale = True
-            raise ScopeTimeout("Délai dépassé en attendant l'oscilloscope.") from exc
+            # Une purge temporaire ne garantit pas qu'une réponse n'arrivera pas
+            # encore plus tard. Ne jamais réutiliser ce flux devenu ambigu.
+            self.close()
+            raise ScopeConnectionTimeout(
+                "Délai dépassé en attendant l'oscilloscope : reconnecter la liaison LAN."
+            ) from exc
         except OSError as exc:
-            raise ScopeError(f"Liaison LAN interrompue : {exc}") from exc
+            self.close()
+            raise ScopeConnectionError(f"Liaison LAN interrompue : {exc}") from exc
         if not chunk:
-            raise ScopeError("L'oscilloscope a fermé la connexion LAN.")
+            self._fail(ScopeConnectionError("L'oscilloscope a fermé la connexion LAN."))
         self._buffer.extend(chunk)
 
     def _read_exact(self, count: int) -> bytes:
@@ -141,49 +184,64 @@ class SocketTransport:
 
     def _read_line(self) -> bytes:
         while b"\n" not in self._buffer:
+            if len(self._buffer) > _MAX_LINE_BYTES:
+                self._fail(ScopeConnectionError("Réponse SCPI trop longue ; reconnecter."))
             self._receive()
         end = self._buffer.index(b"\n")
+        if end > _MAX_LINE_BYTES:
+            self._fail(ScopeConnectionError("Réponse SCPI trop longue ; reconnecter."))
         line = bytes(self._buffer[:end])
         del self._buffer[: end + 1]
         return line
 
-    def _resync(self) -> None:
-        """Jette ce qui reste d'une réponse arrivée après un délai dépassé."""
-        self._buffer.clear()
-        self._stale = False
-        self._socket.settimeout(0.3)
-        try:
-            while self._socket.recv(65536):
-                pass
-        except OSError:
-            pass
-        finally:
-            self._socket.settimeout(self._timeout)
-
     def write(self, command: str) -> None:
-        if self._stale:
-            self._resync()
+        self._ensure_open()
+        if any(character in command for character in "\r\n\0"):
+            raise ValueError("Une seule ligne de commande SCPI attendue.")
         try:
+            self._socket.settimeout(self._timeout)
             self._socket.sendall(command.encode("ascii") + b"\n")
+        except TimeoutError as exc:
+            self.close()
+            raise ScopeConnectionTimeout(
+                "Délai dépassé lors de l'envoi : reconnecter la liaison LAN."
+            ) from exc
         except OSError as exc:
-            raise ScopeError(f"Envoi impossible vers l'oscilloscope : {exc}") from exc
+            self.close()
+            raise ScopeConnectionError(f"Envoi impossible vers l'oscilloscope : {exc}") from exc
 
     def query(self, command: str) -> str:
-        self.write(command)
-        return self._read_line().decode("ascii", "replace").strip()
+        self._deadline = time.monotonic() + self._timeout
+        try:
+            self.write(command)
+            return self._read_line().decode("ascii", "replace").strip()
+        finally:
+            self._deadline = None
 
     def query_block(self, command: str) -> bytes:
-        self.write(command)
-        start = self._read_exact(2)
-        if start[:1] != b"#" or not start[1:2].isdigit():
-            raise ScopeError("Bloc binaire IEEE 488.2 attendu.")
-        header = self._read_exact(int(start[1:2]))
-        payload = self._read_exact(int(header))
-        # The instrument ends the block with a newline.
-        self._read_line()
-        return payload
+        self._deadline = time.monotonic() + self._timeout
+        try:
+            self.write(command)
+            start = self._read_exact(2)
+            if start[:1] != b"#" or start[1:2] not in b"123456789":
+                self._fail(ScopeConnectionError("Bloc binaire IEEE 488.2 défini attendu."))
+            header = self._read_exact(int(start[1:2]))
+            if not header.isdigit() or int(header) > _MAX_BLOCK_BYTES:
+                self._fail(ScopeConnectionError("Longueur de bloc binaire invalide."))
+            payload = self._read_exact(int(header))
+            # Valider le terminateur sans avaler une réponse SCPI supplémentaire.
+            terminator = self._read_exact(1)
+            if terminator == b"\r":
+                terminator = self._read_exact(1)
+            if terminator != b"\n":
+                self._fail(ScopeConnectionError("Fin de bloc binaire invalide ; reconnecter."))
+            return payload
+        finally:
+            self._deadline = None
 
     def close(self) -> None:
+        self._closed = True
+        self._buffer.clear()
         try:
             self._socket.close()
         except OSError:
@@ -217,17 +275,19 @@ def list_visa_resources() -> list[str]:
     Les ports série (ASRL) sont exclus : l'un d'eux est l'UART de l'Arty, qui ne
     doit pas recevoir de commandes SCPI.
     """
+    manager = None
     try:
         manager = open_resource_manager()
         resources = manager.list_resources()
+        return sorted(str(resource) for resource in resources if _VISA_RESOURCE.fullmatch(resource))
     except Exception:
         return []
-    return sorted(
-        str(resource)
-        for resource in resources
-        if str(resource).upper().startswith(("USB", "TCPIP", "GPIB"))
-        and str(resource).upper().endswith("::INSTR")
-    )
+    finally:
+        if manager is not None:
+            try:
+                manager.close()
+            except Exception:
+                pass
 
 
 class VisaTransport:
@@ -235,42 +295,70 @@ class VisaTransport:
 
     def __init__(self, resource: str, *, timeout: float = 5.0, manager: Any = None) -> None:
         resource = resource.strip() if isinstance(resource, str) else ""
-        if not resource or any(char in resource for char in "\r\n\0"):
-            raise ValueError("Ressource VISA attendue, par exemple USB0::0x2A8D::…::INSTR.")
+        if not _VISA_RESOURCE.fullmatch(resource):
+            raise ValueError(
+                "Ressource VISA USB, TCPIP ou GPIB ::INSTR attendue ; les ports COM/ASRL "
+                "sont exclus pour protéger la liaison de l'Arty."
+            )
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("Délai de liaison positif et fini requis.")
+        owns_manager = manager is None
         manager = manager if manager is not None else open_resource_manager()
+        self._manager = manager if owns_manager else None
+        self._closed = False
         try:
             self._instrument = manager.open_resource(resource)
+            self._instrument.timeout = max(1, math.ceil(timeout * 1000))
+            self._instrument.read_termination = "\n"
+            self._instrument.write_termination = "\n"
         except Exception as exc:
+            self.close()
             raise ScopeError(f"Ouverture VISA impossible ({resource}) : {exc}") from exc
-        self._instrument.timeout = int(timeout * 1000)
-        self._instrument.read_termination = "\n"
-        self._instrument.write_termination = "\n"
         self.resource = resource
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise ScopeConnectionError("Liaison VISA fermée : reconnecter l'oscilloscope.")
+
+    @property
+    def usable(self) -> bool:
+        return not self._closed
 
     def _wrap(self, exc: Exception, command: str) -> ScopeError:
         text = str(exc)
-        if "TMO" in text or "imeout" in text:
-            # Device clear : vide les tampons pour ne pas lire une réponse tardive.
+        is_timeout = (
+            isinstance(exc, TimeoutError)
+            or getattr(exc, "error_code", None) == -1073807339
+            or any(word in text.lower() for word in ("tmo", "timeout", "timed out"))
+        )
+        if is_timeout:
             try:
                 self._instrument.clear()
             except Exception:
                 pass
-            return ScopeTimeout(f"Délai dépassé pour {command}.")
-        return ScopeError(f"Erreur VISA pour {command} : {text}")
+        # clear() n'est pas disponible sur tous les transports VISA ; une
+        # session incertaine ne doit jamais recevoir une autre requête.
+        self.close()
+        if is_timeout:
+            return ScopeConnectionTimeout(f"Délai dépassé pour {command} : reconnecter VISA.")
+        return ScopeConnectionError(f"Erreur VISA pour {command} : {text}")
 
     def write(self, command: str) -> None:
+        self._ensure_open()
         try:
             self._instrument.write(command)
         except Exception as exc:
             raise self._wrap(exc, command) from exc
 
     def query(self, command: str) -> str:
+        self._ensure_open()
         try:
             return str(self._instrument.query(command)).strip()
         except Exception as exc:
             raise self._wrap(exc, command) from exc
 
     def query_block(self, command: str) -> bytes:
+        self._ensure_open()
         try:
             values = self._instrument.query_binary_values(
                 command, datatype="B", is_big_endian=False, container=bytes
@@ -280,10 +368,18 @@ class VisaTransport:
         return bytes(values)
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         try:
             self._instrument.close()
         except Exception:
             pass
+        if self._manager is not None:
+            try:
+                self._manager.close()
+            except Exception:
+                pass
 
 
 @dataclass(frozen=True)
@@ -313,7 +409,7 @@ class TriggerSettings:
     sweep: str = "AUTO"  # AUTO ou NORM
 
     def __post_init__(self) -> None:
-        if self.source not in CHANNELS:
+        if type(self.source) is not int or self.source not in CHANNELS:
             raise ValueError("Source de déclenchement CH1 ou CH2.")
         if self.slope not in ("POS", "NEG"):
             raise ValueError("Front de déclenchement montant ou descendant.")
@@ -341,13 +437,17 @@ class ScopeSettings:
             raise ValueError("Base de temps positive requise (s/div).")
         if not math.isfinite(self.time_position):
             raise ValueError("Position horizontale finie requise.")
-        if type(self.points) is not int or not 100 <= self.points <= 10_000:
-            raise ValueError("Nombre de points entre 100 et 10 000.")
+        if type(self.points) is not int or self.points not in WAVEFORM_POINTS:
+            raise ValueError("Nombre de points NORMal : 100, 250, 500 ou 1000.")
 
     def channel(self, number: int) -> ChannelSettings:
+        if type(number) is not int or number not in CHANNELS:
+            raise ValueError("Voie CH1 ou CH2 attendue.")
         return self.channels[number - 1]
 
     def with_channel(self, number: int, settings: ChannelSettings) -> ScopeSettings:
+        if type(number) is not int or number not in CHANNELS:
+            raise ValueError("Voie CH1 ou CH2 attendue.")
         channels = list(self.channels)
         channels[number - 1] = settings
         return ScopeSettings(
@@ -404,6 +504,38 @@ def _percentile(sorted_values: Sequence[float], fraction: float) -> float:
     return sorted_values[index]
 
 
+def _signal_levels(ordered: Sequence[float]) -> tuple[float, float]:
+    """Niveaux stables, même si une impulsion occupe moins de 5 % du relevé.
+
+    Une séparation nette entre deux groupes donne leurs médianes. Un groupe
+    extrême de moins de trois points n'est pas un plateau identifiable ; les
+    extrema bruts restent disponibles séparément dans Vmin/Vmax.
+    """
+    values = list(ordered)
+    while len(values) >= 6:
+        low, high = _percentile(values, 0.05), _percentile(values, 0.95)
+        split = max(range(1, len(values)), key=lambda index: values[index] - values[index - 1])
+        gap = values[split] - values[split - 1]
+        if gap <= max(1e-3, 0.5 * (high - low)):
+            break
+        if split < 3:
+            values = values[split:]
+        elif len(values) - split < 3:
+            values = values[:split]
+        else:
+            return statistics.median(values[:split]), statistics.median(values[split:])
+    return _percentile(values, 0.05), _percentile(values, 0.95)
+
+
+def _valid_trace(trace: Trace) -> bool:
+    return (
+        len(trace.times) == len(trace.volts)
+        and len(trace.volts) >= 3
+        and all(math.isfinite(value) for value in (*trace.times, *trace.volts))
+        and all(b > a for a, b in zip(trace.times, trace.times[1:], strict=False))
+    )
+
+
 def edge_times(trace: Trace, *, rising: bool = True, min_amplitude: float = 0.0) -> list[float]:
     """Instants des fronts au niveau médian, avec hystérésis et interpolation.
 
@@ -411,12 +543,12 @@ def edge_times(trace: Trace, *, rising: bool = True, min_amplitude: float = 0.0)
     considéré comme sans front : bruit d'une sonde non raccordée, par exemple.
     """
     volts, times = trace.volts, trace.times
-    if len(volts) < 3:
+    if not _valid_trace(trace):
         return []
     ordered = sorted(volts)
-    low, high = _percentile(ordered, 0.05), _percentile(ordered, 0.95)
+    low, high = _signal_levels(ordered)
     amplitude = high - low
-    if amplitude <= max(1e-3, min_amplitude, 0.02 * (ordered[-1] - ordered[0])):
+    if amplitude <= max(1e-3, min_amplitude):
         return []
     middle, hysteresis = (low + high) / 2, 0.1 * amplitude
     state_high = volts[0] > middle
@@ -455,39 +587,92 @@ def _crossing(
     return times[end]
 
 
-def clock_period(rising: Sequence[float]) -> float | None:
-    """Période d'horloge : moyenne des intervalles proches du plus court.
-
-    Une CLK en salves alterne des intervalles d'une période et des trous
-    (LATCH, pause) : ces derniers sont écartés au lieu de fausser la moyenne.
-    """
+def _period_intervals(rising: Sequence[float], resolution: float) -> list[float]:
+    if (
+        not math.isfinite(resolution)
+        or resolution < 0
+        or any(not math.isfinite(value) for value in rising)
+        or any(b <= a for a, b in zip(rising, rising[1:], strict=False))
+    ):
+        return []
     intervals = [b - a for a, b in zip(rising, rising[1:], strict=False) if b > a]
     if not intervals:
+        return []
+    ordered = sorted(intervals)
+    # Most-supported interval group; a short isolated glitch cannot win.
+    clusters = []
+    for candidate in ordered:
+        tolerance = max(0.1 * candidate, resolution)
+        start = bisect.bisect_left(ordered, candidate - tolerance)
+        stop = bisect.bisect_right(ordered, candidate + tolerance)
+        clusters.append((stop - start, candidate, start, stop))
+    count, candidate, start, stop = max(clusters, key=lambda item: (item[0], -item[1]))
+    if len(intervals) > 1 and count <= len(intervals) / 2:
+        return []  # aucune période représentative
+    candidate = statistics.median(ordered[start:stop])
+    tolerance = max(0.1 * candidate, resolution)
+    # A spurious rising edge can divide one real period into two intervals.
+    clean = []
+    index = 0
+    while index < len(intervals):
+        current = intervals[index]
+        if (
+            index + 1 < len(intervals)
+            and current < candidate - tolerance
+            and intervals[index + 1] < candidate
+            and abs(current + intervals[index + 1] - candidate) <= tolerance
+        ):
+            clean.append(current + intervals[index + 1])
+            index += 2
+        else:
+            clean.append(current)
+            index += 1
+    return clean
+
+
+def clock_period(rising: Sequence[float], *, resolution: float = 0.0) -> float | None:
+    """Période représentative des fronts ; trous de salves et glitches exclus.
+
+    Le groupe majoritaire tolère 10 % de jitter, ou un pas d'échantillonnage
+    (incertitude de l'intervalle interpolé). Sa moyenne réduit la quantification
+    des fronts. Une trace seule ne permet pas de reconnaître tous les alias.
+    """
+    intervals = _period_intervals(rising, resolution)
+    if not intervals:
         return None
-    shortest = min(intervals)
-    cluster = [value for value in intervals if value <= 1.1 * shortest]
-    return sum(cluster) / len(cluster)
+    ordered = sorted(intervals)
+    candidate = statistics.median(ordered)
+    tolerance = max(0.1 * candidate, resolution)
+    cluster = [value for value in intervals if abs(value - candidate) <= tolerance]
+    return statistics.mean(cluster) if cluster else None
 
 
-def measure_trace(trace: Trace, *, min_amplitude: float = 0.0) -> Measurements:
+def measure_trace(trace: Trace, *, min_amplitude: float = 0.0, clock: bool = False) -> Measurements:
     """Fréquence, période, niveaux et rapport cyclique calculés sur les points lus.
 
-    La période vient des fronts montants (voir ``clock_period``) ; le rapport
-    cyclique est la médiane des durées à l'état haut de ces périodes.
+    Sans ``clock``, une suite d'intervalles incompatibles ne définit pas une
+    période. ``clock=True`` autorise les pauses entre salves d'horloge. Le rapport
+    cyclique est la médiane des durées à l'état haut des périodes retenues.
     """
-    if len(trace.volts) < 3:
+    if not _valid_trace(trace):
         return Measurements()
     ordered = sorted(trace.volts)
     vmin, vmax = ordered[0], ordered[-1]
-    low, high = _percentile(ordered, 0.05), _percentile(ordered, 0.95)
+    low, high = _signal_levels(ordered)
     rising = edge_times(trace, rising=True, min_amplitude=min_amplitude)
     falling = edge_times(trace, rising=False, min_amplitude=min_amplitude)
-    period = clock_period(rising)
+    resolution = max(b - a for a, b in zip(trace.times, trace.times[1:], strict=False))
+    intervals = _period_intervals(rising, resolution)
+    period = clock_period(rising, resolution=resolution)
+    if period is not None and not clock:
+        tolerance = max(0.1 * period, resolution)
+        if any(abs(value - period) > tolerance for value in intervals):
+            period = None
     duty = None
     if period is not None:
         fractions = []
         for start, stop in zip(rising, rising[1:], strict=False):
-            if stop - start > 1.1 * period:
+            if abs(stop - start - period) > max(0.1 * period, resolution):
                 continue  # trou entre deux salves
             fall = next((value for value in falling if start < value < stop), None)
             if fall is not None:
@@ -583,6 +768,8 @@ def _number(text: str) -> float:
         value = float(text.strip().split(",")[0])
     except ValueError as exc:
         raise ScopeError(f"Réponse numérique attendue, reçu {text!r}.") from exc
+    if not math.isfinite(value):
+        raise ScopeError(f"Réponse numérique finie attendue, reçu {text!r}.")
     return value
 
 
@@ -605,19 +792,48 @@ class KeysightScope:
         self._sleep = sleep
         self._clock = clock
         self.identity = ""
+        self._closed = False
+
+    @property
+    def usable(self) -> bool:
+        """False si la liaison a été fermée ou ne peut plus aligner ses réponses."""
+        return not self._closed and bool(getattr(self._transport, "usable", True))
 
     # -- échanges de base -------------------------------------------------
     def write(self, command: str) -> None:
         with self._lock:
+            if not self.usable:
+                raise ScopeConnectionError("Liaison fermée : reconnecter l'oscilloscope.")
             self._transport.write(command)
 
     def query(self, command: str) -> str:
         with self._lock:
+            if not self.usable:
+                raise ScopeConnectionError("Liaison fermée : reconnecter l'oscilloscope.")
             return self._transport.query(command)
+
+    def query_block(self, command: str) -> bytes:
+        with self._lock:
+            if not self.usable:
+                raise ScopeConnectionError("Liaison fermée : reconnecter l'oscilloscope.")
+            return self._transport.query_block(command)
 
     def identify(self) -> str:
         with self._lock:
-            self.identity = self.query("*IDN?")
+            self.identity = ""
+            reply = self.query("*IDN?")
+            fields = [part.strip().upper() for part in reply.split(",")]
+            manufacturers = ("KEYSIGHT TECHNOLOGIES", "AGILENT TECHNOLOGIES", "HEWLETT-PACKARD")
+            if (
+                len(fields) < 4
+                or fields[0] not in manufacturers
+                or not re.fullmatch(r"(?:DSO|MSO)-?X ?[1-4]\d{3}[A-Z]", fields[1])
+            ):
+                raise ScopeError(
+                    f"Instrument incompatible : {reply!r}. Un oscilloscope Keysight/Agilent "
+                    "InfiniiVision X-Series (1000 à 4000) est attendu."
+                )
+            self.identity = reply
             return self.identity
 
     def errors(self) -> list[str]:
@@ -638,14 +854,26 @@ class KeysightScope:
             raise ScopeError(f"{action} refusé par l'oscilloscope : {'; '.join(problems)}")
 
     # -- réglages -----------------------------------------------------------
+    def _require_main_timebase(self) -> None:
+        mode = self.query(":TIMebase:MODE?").strip().upper()
+        if mode != "MAIN":
+            raise ScopeError(
+                f"Base de temps {mode!r} non prise en charge : sélectionner Main "
+                "sur l'oscilloscope (quitter Zoom, XY ou Roll)."
+            )
+
     def read_settings(self) -> ScopeSettings:
         with self._lock:
+            self._require_main_timebase()
             channels = []
             for number in CHANNELS:
                 prefix = f":CHANnel{number}"
+                display = self.query(f"{prefix}:DISPlay?").strip().upper()
+                if display not in ("0", "+0", "OFF", "1", "+1", "ON"):
+                    raise ScopeError(f"État d'affichage de CH{number} invalide : {display!r}.")
                 channels.append(
                     ChannelSettings(
-                        enabled=self.query(f"{prefix}:DISPlay?").strip() in ("1", "ON"),
+                        enabled=display in ("1", "+1", "ON"),
                         scale=_number(self.query(f"{prefix}:SCALe?")),
                         offset=_number(self.query(f"{prefix}:OFFSet?")),
                         probe=_number(self.query(f"{prefix}:PROBe?")),
@@ -653,19 +881,36 @@ class KeysightScope:
                     )
                 )
             source = self.query(":TRIGger:EDGE:SOURce?").strip().upper()
-            match = re.search(r"CHAN(?:NEL)?([12])", source)
+            match = re.fullmatch(r"CHAN(?:NEL)?([12])", source)
             slope = self.query(":TRIGger:EDGE:SLOPe?").strip().upper()
             sweep = self.query(":TRIGger:SWEep?").strip().upper()
+            mode = self.query(":TRIGger:MODE?").strip().upper()
+            if (
+                mode != "EDGE"
+                or match is None
+                or not slope.startswith(("POS", "NEG"))
+                or not sweep.startswith(("AUTO", "NORM"))
+            ):
+                raise ScopeError(
+                    "Déclenchement non pris en charge : sélectionner Edge, CH1 ou CH2, "
+                    "front montant ou descendant sur l'oscilloscope."
+                )
             trigger = TriggerSettings(
-                source=int(match.group(1)) if match else 1,
+                source=int(match.group(1)),
                 slope="NEG" if slope.startswith("NEG") else "POS",
                 level=_number(self.query(":TRIGger:EDGE:LEVel?")),
                 sweep="NORM" if sweep.startswith("NORM") else "AUTO",
             )
+            scale = _number(self.query(":TIMebase:SCALe?"))
+            position = _number(self.query(":TIMebase:POSition?"))
+            reference = self.query(":TIMebase:REFerence?").strip().upper()
+            reference_divisions = {"LEFT": 4, "CENT": 0, "CENTER": 0, "RIGH": -4, "RIGHT": -4}
+            if reference not in reference_divisions:
+                raise ScopeError(f"Référence horizontale inconnue : {reference!r}.")
             return ScopeSettings(
                 (channels[0], channels[1]),
-                time_scale=_number(self.query(":TIMebase:SCALe?")),
-                time_position=_number(self.query(":TIMebase:POSition?")),
+                time_scale=scale,
+                time_position=position + reference_divisions[reference] * scale,
                 trigger=trigger,
             )
 
@@ -681,6 +926,7 @@ class KeysightScope:
                 self.write(f"{prefix}:SCALe {channel.scale:.6E}")
                 self.write(f"{prefix}:OFFSet {channel.offset:.6E}")
             # Position comptée depuis le centre de l'écran, comme l'affichage de l'application.
+            self.write(":TIMebase:MODE MAIN")
             self.write(":TIMebase:REFerence CENTer")
             self.write(f":TIMebase:SCALe {settings.time_scale:.6E}")
             self.write(f":TIMebase:POSition {settings.time_position:.6E}")
@@ -711,26 +957,58 @@ class KeysightScope:
     def acquire(self, timeout: float = 2.0) -> bool:
         """Une acquisition unique ; ``True`` si elle a été déclenchée par un front.
 
-        En mode Auto, l'oscilloscope acquiert même sans front (``False``). En
-        mode Normal sans front, l'attente s'arrête au délai par STOP.
+        SINGLE attend un vrai front, même en mode Auto. En Auto, après une
+        attente brève, FORCE permet de voir un signal continu (``False``).
+        En mode Normal sans front, l'attente s'arrête au délai par STOP.
         """
+        if not math.isfinite(timeout) or not 0 < timeout <= 60:
+            raise ValueError("Délai d'acquisition positif et fini, au plus 60 s requis.")
         with self._lock:
-            self.query(":TER?")  # efface l'indicateur de déclenchement
-            self.write(":SINGle")
+            self._require_main_timebase()
+            auto = self.query(":TRIGger:SWEep?").strip().upper().startswith("AUTO")
+            # *OPC? après SINGLE bloquerait l'interface jusqu'au déclenchement.
+            # Le guide recommande de synchroniser STOP avant d'armer SINGLE.
+            self.write(":STOP")
             self.query("*OPC?")
-            deadline = self._clock() + timeout
+            self.query(":TER?")  # efface l'indicateur de déclenchement
+            start = self._clock()
+            deadline = start + timeout
+            force_at = start + min(0.1, timeout / 2)
+            forced = False
+            observed_trigger = False
+            self.write(":SINGle")
             while int(_number(self.query(":OPERegister:CONDition?"))) & _RUN_BIT:
                 if self._clock() >= deadline:
                     self.write(":STOP")
+                    if forced:
+                        raise ScopeTimeout("L'acquisition forcée n'a pas terminé dans le délai.")
+                    if observed_trigger or int(_number(self.query(":TER?"))) == 1:
+                        raise ScopeTimeout(
+                            "L'acquisition a été déclenchée mais n'a pas terminé dans le délai "
+                            ": augmenter l'attente ou réduire la fenêtre de temps."
+                        )
                     raise TriggerTimeout(
                         "Aucun déclenchement dans le délai : vérifier la source, le niveau "
                         "et le front, ou passer le déclenchement en mode Auto."
                     )
-                self._sleep(0.02)
-            return int(_number(self.query(":TER?"))) == 1
+                if auto and not forced and not observed_trigger and self._clock() >= force_at:
+                    # RUN reste actif pendant le remplissage du post-trigger.
+                    # TER? lit et efface : conserver un vrai front déjà arrivé.
+                    observed_trigger = int(_number(self.query(":TER?"))) == 1
+                    if not observed_trigger:
+                        self.write(":TRIGger:FORCe")
+                        forced = True
+                self._sleep(min(0.02, max(0.0, deadline - self._clock())))
+            event = int(_number(self.query(":TER?"))) == 1
+            return (event or observed_trigger) and not forced
 
     def read_trace(self, channel: int, points: int = 1000) -> Trace:
+        if type(channel) is not int or channel not in CHANNELS:
+            raise ValueError("Voie CH1 ou CH2 attendue.")
+        if type(points) is not int or points not in WAVEFORM_POINTS:
+            raise ValueError("Nombre de points NORMal : 100, 250, 500 ou 1000.")
         with self._lock:
+            self._require_main_timebase()
             self.write(f":WAVeform:SOURce CHANnel{channel}")
             self.write(":WAVeform:FORMat BYTE")
             self.write(":WAVeform:UNSigned 1")
@@ -739,19 +1017,45 @@ class KeysightScope:
             preamble = [value.strip() for value in self.query(":WAVeform:PREamble?").split(",")]
             if len(preamble) < 10:
                 raise ScopeError("Préambule de forme d'onde incomplet.")
-            x_increment, x_origin, x_reference = (float(value) for value in preamble[4:7])
-            y_increment, y_origin, y_reference = (float(value) for value in preamble[7:10])
-            codes = self._transport.query_block(":WAVeform:DATA?")
+            values = [_number(value) for value in preamble[:10]]
+            # Les exemples du guide codent HRES avec 3, sa table avec 4.
+            # Ces deux variantes utilisent le même axe de temps linéaire.
+            if values[0] != 0 or values[1] not in (0, 2, 3, 4):
+                raise ScopeError(
+                    "Forme d'onde incompatible : format BYTE et acquisition Normal/High "
+                    "Resolution/Average requis (Peak Detect non pris en charge)."
+                )
+            expected_points = values[2]
+            x_increment, x_origin, x_reference = values[4:7]
+            y_increment, y_origin, y_reference = values[7:10]
+            if x_increment <= 0 or y_increment <= 0:
+                raise ScopeError("Incréments de forme d'onde positifs requis.")
+            codes = self.query_block(":WAVeform:DATA?")
+            if not codes or len(codes) != expected_points:
+                raise ScopeError(
+                    f"Forme d'onde incomplète : {len(codes)} points, préambule {expected_points:g}."
+                )
         times = tuple((index - x_reference) * x_increment + x_origin for index in range(len(codes)))
         volts = tuple((code - y_reference) * y_increment + y_origin for code in codes)
         return Trace(channel, times, volts)
 
     def measure(self, channel: int) -> Measurements:
-        """Mesures calculées par l'oscilloscope sur tout son enregistrement."""
+        """Mesures de l'oscilloscope ; fréquence/période du cycle près du trigger."""
+
+        if type(channel) is not int or channel not in CHANNELS:
+            raise ValueError("Voie CH1 ou CH2 attendue.")
 
         def value(item: str) -> float | None:
             number = _number(self.query(f":MEASure:{item}? CHANnel{channel}"))
-            return None if abs(number) >= INVALID_MEASUREMENT / 10 else number
+            if abs(number) >= INVALID_MEASUREMENT / 10:
+                return None
+            if item in ("FREQuency", "PERiod") and number <= 0:
+                return None
+            if item == "DUTYcycle" and not 0 <= number <= 100:
+                return None
+            if item == "VPP" and number < 0:
+                return None
+            return number
 
         with self._lock:
             frequency = value("FREQuency")
@@ -767,36 +1071,66 @@ class KeysightScope:
                 source="oscilloscope",
             )
 
-    def capture(self, *, timeout: float = 2.0, points: int = 1000) -> Acquisition:
+    def capture(
+        self,
+        *,
+        timeout: float = 2.0,
+        points: int = 1000,
+        mapping: dict[int, str | None] | None = None,
+    ) -> Acquisition:
         """Acquisition unique, réglages relus, traces des voies affichées et mesures."""
+        if not math.isfinite(timeout) or not 0 < timeout <= 60:
+            raise ValueError("Délai d'acquisition positif et fini, au plus 60 s requis.")
         start = self._clock()
         with self._lock:
+            if type(points) is not int or points not in WAVEFORM_POINTS:
+                raise ValueError("Nombre de points NORMal : 100, 250, 500 ou 1000.")
+            self.write(":WAVeform:FORMat BYTE")
+            self.write(":WAVeform:UNSigned 1")
+            self.write(":WAVeform:POINts:MODE NORMal")
+            self.write(f":WAVeform:POINts {points}")
+            self._check("Format de transfert")
             triggered = self.acquire(timeout)
-            settings = self.read_settings()
+            self._check("Acquisition")
+            settings = replace(self.read_settings(), points=points)
             traces = tuple(
                 self.read_trace(number, points)
                 for number in CHANNELS
                 if settings.channel(number).enabled
             )
+            self._check("Lecture de forme d'onde")
             measurements = {}
             locals_ = {}
             for trace in traces:
                 # Moins d'une demi-division d'écart : pas de front à mesurer.
                 floor = 0.5 * settings.channel(trace.channel).scale
-                local = measure_trace(trace, min_amplitude=floor)
+                local = measure_trace(
+                    trace,
+                    min_amplitude=floor,
+                    clock=mapping is None or mapping.get(trace.channel) == "clk",
+                )
                 locals_[trace.channel] = local
                 remote = self.measure(trace.channel)
                 # Scope values first; local estimates fill what it could not measure.
+                frequency = remote.frequency
+                if frequency is None and remote.period is not None:
+                    frequency = 1 / remote.period
+                remote_timing = frequency is not None
+                if frequency is None:
+                    frequency = local.frequency
+                # Ne jamais compléter une fréquence appareil par une période
+                # locale différente. La paire vient toujours du même estimateur.
+                period = 1 / frequency if frequency else None
                 measurements[trace.channel] = Measurements(
-                    frequency=remote.frequency or local.frequency,
-                    period=remote.period or local.period,
+                    frequency=frequency,
+                    period=period,
                     vpp=remote.vpp if remote.vpp is not None else local.vpp,
                     vmax=remote.vmax if remote.vmax is not None else local.vmax,
                     vmin=remote.vmin if remote.vmin is not None else local.vmin,
                     duty=remote.duty if remote.duty is not None else local.duty,
                     high=local.high,
                     low=local.low,
-                    source="oscilloscope" if remote.frequency is not None else "local",
+                    source="oscilloscope" if remote_timing else "local",
                 )
         return Acquisition(
             settings, traces, measurements, triggered, self._clock() - start, locals_
@@ -805,17 +1139,23 @@ class KeysightScope:
     def screenshot(self) -> bytes:
         """Copie d'écran PNG de l'oscilloscope."""
         with self._lock:
-            return self._transport.query_block(":DISPlay:DATA? PNG, COLor")
+            png = self.query_block(":DISPlay:DATA? PNG, COLor")
+            if not png.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise ScopeError("La copie d'écran reçue n'est pas un fichier PNG.")
+            return png
 
     def close(self, *, resume: bool = True) -> None:
         """Rend la main à l'oscilloscope (RUN) puis ferme la liaison."""
         with self._lock:
+            if self._closed:
+                return
             try:
-                if resume:
+                if resume and self.identity and self.usable:
                     self._transport.write(":RUN")
             except ScopeError:
                 pass
             finally:
+                self._closed = True
                 self._transport.close()
 
 
@@ -843,10 +1183,45 @@ def frame_preset(
     )
 
 
-def measurement_warnings(acquisition: Acquisition, mapping: dict[int, str | None]) -> list[str]:
+def measurement_warnings(
+    acquisition: Acquisition,
+    mapping: dict[int, str | None],
+    *,
+    expected_clock_hz: float | None = None,
+) -> list[str]:
     """Indices de mesure suspecte sur les voies reliées aux sorties 3,3 V de l'Arty."""
     warnings = []
     for channel, values in acquisition.measurements.items():
+        signal = mapping.get(channel)
+        if signal == "data" and values.frequency is not None:
+            warnings.append(
+                f"CH{channel} : la fréquence DATA décrit un motif de données. "
+                "Mesurer CLK pour connaître la fréquence d'horloge."
+            )
+        frequency = (
+            expected_clock_hz
+            if signal == "clk" and expected_clock_hz is not None
+            else values.frequency
+            if values.source == "oscilloscope"
+            else None
+        )
+        trace = acquisition.trace(channel)
+        if (
+            trace is not None
+            and frequency is not None
+            and math.isfinite(frequency)
+            and frequency > 0
+        ):
+            interval = max(
+                (right - left for left, right in zip(trace.times, trace.times[1:], strict=False)),
+                default=0.0,
+            )
+            if interval > 0 and interval * frequency >= 0.5:
+                warnings.append(
+                    f"CH{channel} : au plus {1 / (interval * frequency):.2g} points par période "
+                    "dans les points transférés ; des fronts peuvent manquer et les mesures "
+                    "locales être fausses. Réduire la base de temps."
+                )
         if not mapping.get(channel):
             continue
         local = acquisition.local.get(channel, values)

@@ -15,6 +15,8 @@ from arty_frame_studio.scope import (
     ChannelSettings,
     KeysightScope,
     Measurements,
+    ScopeConnectionError,
+    ScopeConnectionTimeout,
     ScopeError,
     ScopeSettings,
     ScopeTimeout,
@@ -68,7 +70,16 @@ def square(period: float, duty: float = 0.5, cycles: int = 10, points: int = 200
 def test_ieee_blocks_are_parsed_and_checked():
     assert parse_ieee_block(b"#15abcde\n") == b"abcde"
     assert parse_ieee_block(b"#210" + bytes(range(10))) == bytes(range(10))
-    for bad in (b"", b"abc", b"#x12", b"#2a", b"#0abc", b"#15abc"):
+    for bad in (
+        b"",
+        b"abc",
+        b"#x12",
+        b"#2a",
+        b"#0abc",
+        b"#15abc",
+        b"#11aunexpected\n",
+        b"#9999999999",
+    ):
         with pytest.raises(ScopeError):
             parse_ieee_block(bad)
 
@@ -116,14 +127,51 @@ def test_lan_transport_splits_lines_and_blocks_across_packets():
     assert fake.closed
 
 
-def test_lan_transport_discards_a_reply_that_arrives_after_its_timeout():
+def test_lan_transport_never_reuses_a_stream_after_timeout():
     transport, fake = lan([])
     with pytest.raises(ScopeTimeout):
         transport.query(":MEASure:FREQuency? CHANnel1")
-    # The late answer must not be read as the reply to the next query.
-    fake.chunks = [b"+1.000E+07", b"\n", None, b"KEYSIGHT\n"]
+    # A late answer can arrive after any finite drain interval. The old stream
+    # must remain unusable, even after several quiet intervals.
+    sent = bytes(fake.sent)
+    fake.chunks = [None, None, b"+1.000E+07\n", b"KEYSIGHT\n"]
+    with pytest.raises(ScopeConnectionError, match="reconnecter"):
+        transport.query("*IDN?")
+    assert not transport.usable and fake.closed
+    assert fake.sent == sent
+
+
+@pytest.mark.parametrize("block", [b"#0abc\n", b"#x12", b"#2a2", b"#9999999999", b"#11x!"])
+def test_lan_malformed_blocks_poison_the_session(block):
+    transport, fake = lan([block])
+    with pytest.raises(ScopeConnectionError):
+        transport.query_block(":WAV:DATA?")
+    with pytest.raises(ScopeConnectionError):
+        transport.query("*IDN?")
+    assert fake.closed and not transport.usable
+
+
+def test_lan_blocks_preserve_payload_newlines_and_read_crlf_terminator():
+    transport, _ = lan([b"#14\x00\n\r\xff\r", b"\nKEYSIGHT\n"])
+    assert transport.query_block(":WAV:DATA?") == b"\x00\n\r\xff"
     assert transport.query("*IDN?") == "KEYSIGHT"
-    assert fake.timeouts[-2:] == [0.3, 5.0]
+
+
+def test_lan_fragmented_transfer_has_one_deadline(monkeypatch):
+    clock = Clock()
+    fake = FakeSocket([b"A", b"B", b"C", b"\n"])
+    receive = fake.recv
+
+    def slow_receive(count):
+        clock.sleep(2)
+        return receive(count)
+
+    fake.recv = slow_receive
+    monkeypatch.setattr("arty_frame_studio.scope.time.monotonic", clock)
+    transport = SocketTransport("scope.local", connect=lambda *_: fake)
+    with pytest.raises(ScopeConnectionTimeout):
+        transport.query("*IDN?")
+    assert not transport.usable and fake.closed
 
 
 def test_lan_transport_reports_closed_links_and_bad_addresses():
@@ -169,10 +217,16 @@ class FakeInstrument:
 class FakeManager:
     def __init__(self) -> None:
         self.instrument = FakeInstrument()
+        self.opened: list[str] = []
+        self.closed = False
 
     def open_resource(self, resource: str) -> FakeInstrument:
         assert resource.startswith("USB0::")
+        self.opened.append(resource)
         return self.instrument
+
+    def close(self) -> None:
+        self.closed = True
 
     def list_resources(self) -> tuple[str, ...]:
         return (
@@ -193,14 +247,58 @@ def test_visa_transport_uses_pyvisa_binary_blocks_and_maps_timeouts():
     instrument.fail = RuntimeError("VI_ERROR_TMO (-1073807339): Timeout expired")
     with pytest.raises(ScopeTimeout):
         transport.query("*IDN?")
-    assert instrument.cleared == 1  # device clear: no late reply left in the buffers
+    assert instrument.cleared == 1 and instrument.closed
+    assert not transport.usable and not manager.closed  # caller owns this manager
     instrument.fail = RuntimeError("VI_ERROR_RSRC_NFOUND")
-    with pytest.raises(ScopeError, match="VISA"):
+    with pytest.raises(ScopeConnectionError, match="fermée"):
         transport.query("*IDN?")
     transport.close()
     assert instrument.closed
     with pytest.raises(ValueError):
         VisaTransport("  ", manager=manager)
+
+
+@pytest.mark.parametrize("resource", ["ASRL7::INSTR", "COM7", "USB0::x::INSTR\n*RST"])
+def test_visa_rejects_serial_resources_before_opening_them(resource):
+    manager = FakeManager()
+    with pytest.raises(ValueError, match="COM/ASRL"):
+        VisaTransport(resource, manager=manager)
+    assert not manager.opened
+
+
+def test_visa_closes_owned_manager_and_discovery_manager(monkeypatch):
+    manager = FakeManager()
+    monkeypatch.setattr("arty_frame_studio.scope.open_resource_manager", lambda: manager)
+    transport = VisaTransport("USB0::x::INSTR")
+    transport.close()
+    assert manager.closed and manager.instrument.closed
+    manager = FakeManager()
+    assert list_visa_resources()
+    assert manager.closed
+
+
+def test_visa_timeout_even_if_clear_is_unsupported_requires_reconnection():
+    manager = FakeManager()
+    transport = VisaTransport("USB0::x::INSTR", manager=manager)
+
+    def unsupported():
+        raise RuntimeError("clear unsupported")
+
+    manager.instrument.clear = unsupported
+    manager.instrument.fail = TimeoutError("timed out")
+    with pytest.raises(ScopeConnectionTimeout):
+        transport.query("*IDN?")
+    assert not transport.usable and manager.instrument.closed
+
+
+@pytest.mark.parametrize("timeout", [0.0, -1.0, math.nan, math.inf])
+def test_transport_timeouts_are_validated_before_opening(timeout):
+    manager = FakeManager()
+    with pytest.raises(ValueError):
+        VisaTransport("USB0::x::INSTR", timeout=timeout, manager=manager)
+    assert not manager.opened
+    with pytest.raises(ValueError):
+        SocketTransport("scope.local", timeout=timeout, connect=lambda *_: pytest.fail("opened"))
 
 
 def test_resource_manager_falls_back_and_lists_instruments(monkeypatch):
@@ -247,6 +345,73 @@ def test_identity_settings_round_trip_and_scpi_errors():
     assert scope.errors() and scope.errors() == []
 
 
+@pytest.mark.parametrize(
+    "identity",
+    ["RIGOL TECHNOLOGIES,DS1054Z,SERIAL,00.01", "KEYSIGHT TECHNOLOGIES,34461A,SERIAL,01.00"],
+)
+def test_wrong_instrument_is_rejected_and_close_sends_no_run(monkeypatch, identity):
+    scope, instrument = simulated()
+    monkeypatch.setattr(instrument, "query", lambda command: identity)
+    with pytest.raises(ScopeError, match="incompatible"):
+        scope.identify()
+    scope.close()
+    assert not scope.identity and not scope.usable and instrument.closed
+    assert ":RUN" not in instrument.commands
+
+
+@pytest.mark.parametrize("reference,divisions", [("LEFT", 4), ("CENTer", 0), ("RIGHt", -4)])
+def test_readback_translates_front_panel_reference_to_display_centre(reference, divisions):
+    scope, instrument = simulated()
+    instrument.write(f":TIMebase:REFerence {reference}")
+    instrument.write(":TIMebase:SCALe 2e-8")
+    instrument.write(":TIMebase:POSition 1e-7")
+    settings = scope.read_settings()
+    assert settings.time_position == pytest.approx(100e-9 + divisions * 20e-9)
+    scope.apply_settings(settings)
+    assert scope.query(":TIMebase:REFerence?") == "CENT"
+    assert scope.read_settings().time_position == pytest.approx(settings.time_position)
+
+
+@pytest.mark.parametrize(
+    "command,reply",
+    [
+        (":TRIGger:MODE?", "PATT"),
+        (":TRIGger:EDGE:SOURce?", "EXT"),
+        (":TRIGger:EDGE:SLOPe?", "EITH"),
+        (":TRIGger:SWEep?", "unrecognized"),
+    ],
+)
+def test_unsupported_front_panel_trigger_is_reported(monkeypatch, command, reply):
+    scope, instrument = simulated()
+    query = instrument.query
+    monkeypatch.setattr(instrument, "query", lambda text: reply if text == command else query(text))
+    with pytest.raises(ScopeError, match="non pris en charge"):
+        scope.read_settings()
+
+
+@pytest.mark.parametrize("mode", ["WIND", "XY", "ROLL"])
+def test_unsupported_front_panel_timebase_is_rejected_before_arming(monkeypatch, mode):
+    scope, instrument = simulated()
+    query = instrument.query
+    monkeypatch.setattr(
+        instrument, "query", lambda text: mode if text == ":TIMebase:MODE?" else query(text)
+    )
+    with pytest.raises(ScopeError, match="sélectionner Main"):
+        scope.read_settings()
+    with pytest.raises(ScopeError, match="sélectionner Main"):
+        scope.acquire()
+    assert ":SINGle" not in instrument.commands
+
+
+def test_front_panel_display_accepts_plus_one(monkeypatch):
+    scope, instrument = simulated()
+    query = instrument.query
+    monkeypatch.setattr(
+        instrument, "query", lambda text: "+1" if text.endswith(":DISPlay?") else query(text)
+    )
+    assert all(channel.enabled for channel in scope.read_settings().channels)
+
+
 def test_autoscale_then_capture_measures_a_10_mhz_clock():
     scope, _ = simulated()
     settings = scope.autoscale()
@@ -282,9 +447,169 @@ def test_normal_trigger_without_edge_times_out_and_stops():
     with pytest.raises(TriggerTimeout, match="déclenchement"):
         scope.capture(timeout=0.5)
     assert ":STOP" in instrument.commands
-    # In Auto, the scope acquires anyway but reports no trigger.
+    # SINGLE itself waits for an edge even in Auto; FORCE supplies a fresh DC capture.
     scope.apply_settings(ScopeSettings(trigger=TriggerSettings(level=10.0, sweep="AUTO")))
     assert not scope.capture().triggered
+    assert ":TRIGger:FORCe" in instrument.commands
+
+
+def test_single_synchronizes_stop_before_arming_and_never_blocks_on_opc_afterwards():
+    scope, instrument = simulated()
+    acquisition = scope.capture(points=500)
+    assert acquisition.settings.points == 500
+    assert all(len(trace.volts) == 500 for trace in acquisition.traces)
+    commands = instrument.commands
+    single = commands.index(":SINGle")
+    assert commands[single - 3 : single] == [":STOP", "*OPC?", ":TER?"]
+    assert "*OPC?" not in commands[single + 1 :]
+    assert commands[single + 1] == ":OPERegister:CONDition?"
+
+
+@pytest.mark.parametrize("sweep", ["AUTO", "NORM"])
+def test_real_trigger_during_long_acquisition_is_never_replaced_by_force(monkeypatch, sweep):
+    scope, instrument = simulated()
+    clock = Clock()
+    scope._clock = clock
+    scope._sleep = clock.sleep
+    query = instrument.query
+    armed = False
+    event = False
+    write = instrument.write
+
+    def write_long(command):
+        nonlocal armed, event
+        write(command)
+        if command == ":SINGle":
+            armed = event = True
+
+    def query_long(command):
+        nonlocal event
+        if command == ":TRIGger:SWEep?":
+            return sweep
+        if command == ":OPERegister:CONDition?":
+            return "8" if armed and clock.now < 0.25 else "0"
+        if command == ":TER?":
+            result, event = event, False
+            return str(int(result))
+        return query(command)
+
+    monkeypatch.setattr(instrument, "write", write_long)
+    monkeypatch.setattr(instrument, "query", query_long)
+    assert scope.acquire(timeout=1)
+    assert clock.now >= 0.25
+    assert ":TRIGger:FORCe" not in instrument.commands
+
+
+def test_real_trigger_with_unfinished_record_has_acquisition_timeout(monkeypatch):
+    scope, instrument = simulated()
+    query = instrument.query
+    armed = False
+    write = instrument.write
+
+    def write_slow(command):
+        nonlocal armed
+        write(command)
+        if command == ":SINGle":
+            armed = True
+
+    def query_slow(command):
+        if command == ":TRIGger:SWEep?":
+            return "NORM"
+        if command == ":OPERegister:CONDition?":
+            return "8"
+        if command == ":TER?":
+            return "1" if armed else "0"
+        return query(command)
+
+    monkeypatch.setattr(instrument, "write", write_slow)
+    monkeypatch.setattr(instrument, "query", query_slow)
+    with pytest.raises(ScopeTimeout, match="déclenchée mais") as result:
+        scope.acquire(timeout=0.25)
+    assert not isinstance(result.value, TriggerTimeout)
+    assert instrument.commands[-1] == ":STOP"
+
+
+@pytest.mark.parametrize("timeout", [0.0, -1.0, math.nan, math.inf, 61.0])
+def test_invalid_capture_timeout_sends_no_commands(timeout):
+    scope, instrument = simulated()
+    with pytest.raises(ValueError):
+        scope.capture(timeout=timeout)
+    assert not instrument.commands
+
+
+@pytest.mark.parametrize("points", [101, 2000, 10_000])
+def test_normal_points_supported_by_instrument_are_required(points):
+    scope, instrument = simulated()
+    with pytest.raises(ValueError, match="100, 250, 500 ou 1000"):
+        scope.capture(points=points)
+    with pytest.raises(ValueError):
+        ScopeSettings(points=points)
+    assert not instrument.commands
+
+
+@pytest.mark.parametrize(
+    "preamble",
+    [
+        "0,0,3,1,nan,0,0,1,0,128",  # corrupt timing
+        "0,0,3,1,0,0,0,1,0,128",  # zero interval
+        "1,0,3,1,1,0,0,1,0,128",  # WORD instead of BYTE
+        "0,1,3,1,1,0,0,1,0,128",  # peak detect needs paired timestamps
+        "0,0,3,1,1,0,0,1,0,128",  # length disagrees with binary payload
+    ],
+)
+def test_invalid_waveforms_raise_scope_error(monkeypatch, preamble):
+    scope, instrument = simulated()
+    query = instrument.query
+    monkeypatch.setattr(
+        instrument, "query", lambda text: preamble if text == ":WAVeform:PREamble?" else query(text)
+    )
+    monkeypatch.setattr(instrument, "query_block", lambda text: b"\x80\x90")
+    with pytest.raises(ScopeError):
+        scope.read_trace(1)
+
+
+@pytest.mark.parametrize("acquisition_type", [0, 2, 3, 4])
+def test_normal_average_and_hres_preambles_use_linear_time_axis(monkeypatch, acquisition_type):
+    scope, instrument = simulated()
+    query = instrument.query
+    preamble = f"0,{acquisition_type},3,1,1e-9,0,0,0.01,0,128"
+    monkeypatch.setattr(
+        instrument, "query", lambda text: preamble if text == ":WAVeform:PREamble?" else query(text)
+    )
+    monkeypatch.setattr(instrument, "query_block", lambda text: b"\x80\x81\x82")
+    trace = scope.read_trace(1)
+    assert trace.times == pytest.approx((0, 1e-9, 2e-9))
+    assert trace.volts == pytest.approx((0, 0.01, 0.02))
+
+
+@pytest.mark.parametrize(
+    "remote_frequency,remote_period,expected_frequency",
+    [(5e6, None, 5e6), (None, 200e-9, 5e6), (5e6, 100e-9, 5e6), (None, None, 10e6)],
+)
+def test_capture_keeps_frequency_and_period_from_one_estimator(
+    monkeypatch, remote_frequency, remote_period, expected_frequency
+):
+    scope, _ = simulated(mapping=lambda: {1: None, 2: "clk"})
+    monkeypatch.setattr(
+        scope,
+        "measure",
+        lambda channel: Measurements(frequency=remote_frequency, period=remote_period),
+    )
+    values = scope.capture(mapping={1: None, 2: "clk"}).measurements[2]
+    assert values.frequency == pytest.approx(expected_frequency, rel=0.01)
+    assert values.frequency * values.period == pytest.approx(1)
+    expected_source = "local" if remote_frequency is remote_period is None else "oscilloscope"
+    assert values.source == expected_source
+
+
+def test_screenshot_rejects_non_png_payload_before_export(monkeypatch):
+    scope, instrument = simulated()
+    monkeypatch.setattr(instrument, "query_block", lambda command: b"this is an SCPI error")
+    with pytest.raises(ScopeError, match="PNG"):
+        scope.screenshot()
+    scope.close(resume=False)
+    with pytest.raises(ScopeConnectionError):
+        scope.screenshot()
 
 
 def test_unconnected_probe_shows_noise_without_frequency():
@@ -296,6 +621,7 @@ def test_unconnected_probe_shows_noise_without_frequency():
 
 def test_close_resumes_the_scope_and_screenshot_is_real_only():
     scope, instrument = simulated()
+    scope.identify()
     with pytest.raises(ScopeError, match="simulation"):
         scope.screenshot()
     scope.close()

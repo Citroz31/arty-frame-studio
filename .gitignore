@@ -10,6 +10,7 @@ dist/
 build/
 /builds/
 /exports/
+/profiles/oscilloscope.json
 *.egg-info/
 *_PLAN.md
 scratch/

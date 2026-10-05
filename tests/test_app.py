@@ -1138,6 +1138,25 @@ def test_tool_messages_can_be_dismissed(tmp_path):
     assert not studio.tool_panel.visible
 
 
+def test_shutdown_releases_uart_even_if_scope_cleanup_fails(tmp_path, monkeypatch):
+    async def exercise():
+        studio = make_studio(tmp_path)
+        closed = []
+        studio.device = SimpleNamespace(close=lambda: closed.append("uart"))
+        studio.poll_task = asyncio.create_task(asyncio.sleep(60))
+
+        async def fail_scope():
+            raise OSError("Scope disconnected during cleanup")
+
+        monkeypatch.setattr(studio.scope_panel, "shutdown", fail_scope)
+        with pytest.raises(OSError, match="Scope disconnected"):
+            await studio.shutdown()
+        assert studio.closing and studio.poll_task.cancelled()
+        assert studio.device is None and closed == ["uart"]
+
+    run_async(exercise())
+
+
 def test_workspace_warnings_flag_onedrive_and_long_paths():
     from arty_frame_studio.app import workspace_warnings
 
