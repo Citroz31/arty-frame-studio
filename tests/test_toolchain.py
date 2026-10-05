@@ -696,3 +696,11 @@ def test_nextpnr_crash_is_not_retried_with_another_seed(
 def test_invalid_seed_lists_are_rejected(seeds: list[object]) -> None:
     with pytest.raises(ValueError, match="nextpnr_seeds"):
         ToolchainConfig(nextpnr_seeds=tuple(seeds))  # type: ignore[arg-type]
+
+
+def test_missing_toolchain_file_explains_the_windows_route(tmp_path: Path) -> None:
+    with pytest.raises(ToolchainError) as error:
+        ToolchainConfig.from_json(tmp_path / "toolchain.json")
+    message = str(error.value)
+    assert "non configurée" in message and "toolchain.json" in message
+    assert "Compiler sur GitHub" in message and "Charger le .bit sous Windows" in message

@@ -104,6 +104,14 @@ class ToolchainConfig:
         path = Path(path).expanduser().resolve()
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            # The usual Windows case: the open-source toolchain is not installed.
+            raise ToolchainError(
+                f"Chaîne FPGA locale non configurée : {path.name} est absent ({path.parent}). "
+                "Ce fichier est créé par scripts/bootstrap-fpga-tools.sh sous Linux/WSL. "
+                "Sous Windows, charger le firmware avec « Charger le .bit sous Windows » "
+                "et compiler un firmware personnalisé avec « Compiler sur GitHub »."
+            ) from exc
         except (OSError, json.JSONDecodeError) as exc:
             raise ToolchainError(f"Configuration illisible : {path} : {exc}") from exc
         if not isinstance(data, dict):
