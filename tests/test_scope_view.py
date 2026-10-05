@@ -247,7 +247,8 @@ def test_canvas_without_acquisition_shows_markers_and_help(tmp_path):
     assert {"1▶", "2▶", "◀T", "▼"} <= set(texts)
     assert any(text.startswith("CH1 DATA · 1 V/div") for text in texts)
     single = ScopeSettings((settings.channel(1), settings.channel(2).__class__(enabled=False)))
-    texts = [shape.text for shape in scope_canvas_shapes(None, single, Cursors(), 900)]
+    shapes = scope_canvas_shapes(None, single, Cursors(), 900)
+    texts = [getattr(shape, "text", None) for shape in shapes]
     assert "2▶" not in texts
     assert cursor_readout(Cursors(), settings) == "Curseurs désactivés."
     readout = cursor_readout(Cursors(mode="both", x1=0, x2=2, y1=1, y2=-1), settings)
