@@ -403,7 +403,34 @@ Dans **Exporter le chronogramme**, choisir le chemin puis le format :
 une émission indéfinie. Pour valider le câblage et le composant, comparer cette
 simulation à une capture réelle de CLK, DATA et LATCH.
 
-## 8. Résoudre les difficultés fréquentes
+## 8. Mesurer les signaux avec l'oscilloscope
+
+L'onglet **Oscilloscope** pilote un Keysight InfiniiVision, par exemple un
+**DSOX1202A**, en **LAN** (adresse IP, port 5025, aucun logiciel à installer)
+ou en **USB** (Keysight IO Libraries Suite). Le choix **Simulation (démo)**
+montre les signaux de la trame du Pilotage sans appareil.
+
+1. Relier la sonde CH1 à **JB1 (DATA)**, la sonde CH2 à **JB2 (CLK)** et leurs
+   masses à **JB5 ou JB11**, avec le **ressort de masse court**. Mettre les
+   sondes en **×10** et régler **Sonde 10:1** sur chaque voie.
+2. Choisir la liaison, saisir l'adresse (ou **Rechercher** en USB), puis
+   **Connecter**. Cliquer sur **Préréglage de la trame** : 1 V/div, DATA en
+   haut, CLK en bas, cinq périodes de CLK, déclenchement sur CLK à 1,65 V.
+3. **Single** fait une acquisition, **Run** rafraîchit en continu à la cadence
+   choisie, **Stop** arrête. **Auto scale** convient à un signal inconnu.
+4. Lire la **fréquence** et la **période** de CLK sous l'écran. Avec `1010…`,
+   DATA change tous les 100 ns à 10 MHz : sa fréquence affichée vaut 5 MHz.
+5. Pour une mesure manuelle, choisir des **curseurs**, puis **Mesurer une
+   période** : ΔX et 1/ΔX s'affichent. Les curseurs se déplacent aussi en
+   cliquant ou en glissant sur l'écran.
+
+Des tensions dix fois trop grandes (par exemple **66 V crête à crête** pour une
+sortie de 3,3 V) viennent d'un facteur de sonde différent entre la sonde et la
+voie ; des pics à chaque front, d'un long fil de masse. L'onglet signale ces
+deux cas. Le détail des réglages, de l'export CSV et de la ligne de commande
+figure dans [Oscilloscope](oscilloscope.md).
+
+## 9. Résoudre les difficultés fréquentes
 
 | Observation | Action suivante |
 | --- | --- |
@@ -418,6 +445,9 @@ simulation à une capture réelle de CLK, DATA et LATCH.
 | Nombre de bits impossible à modifier | En binaire, il suit la saisie : ajouter ou retirer des chiffres, y compris des zéros de tête. Passer en hexadécimal ou décimal pour le régler à la main. |
 | Le récepteur reçoit des bits décalés | Vérifier que tous les zéros de tête sont saisis : la longueur de la trame est celle de la saisie binaire. |
 | La carte continue après fermeture | Reconnecter puis Arrêter ; RESET ou coupure si la liaison ne fonctionne plus. |
+| « Chaîne FPGA locale non configurée » dans le journal | Sous Windows, charger le firmware avec **Charger le .bit sous Windows** et compiler avec **Compiler sur GitHub** ; la chaîne locale sert sous Linux/WSL. |
+| Avertissement OneDrive ou chemin long au démarrage | Extraire le projet dans un dossier local court, par exemple `C:\ArtyFrameStudio`. |
+| Mesure à l'oscilloscope dix fois trop grande | Accorder le commutateur ×1/×10 de la sonde et le réglage **Sonde** de la voie. |
 
 En cas d'erreur persistante, ouvrir **Journal**, exporter le fichier et conserver
 le message exact, le port COM, la révision du firmware et le profil utilisé.
@@ -427,6 +457,7 @@ du chargement et des signaux sur votre carte.
 ## Pour aller plus loin
 
 - [Guide Windows et diagnostics détaillés](windows.md)
+- [Oscilloscope : mesures, déclenchement, curseurs](oscilloscope.md)
 - [Brochage et caractéristiques électriques](hardware.md)
 - [Compilation d'un firmware personnalisé](toolchain.md)
 - [Format des commandes UART](protocol.md)
