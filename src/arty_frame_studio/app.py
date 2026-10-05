@@ -44,6 +44,7 @@ from .model import (
 from .prebuilt import validate_programming_image
 from .protocol import DeviceStatus, FirmwareInfo, Opcode
 from .remote_build import GitHubBuildClient, RemoteBuildTarget
+from .scope_view import ScopePanel
 from .simulation import Waveform, export_csv, export_vcd, simulate, waveform_svg
 from .toolchain import Toolchain, ToolchainConfig
 from .transport import CommandTimeout, DemoDevice, SerialDevice, list_ports, run_led_test
@@ -329,6 +330,13 @@ class Studio:
         self.log_flush_handle: asyncio.TimerHandle | None = None
         self.chart_width = 1200.0
         self._create_controls()
+        # Onglet Oscilloscope ; en démo, il observe la trame décrite dans le Pilotage.
+        self.scope_panel = ScopePanel(
+            page,
+            project_root=self.project_root,
+            log=self._log,
+            frame_source=lambda: self.current_config,
+        )
 
     def _field(
         self,
@@ -680,7 +688,7 @@ class Studio:
         return build_layout(self)
 
     def _open_fpga(self, _: Any = None) -> None:
-        self.tabs.selected_index = 2
+        self.tabs.selected_index = 3
         self._update()
 
     def _open_control(self, _: Any = None) -> None:
@@ -1968,6 +1976,8 @@ class Studio:
 
     async def shutdown(self, _: Any = None) -> None:
         self.closing = True
+        # Rend la main à l'oscilloscope (Run) avant de fermer la carte.
+        await self.scope_panel.shutdown()
         if self.log_flush_handle is not None:
             self.log_flush_handle.cancel()
             self.log_flush_handle = None

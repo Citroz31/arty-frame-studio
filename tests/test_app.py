@@ -56,7 +56,13 @@ def run_async(coroutine):
 def test_controls_construct_and_draw_chronogramme(tmp_path):
     studio = make_studio(tmp_path)
     assert studio.current_config == FrameConfig()
-    assert len(studio.tabs.tabs) == 4
+    assert [tab.text for tab in studio.tabs.tabs] == [
+        "Pilotage",
+        "Chronogramme",
+        "Oscilloscope",
+        "FPGA",
+        "Journal",
+    ]
     curves = {shape.data for shape in studio.wave_canvas.shapes if shape.data}
     assert curves == {"signal:data", "signal:clk", "signal:latch"}
     labels = {shape.text for shape in studio.wave_canvas.shapes if hasattr(shape, "text")}
