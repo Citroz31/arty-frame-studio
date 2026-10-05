@@ -22,7 +22,10 @@ from arty_frame_studio.scope import (
 )
 from arty_frame_studio.scope_sim import SimulatedKeysight, signal_source
 from arty_frame_studio.scope_view import (
+    MARGIN_BOTTOM,
+    MARGIN_TOP,
     MARGIN_X,
+    SCREEN_HEIGHT,
     Cursors,
     ScopePanel,
     cursor_readout,
@@ -360,6 +363,54 @@ def test_cursors_snap_to_a_clock_period_and_follow_the_pointer(tmp_path):
     panel.cursor_channel.value = "2"
     panel._cursors_changed()
     assert panel.cursor_text.value.startswith("CH2 · Y1")
+
+
+@pytest.mark.parametrize(
+    "mode,first,second,start,target",
+    [
+        ("time", "x1", "x2", -1, 2),
+        ("volt", "y1", "y2", -1, 2),
+    ],
+)
+def test_cursor_drag_keeps_the_selected_cursor_when_crossing_another(
+    tmp_path, mode, first, second, start, target
+):
+    panel, _ = make_panel(tmp_path)
+    panel.cursor_mode.value = mode
+    panel._cursors_changed()
+    panel._set_cursors(**{first: start, second: 1})
+
+    def point(position):
+        width = panel.width - 2 * MARGIN_X
+        height = SCREEN_HEIGHT - MARGIN_TOP - MARGIN_BOTTOM
+        return SimpleNamespace(
+            local_x=MARGIN_X + (position + 5) / 10 * width,
+            local_y=MARGIN_TOP + (4 - position) / 8 * height,
+        )
+
+    panel.screen.on_pan_start(point(start))
+    # A fast pointer update beyond the other line used to switch selection.
+    panel.screen.on_pan_update(point(target))
+    assert getattr(panel.cursors, first) == target
+    assert getattr(panel.cursors, second) == 1
+    # Leaving the screen clamps the selected cursor, without moving the other.
+    panel.screen.on_pan_update(point(20))
+    assert getattr(panel.cursors, first) == (5 if mode == "time" else 4)
+    assert getattr(panel.cursors, second) == 1
+    panel.screen.on_pan_end(SimpleNamespace())
+    panel.screen.on_tap_down(point(0.5))
+    assert getattr(panel.cursors, second) == 0.5
+
+
+def test_cursor_drag_selection_is_reset_when_cursor_mode_changes(tmp_path):
+    panel, _ = make_panel(tmp_path)
+    panel.cursor_mode.value = "time"
+    panel._cursors_changed()
+    panel._pan_start(SimpleNamespace(local_x=panel.width / 2, local_y=100))
+    assert panel._drag_cursor in ("x1", "x2")
+    panel.cursor_mode.value = "off"
+    panel._cursors_changed()
+    assert panel._drag_cursor is None
 
 
 def test_csv_export_writes_both_channels(tmp_path):

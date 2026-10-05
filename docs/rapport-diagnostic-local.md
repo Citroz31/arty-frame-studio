@@ -29,7 +29,7 @@ La compilation Windows locale est préparée avec des outils libres portables da
 
 **Connecter / Lire l’écran** relit l’acquisition existante et ses réglages, sans armer SINGLE ni forcer un déclenchement. **Run dans l’application** répète ces lectures : il suit l’état de l’instrument. Un scope arrêté reste arrêté ; sur un scope actif, la lecture stabilise temporairement la trace par STOP, puis reprend RUN. Pour suivre de nouvelles acquisitions, démarrer Run sur la face avant. **Single dans l’application** arme une acquisition unique ; en Auto, un déclenchement forcé éventuel reste explicitement signalé.
 
-Le Canvas dessine les courbes à partir des points effectivement reçus, avec leurs axes. Les calibres lus sont affichés avant le transfert, y compris si celui-ci échoue ; l’erreur reste visible. Un compteur d’acquisitions seul ne prouve pas qu’une courbe a été affichée. L’essai isolé du Canvas sous Flet 0.28.3 confirme son rafraîchissement normal dans le navigateur ; la cause du tracé figé sur le poste Windows n’est pas démontrée.
+Le Canvas dessine les courbes à partir des points effectivement reçus, avec leurs axes. Les calibres lus sont affichés avant le transfert, y compris si celui-ci échoue ; l’erreur reste visible. Un compteur d’acquisitions seul ne prouve pas qu’une courbe a été affichée. L’essai isolé du Canvas sous Flet 0.28.3 confirme son rafraîchissement normal dans le navigateur ; la cause du tracé figé sur le poste Windows n’est pas démontrée. Le curseur choisi au début d’un glissement reste sélectionné jusqu’au relâchement : croiser une autre ligne ne déplace plus les deux curseurs.
 
 ### Interpréter les calibres sans mélanger deux captures
 
@@ -150,11 +150,13 @@ SHA256 du firmware de référence :
 
 ### État des vérifications de cette revue
 
-Les vérifications locales sont terminées : **874 tests Python réussis**, **mypy validé sur 20 fichiers** et **Ruff / formatage validés sur 40 fichiers**, générateur PDF compris. Les **six bancs RTL passent**, dont 1 990 906 contrôles dans le banc du moteur et le dialogue UART simulé du banc d’intégration à 200 MHz / 115200 bauds. Le firmware fourni a été contrôlé par les tests. Le RTL et le `.bit` de référence n’ont pas été modifiés.
+Validation locale : **877 tests Python**, **mypy sur 20 fichiers**, **Ruff / formatage** et **six bancs RTL** passent. Le moteur couvre 1 990 906 contrôles ; le banc d’intégration simule l’UART à 200 MHz / 115200 bauds. Le firmware fourni est vérifié ; son RTL et son `.bit` restent inchangés.
 
-La compilation Windows native en CI reste en attente de son résultat. Elle doit valider l’installation et l’exécution réelles des outils portables ; les tests de transport et d’installation simulés ne remplacent pas ce build ni un essai sur carte.
+La [compilation Windows native](https://github.com/Citroz31/arty-frame-studio/actions/runs/37338522797) a réussi : installation et réutilisation des outils, synthèse/routage depuis un chemin avec espaces, `.bit` à cœur de **150 MHz**, timing de cœur annoncé **189,90 MHz**. L’IDCODE, le SHA256, les sources et le reçu sont vérifiés, puis le fichier téléchargé est relu indépendamment. Cette configuration compile sans WSL ni Vivado ; les sorties physiques restent à mesurer.
 
-Après sa génération, ce PDF a été vérifié : **six pages A4**, texte Unicode extractible, tableaux relus visuellement et aucun mot hors des marges de sécurité. Il est produit depuis cette source Markdown par `scripts/build-local-report.py`, avec ReportLab et les polices DejaVu. Ces outils servent au rapport et ne sont pas des dépendances de l’application.
+Les [contrôles du code publié](https://github.com/Citroz31/arty-frame-studio/actions/runs/37338522961) passent sous Linux et Windows ; premier passage Windows : **803 tests**, **71 cas spécifiques ignorés**. La [compilation Linux de référence](https://github.com/Citroz31/arty-frame-studio/actions/runs/37338522788) passe aussi. L’interface est vérifiée à **1220 × 930** et **760 × 680** : préparation, scope simulé, Run/Single, axes, curseurs et redimensionnement. Le ZIP GitHub correspond aux fichiers validés.
+
+Ce PDF est relu : **six pages A4**, texte Unicode extractible, tableaux vérifiés et marges respectées. Le générateur `scripts/build-local-report.py` utilise ReportLab et DejaVu, sans ajouter de dépendance à l’application.
 
 ### Ce qui reste à établir physiquement
 
@@ -178,5 +180,3 @@ Après sa génération, ce PDF a été vérifié : **six pages A4**, texte Unico
 python scripts/build-local-report.py
 # Si nécessaire : --font-dir /chemin/vers/les/polices/DejaVu
 ```
-
-La régénération demande ReportLab dans un environnement Python dédié et les polices DejaVu. Les chemins et valeurs d’exemple permettent de reproduire le parcours sans diffuser les identifiants réels du poste. La source Markdown constitue le document modifiable ; le PDF en est la version de lecture.

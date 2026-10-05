@@ -160,8 +160,10 @@ ou `--project-root` pour les commandes FPGA de la CLI.
    compatible ou le compile localement si l'horloge du cœur ou les broches changent.
    Le firmware de référence suffit à l'exemple 10 MHz et ne demande aucun outil FPGA.
    Pour la carte réelle sous Windows, utiliser ensuite **FPGA**, section
-   **1 · Charger le firmware**. Indiquer `firmware/prebuilt/arty_frame.bit` dans le champ
-   **Firmware existant pour l'Arty A7-100T (.bit)**, puis cliquer sur
+   **1 · Charger le firmware**. Le champ **Firmware existant pour l'Arty A7-100T (.bit)**
+   contient le fichier retenu par la préparation ; garder ce résultat pour un
+   firmware personnalisé. Pour la référence, utiliser `firmware/prebuilt/arty_frame.bit`.
+   Cliquer sur
    **Charger le .bit sous Windows** et attendre environ **30 à 60 secondes**.
    Ce champ est rempli automatiquement lorsque le fichier est présent dans
    le dépôt extrait. La détection JTAG

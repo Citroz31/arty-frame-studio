@@ -373,6 +373,7 @@ class ScopePanel:
         self.settings = ScopeSettings()
         self.acquisition: Acquisition | None = None
         self.cursors = Cursors()
+        self._drag_cursor: str | None = None
         self.running = False
         self.closing = False
         self.pending = False
@@ -506,8 +507,10 @@ class ScopePanel:
         )
         self.screen = ft.GestureDetector(
             content=self.canvas,
-            on_tap_down=self._pointer,
+            on_tap_down=self._tap_pointer,
+            on_pan_start=self._pan_start,
             on_pan_update=self._pointer,
+            on_pan_end=self._pan_end,
             drag_interval=30,
         )
 
@@ -1628,6 +1631,7 @@ class ScopePanel:
 
     # -- curseurs -------------------------------------------------------------------
     def _cursors_changed(self, _: Any = None) -> None:
+        self._drag_cursor = None
         self.cursors = Cursors(
             mode=self.cursor_mode.value or "off",
             x1=float(self.sliders["x1"].value),
@@ -1649,8 +1653,19 @@ class ScopePanel:
         self._draw(cursors_only=True)
         self._update()
 
-    def _pointer(self, event: Any) -> None:
-        """Clic ou glisser : déplace le curseur le plus proche du point visé."""
+    def _tap_pointer(self, event: Any) -> None:
+        self._drag_cursor = None
+        self._pointer(event)
+
+    def _pan_start(self, event: Any) -> None:
+        self._drag_cursor = None
+        self._pointer(event, start_drag=True)
+
+    def _pan_end(self, _: Any = None) -> None:
+        self._drag_cursor = None
+
+    def _pointer(self, event: Any, *, start_drag: bool = False) -> None:
+        """Select the nearest cursor once, then keep it through a drag."""
         x, y = getattr(event, "local_x", None), getattr(event, "local_y", None)
         if x is None or y is None or self.cursors.mode == "off":
             return
@@ -1663,7 +1678,10 @@ class ScopePanel:
             candidates += [("x1", self.cursors.x1, division_x), ("x2", self.cursors.x2, division_x)]
         if self.cursors.volt:
             candidates += [("y1", self.cursors.y1, division_y), ("y2", self.cursors.y2, division_y)]
-        name, _, target = min(candidates, key=lambda item: abs(item[1] - item[2]))
+        selected = next((item for item in candidates if item[0] == self._drag_cursor), None)
+        name, _, target = selected or min(candidates, key=lambda item: abs(item[1] - item[2]))
+        if start_drag:
+            self._drag_cursor = name
         self._set_cursors(**{name: round(target, 3)})
 
     def _snap_period(self, _: Any = None) -> None:
