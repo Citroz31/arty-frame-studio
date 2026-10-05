@@ -84,6 +84,7 @@ Fusionné dans `main` par la pull request [#2](https://github.com/Citroz31/arty-
 | [`01bb7f0`](https://github.com/Citroz31/arty-frame-studio/commit/01bb7f0f3857c596d8392531cc719fdb660c1cd4) | Sans `toolchain.json` (cas normal sous Windows), les boutons de la chaîne locale sont désactivés avec une explication au lieu d'échouer ; la configuration est lue avant de fermer la liaison UART ; message explicite ; bandeau refermable ; avertissements OneDrive et chemins longs au démarrage. |
 | [`e5b0214`](https://github.com/Citroz31/arty-frame-studio/commit/e5b0214d85f3222fe81659dedf238bfdbe0b85a9) | Onglet **Oscilloscope** : pilote SCPI LAN (port 5025) et USB/VISA, oscilloscope simulé, mesures de fréquence et période, déclenchement, calibres avec loupes, Auto scale, préréglage de la trame, Run/Stop/Single, curseurs, export CSV et PNG, avertissements de sonde ; commandes `scope` et `scope-list`. |
 | [`e732b0e`](https://github.com/Citroz31/arty-frame-studio/commit/e732b0e2582882063e178fcccd12fae5dacf9e2f) | Documentation : [Oscilloscope](oscilloscope.md), guide utilisateur, guide Windows et README. |
+| [`d54f494`](https://github.com/Citroz31/arty-frame-studio/commit/d54f4940bf025d400ebc31a41ac568c4166eb1db) | Test de l'écran corrigé : avec le vrai Flet, les formes du canevas n'ont pas toutes un texte (erreur révélée par la CI). |
 
 ## Détail des fonctions ajoutées
 
@@ -124,9 +125,9 @@ Fusionné dans `main` par la pull request [#2](https://github.com/Citroz31/arty-
 
 ## Vérification
 
-| Niveau | Résultat sur le dernier commit (`e732b0e`) |
+| Niveau | Résultat sur le dernier commit de code (`d54f494`) |
 | --- | --- |
-| Tests Python | 644 tests, Linux et Windows natif ; Ruff et mypy |
+| Tests Python | 644 tests, CI verte sous Linux et Windows natif ; Ruff et mypy |
 | Bancs RTL | 6 bancs Icarus : moteur (≈ 2 millions de contrôles par demi-tick), ODDR, protocole, SIPO, carte complète par l'UART, UART à 200 MHz |
 | Compilation réelle | Firmware révision 4 : 210,79 MHz routés pour 200 MHz exigés |
 | Carte réelle | Retour utilisateur : chargement SRAM sous Windows, firmware révision 4, test LED et DATA à 10 MHz sur JB1 observée au DSOX1202A |
