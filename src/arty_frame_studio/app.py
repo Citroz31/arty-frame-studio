@@ -1586,6 +1586,31 @@ class Studio:
                     raise TransportError("La carte n'est plus connectée.")
                 status = await asyncio.to_thread(self.device.status)
         self._status_received(status)
+        if not status.ok:
+            raise TransportError(f"La carte signale : {status.status.message}.")
+        expected = config.repeat_count & 0xFFFF
+        if expected and status.completed != expected:
+            raise TransportError(
+                f"Trame non confirmée : la carte compte {status.completed} trame(s) terminée(s) "
+                f"sur {expected} demandée(s)."
+            )
+
+    def tr_supported(self) -> bool:
+        """Vrai si le firmware connecté a la broche TR (révision 5)."""
+        info = self.firmware_info
+        return bool(self.device is not None and self.device.connected and info and info.tr)
+
+    async def set_tr(self, level: int) -> None:
+        """Fixe la broche TR avant l'envoi d'un état ; toute anomalie lève une exception."""
+        if self.command_uncertain:
+            raise TransportError(
+                "Une commande précédente n'est pas confirmée : STOP ou reconnexion requis."
+            )
+        async with self.serial_lock:
+            if self.device is None or not self.device.connected:
+                raise TransportError("La carte n'est plus connectée.")
+            status = await asyncio.to_thread(self.device.tr, level)
+        self._status_received(status)
 
     async def _send(self, _: Any) -> None:
         if (

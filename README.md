@@ -37,6 +37,13 @@ après chacun** : opérateur, oscilloscope Keysight ou instrument SCPI (VNA…).
 valeurs, avec critères de réussite, graphique et export CSV, caractérisent un
 composant à commande série.
 
+Le **[mode VNA](docs/mode-vna.md)** de cet onglet mesure **une liste d'états**
+(jusqu'à 4096 mots de 26 bits au plus, avec le niveau de la broche **TR**) sur un
+**VNA Keysight PNA-X (N5245B) ou USB (P9374A)** détecté automatiquement : on
+indique un canal et un nombre de ports, l'application envoie chaque mot, attend
+la fin de la trame et du balayage, et enregistre un fichier **Touchstone** par
+état.
+
 Le [récapitulatif des apports de Claude](docs/recapitulatif-claude.md) liste
 chaque commit et ce qu'il apporte.
 

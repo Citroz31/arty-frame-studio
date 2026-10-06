@@ -6,6 +6,8 @@ import math
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from arty_frame_studio.app import Studio
 from arty_frame_studio.measure_view import MeasurePanel, results_chart_shapes
 from arty_frame_studio.model import FrameConfig
@@ -373,3 +375,255 @@ def test_result_lines_show_word_status_and_values():
     assert "phase —" in line and line.endswith("hors limite")
     assert "OK" in result_line(StepResult(0, 0, 8, OK))
     assert isinstance(MeasurePanel, type) and FrameConfig is not None
+
+
+# -- états, TR et VNA ------------------------------------------------------------------------
+STATES_TEXT = "000000000100 ; TX ; premier\n000001000100 ; RX ; second\n000000000111"
+
+
+def configure_states(panel, text=STATES_TEXT, *, probe="none"):
+    panel.word_mode.value = "states"
+    panel.state_list.value = text
+    panel.probe_kind.value = probe
+    panel.settle.value = "0"
+    panel._mode_changed()
+
+
+def test_states_file_is_loaded_and_previewed_with_its_tr_columns(tmp_path):
+    panel = make_studio(tmp_path).measure_panel
+    path = tmp_path / "etats.csv"
+    path.write_text("mot;TR;nom\n0001 ; TX ; haut\n0010 ; RX\n0011\n", encoding="utf-8")
+    panel.load_states_file(path)
+    assert panel.word_mode.value == "states" and panel.states_box.visible
+    assert not panel.word_list.visible and "0001" in panel.state_list.value
+    assert (
+        "3 état(s) de 4 bits · 0001 → 0011 · TR : 1 TX, 1 RX, 1 sans TR" in panel.words_note.value
+    )
+    assert panel.words_note.value.startswith("etats.csv")
+    panel.tx_level.value = "0"  # TX devient le niveau bas
+    panel._words_changed()
+    assert [state.tr for state in panel._states] == [0, 1, None]
+    panel.state_list.value = "0001 ; ALLUME"
+    panel._words_changed()
+    assert "Ligne 1 : TR « ALLUME »" in panel.words_note.value
+    panel.load_states_file(tmp_path / "absent.csv")
+    assert "illisible" in panel.words_note.value
+
+
+def test_states_drive_the_tr_pin_before_each_word_and_keep_it_in_the_results(tmp_path):
+    async def scenario():
+        studio, panel = await connected_studio(tmp_path)
+        configure_states(panel)
+        events = []
+        send, tr = studio.device.send, studio.device.tr
+        studio.device.send = lambda config: (events.append(("send", config.word)), send(config))[1]
+        studio.device.tr = lambda level: (events.append(("tr", level)), tr(level))[1]
+        await panel._start()
+        await wait_until(lambda: not panel.running and panel.summary is not None)
+        panel._export_csv()
+        return studio, panel, events
+
+    studio, panel, events = run_async(scenario())
+    assert events == [("tr", 1), ("send", 4), ("tr", 0), ("send", 68), ("send", 7)]
+    assert studio.device.tr_level == 0
+    assert [(r.tr, r.name) for r in panel.results] == [(1, "premier"), (0, "second"), (None, "")]
+    assert "TR1 « premier »" in panel.results_list.controls[0].value
+    (csv_file,) = (tmp_path / "exports").glob("mesure-*.csv")
+    header = csv_file.read_text(encoding="utf-8").splitlines()[0]
+    assert header.startswith("pas,mot_bin,mot_hex,mot_dec,tr,nom,statut")
+
+
+def test_tr_states_are_refused_with_a_firmware_that_has_no_tr_pin(tmp_path):
+    from dataclasses import replace
+
+    async def scenario():
+        studio, panel = await connected_studio(tmp_path)
+        old = replace(studio.device.firmware, revision=4, capabilities=0x0F)
+        studio.device.firmware = studio.firmware_info = old
+        configure_states(panel)
+        panel._words_changed()
+        preview = panel.words_note.value
+        await panel._start()
+        refused = panel.status.value
+        configure_states(panel, "000000000100\n000000000101")  # sans colonne TR : accepté
+        await panel._start()
+        await wait_until(lambda: not panel.running and panel.summary is not None)
+        return preview, refused, panel
+
+    preview, refused, panel = run_async(scenario())
+    assert "n'a pas de broche TR" in preview and "révision 5" in refused
+    assert panel.summary.reason == "finished" and panel.summary.counts[OK] == 2
+
+
+def connect_vna_simulation(panel):
+    async def connect():
+        panel.probe_kind.value = "vna"
+        panel.instrument_kind.value = "demo"
+        panel._mode_changed()
+        await panel._toggle_instrument()
+
+    return connect()
+
+
+def test_vna_campaign_writes_one_touchstone_file_per_state_and_restores_the_instrument(tmp_path):
+    async def scenario():
+        studio, panel = await connected_studio(tmp_path)
+        configure_states(panel, probe="vna")
+        panel.vna_folder_input.value = str(tmp_path / "campagne")
+        panel.vna_ports.value = "2"
+        panel.vna_freq.value = "3.5G"
+        await connect_vna_simulation(panel)
+        assert "N5245B-SIM" in panel.instrument_status.value
+        assert panel.vna_box.visible and panel.connection_box.visible
+        simulated = panel.simulated
+        await panel._start()
+        await wait_until(lambda: not panel.running and panel.summary is not None)
+        return studio, panel, simulated
+
+    studio, panel, simulated = run_async(scenario())
+    folder = tmp_path / "campagne"
+    assert panel.summary.reason == "finished" and panel.summary.counts[OK] == 3
+    assert sorted(path.name for path in folder.glob("*.s2p")) == [
+        "0001_000000000100_tr1.s2p",
+        "0002_000001000100_tr0.s2p",
+        "0003_000000000111.s2p",
+    ]
+    assert (folder / "resultats.csv").is_file()
+    assert panel.results[0].names == ("S21 (dB)", "S21 phase (°)")
+    assert panel.results[0].values[0] == pytest.approx(-2.35)  # 4 × 0,5 dB + 0,35 dB à 3,5 GHz
+    assert panel.results[0].file == "0001_000000000100_tr1.s2p"
+    assert "Canal 1 · 2 port(s) · 51 point(s)" in panel.vna_note.value
+    assert simulated.sweeps == [4, 68, 7] and simulated.mode == "CONT"  # état d'origine
+    assert list(simulated.measurements) == ["CH1_S11_1"]
+    assert studio.device.tr_history == [1, 0]
+    assert "Campagne enregistrée" in panel.export_note.value
+    assert not studio.sweep_active
+
+
+def test_vna_resume_skips_the_states_already_in_the_folder(tmp_path):
+    async def scenario():
+        studio, panel = await connected_studio(tmp_path)
+        configure_states(panel, probe="vna")
+        panel.vna_folder_input.value = str(tmp_path / "campagne")
+        await connect_vna_simulation(panel)
+        await panel._start()
+        await wait_until(lambda: not panel.running and panel.summary is not None)
+        first = len(panel.simulated.sweeps)
+        (tmp_path / "campagne" / "0002_000001000100_tr0.s2p").unlink()
+        panel.vna_skip.value = True
+        await panel._start()
+        await wait_until(lambda: not panel.running and panel.summary is not None)
+        return panel, first
+
+    panel, first = run_async(scenario())
+    assert first == 3 and len(panel.simulated.sweeps) == 4  # un seul état remesuré
+    kept = "Déjà mesuré (fichier conservé)"
+    assert [r.note for r in panel.results] == [kept, "", kept]
+
+
+def test_vna_settings_are_checked_before_anything_is_sent(tmp_path):
+    async def scenario():
+        studio, panel = await connected_studio(tmp_path)
+        configure_states(panel, probe="vna")
+        panel.vna_folder_input.value = str(tmp_path / "campagne")
+        await panel._start()
+        not_connected = panel.status.value
+        await connect_vna_simulation(panel)
+        messages = []
+        good = {"vna_channel": "1", "vna_track": "S21", "vna_freq": ""}
+        for name, bad in (
+            ("vna_channel", "abc"),
+            ("vna_channel", "7"),
+            ("vna_track", "S33"),
+            ("vna_track", "gain"),
+            ("vna_freq", "beaucoup"),
+        ):
+            field = getattr(panel, name)
+            field.value = bad
+            await panel._start()
+            messages.append(panel.status.value)
+            field.value = good[name]
+        return panel, studio, not_connected, messages
+
+    panel, studio, not_connected, messages = run_async(scenario())
+    assert "VNA non connecté" in not_connected
+    assert "Canal du VNA : entier" in messages[0] and "canal 7 n'existe pas" in messages[1]
+    assert "S33" in messages[2] and "Paramètre suivi" in messages[3]
+    assert "Fréquence suivie" in messages[4]
+    assert not studio.sweep_active and panel.simulated.sweeps == []
+
+
+def test_the_two_simulations_are_not_mixed_up(tmp_path):
+    async def scenario():
+        studio, panel = await connected_studio(tmp_path)
+        configure_states(panel, probe="instrument")
+        panel.instrument_kind.value = "demo"
+        await panel._toggle_instrument()  # simulation du mode SCPI
+        panel.probe_kind.value = "vna"
+        panel._mode_changed()
+        await panel._start()
+        return panel.status.value
+
+    assert "simulation connectée est celle du mode SCPI" in run_async(scenario())
+
+
+def test_detection_fills_the_connection_fields_and_explains_an_empty_result(tmp_path):
+    from arty_frame_studio import measure_view
+    from arty_frame_studio.pna import FoundInstrument
+
+    vna = FoundInstrument("lan", "192.168.1.60", "Keysight Technologies,N5245B,MY1,A.1")
+    usb = FoundInstrument(
+        "visa", "USB0::0x2A8D::0x0001::MY2::0::INSTR", "Keysight Technologies,P9374A,MY2,A.2"
+    )
+    calls = []
+
+    def fake(**kwargs):
+        calls.append(kwargs)
+        return [vna, usb] if len(calls) == 1 else []
+
+    async def scenario(monkeypatch_target):
+        panel = make_studio(tmp_path).measure_panel
+        panel.probe_kind.value = "vna"
+        panel._mode_changed()
+        await panel._detect()
+        found = (
+            panel.instrument_kind.value,
+            panel.instrument_address.value,
+            panel.detected.visible,
+            panel.instrument_status.value,
+        )
+        panel.detected.value = "1"
+        panel._detected_chosen()
+        second = (panel.instrument_kind.value, panel.instrument_address.value)
+        await panel._scan()
+        return found, second, panel.instrument_status.value, panel.detected.visible
+
+    original = measure_view.discover_instruments
+    measure_view.discover_instruments = fake
+    try:
+        found, second, empty, still_visible = run_async(scenario(None))
+    finally:
+        measure_view.discover_instruments = original
+    assert found[:3] == ("lan", "192.168.1.60", True) and "2 instrument(s) trouvé(s)" in found[3]
+    assert second == ("visa", "USB0::0x2A8D::0x0001::MY2::0::INSTR")
+    assert "Aucun instrument trouvé" in empty and "adresse IP" in empty and not still_visible
+    assert calls[0]["scan_network"] is False and calls[1]["scan_network"] is True
+    assert (
+        calls[1]["hosts"] == []
+    )  # l'adresse remplie vient d'être choisie dans la liste : LAN→visa
+
+
+def test_a_frame_the_board_does_not_confirm_stops_the_sweep(tmp_path):
+    from arty_frame_studio.protocol import DeviceStatus, StatusCode
+
+    async def scenario():
+        studio, panel = await connected_studio(tmp_path)
+        configure(panel, words="00000001\n00000010")
+        studio.device.send = lambda config: DeviceStatus(StatusCode.OK, False, 0)
+        await panel._start()
+        await wait_until(lambda: not panel.running)
+        return panel
+
+    panel = run_async(scenario())
+    assert panel.summary.reason == "error" and "Trame non confirmée" in panel.status.value
+    assert "0 trame(s) terminée(s) sur 1" in panel.status.value

@@ -11,8 +11,9 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -30,8 +31,17 @@ from .instruments import (
     open_transport,
 )
 from .model import MAX_BITS, FrameConfig
-from .probes import SCOPE_QUANTITIES, InstrumentProbe, ManualProbe, ScopeProbe, ScopeSpec
-from .scope import Acquisition, ScopeError, parse_si
+from .pna import FoundInstrument, PnaDriver, SimulatedPna, discover_instruments
+from .probes import (
+    SCOPE_QUANTITIES,
+    InstrumentProbe,
+    ManualProbe,
+    ScopeProbe,
+    ScopeSpec,
+    VnaProbe,
+)
+from .scope import Acquisition, ScopeConnectionError, ScopeError, parse_si
+from .states import MAX_STATES, describe_states, infer_states_width, load_states_text, parse_states
 from .sweep import (
     FAIL,
     OK,
@@ -40,6 +50,7 @@ from .sweep import (
     MeasureFunction,
     StepResult,
     SweepRunner,
+    SweepState,
     SweepSummary,
     counter_words,
     describe_words,
@@ -61,6 +72,7 @@ VISIBLE_RESULTS = 300
 STATUS_COLORS = {OK: GREEN, FAIL: RED, SKIPPED: MUTED, "error": RED}
 WORD_MODES = {
     "list": "Liste de mots",
+    "states": "Liste d'états : mot ; TR ; nom (fichier)",
     "counter": "Compteur (début, fin, pas)",
     "walk1": "Un seul bit à 1 qui parcourt le mot",
     "walk0": "Un seul bit à 0 qui parcourt le mot",
@@ -68,9 +80,12 @@ WORD_MODES = {
 PROBE_KINDS = {
     "manual": "Validation manuelle (opérateur)",
     "scope": "Oscilloscope (onglet Oscilloscope)",
-    "instrument": "Instrument SCPI (VNA…)",
+    "vna": "VNA Keysight : paramètres S de chaque état (.sNp)",
+    "instrument": "Instrument SCPI (autre appareil, commandes libres)",
     "none": "Aucune mesure : envoi seul",
 }
+TX_LEVELS = {"1": "TX = niveau haut (3,3 V)", "0": "TX = niveau bas (0 V)"}
+_S_PARAMETER = re.compile(r"[Ss]([1-8])([1-8])")
 
 
 class Bench(Protocol):
@@ -85,6 +100,10 @@ class Bench(Protocol):
     async def acquire_scope(self) -> Acquisition: ...
 
     def set_busy(self, busy: bool) -> None: ...
+
+    def tr_supported(self) -> bool: ...
+
+    async def set_tr(self, level: int) -> None: ...
 
 
 def results_chart_shapes(
@@ -220,11 +239,16 @@ class MeasurePanel:
         self.closing = False
         self.manual = ManualProbe(self._manual_wait, self._manual_done)
         self.instrument: ScpiInstrument | None = None
-        self.simulated: SimulatedVna | None = None
+        self.simulated: SimulatedVna | SimulatedPna | None = None
         self.instrument_pending = False
+        self.detect_pending = False
+        self.found: list[FoundInstrument] = []
+        self.vna_probe: VnaProbe | None = None
+        self.vna_folder: Path | None = None
+        self.vna_driver_note = ""
         self.width = 900.0
         self._last_render = 0.0
-        self._words: list[int] = []
+        self._states: list[SweepState] = []
         self._create_controls()
         self._load_preferences()
         self._mode_changed()
@@ -285,6 +309,29 @@ class MeasurePanel:
             tooltip="Chaque mot est envoyé ce nombre de fois de suite avant la mesure.",
         )
         self.words_note = ft.Text(size=12, color=MUTED, selectable=True)
+        self.state_list = self._field(
+            "Un état par ligne : mot ; TR ; nom",
+            "000000000000 ; TX ; référence\n000000000001 ; TX ; bit 0\n000000000010 ; RX ; bit 1",
+            width=520,
+            multiline=True,
+            min_lines=5,
+            max_lines=10,
+            tooltip="Le mot est obligatoire ; TR (TX, RX, 1 ou 0) et le nom sont facultatifs.",
+        )
+        self.tx_level = ft.Dropdown(
+            label="Niveau de la broche TR",
+            value="1",
+            width=250,
+            options=[ft.dropdown.Option(key, text) for key, text in TX_LEVELS.items()],
+            on_change=self._words_changed,
+            tooltip="Dans le fichier, TX et RX deviennent ce niveau (1 = 3,3 V, 0 = 0 V).",
+        )
+        self.load_states_button = ft.OutlinedButton(
+            "Charger un fichier d'états…", icon=ft.Icons.FOLDER_OPEN, on_click=self._browse_states
+        )
+        self.states_picker = ft.FilePicker(on_result=self._states_file_chosen)
+        if hasattr(self.page, "overlay"):
+            self.page.overlay.append(self.states_picker)
 
         self.probe_kind = ft.Dropdown(
             label="Après chaque mot",
@@ -352,6 +399,65 @@ class MeasurePanel:
             "Noms des colonnes (séparés par des virgules)", width=420
         )
         self.instrument_timeout = self._field("Délai max. (s)", "10", width=140)
+        self.detect_button = ft.OutlinedButton(
+            "Détecter le VNA", icon=ft.Icons.SEARCH, on_click=self._detect
+        )
+        self.scan_button = ft.TextButton(
+            "Chercher sur le réseau",
+            icon=ft.Icons.LAN,
+            on_click=self._scan,
+            tooltip="Essaie le port SCPI 5025 des 254 adresses du réseau privé de ce PC.",
+        )
+        self.detected = ft.Dropdown(
+            label="Instruments trouvés",
+            width=560,
+            options=[],
+            visible=False,
+            on_change=self._detected_chosen,
+        )
+        self.vna_channel = self._field(
+            "Canal du VNA",
+            "1",
+            width=140,
+            tooltip="Numéro du canal (Trace/Chan) dont la calibration et la plage sont utilisées.",
+        )
+        self.vna_ports = ft.Dropdown(
+            label="Nombre de ports",
+            value="2",
+            width=170,
+            options=[ft.dropdown.Option(str(count), f"{count} port(s)") for count in range(1, 5)],
+            on_change=self._words_changed,
+        )
+        self.vna_track = self._field(
+            "Paramètre suivi",
+            "S21",
+            width=150,
+            tooltip="Module (dB) et phase de ce paramètre S : critère, statistiques, graphique.",
+        )
+        self.vna_freq = self._field(
+            "Fréquence suivie",
+            "",
+            width=180,
+            hint_text="milieu de bande",
+            tooltip="Le point de mesure le plus proche est utilisé. Exemples : 5G, 2.4e9.",
+        )
+        self.vna_folder_input = self._field(
+            "Dossier des fichiers .sNp",
+            "",
+            width=440,
+            hint_text="exports/vna-AAAAMMJJ-HHMMSS (un nouveau par campagne)",
+            tooltip="Reprendre une campagne : indiquer son dossier et cocher « ne pas remesurer ».",
+        )
+        self.vna_skip = ft.Switch(
+            label="Ne pas remesurer les états déjà enregistrés (reprise)", value=False
+        )
+        self.vna_timeout = self._field(
+            "Délai max. par balayage (s)",
+            "60",
+            width=230,
+            tooltip="Doit dépasser la durée d'un balayage (avec moyennage) du VNA.",
+        )
+        self.vna_note = ft.Text(size=12, color=MUTED, selectable=True)
 
         self.limit_low = self._field(
             "Valeur 1 ≥", "", width=130, tooltip="Critère facultatif : en dessous, le mot échoue."
@@ -455,7 +561,14 @@ class MeasurePanel:
             ],
             spacing=6,
         )
-        self.instrument_box = ft.Column(
+        self.states_box = ft.Column(
+            [
+                ft.Row([self.load_states_button, self.tx_level], wrap=True, spacing=10),
+                self.state_list,
+            ],
+            spacing=8,
+        )
+        self.connection_box = ft.Column(
             [
                 ft.Row(
                     [self.instrument_kind, self.instrument_address, self.instrument_button],
@@ -463,7 +576,32 @@ class MeasurePanel:
                     spacing=10,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
+                ft.Row([self.detect_button, self.scan_button], wrap=True, spacing=10),
+                self.detected,
                 self.instrument_status,
+            ],
+            spacing=8,
+        )
+        self.vna_box = ft.Column(
+            [
+                ft.Row(
+                    [self.vna_channel, self.vna_ports, self.vna_track, self.vna_freq],
+                    wrap=True,
+                    spacing=10,
+                ),
+                self.vna_folder_input,
+                ft.Row(
+                    [self.vna_timeout, self.vna_skip],
+                    wrap=True,
+                    spacing=10,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                self.vna_note,
+            ],
+            spacing=8,
+        )
+        self.instrument_box = ft.Column(
+            [
                 self.preset,
                 self.preset_note,
                 self.instrument_setup,
@@ -509,6 +647,7 @@ class MeasurePanel:
             ),
             ft.Row([self.word_mode, self.word_base, self.width_field, self.repeats], wrap=True),
             self.word_list,
+            self.states_box,
             self.counter_row,
             self.words_note,
         )
@@ -517,6 +656,8 @@ class MeasurePanel:
             ft.Row([self.probe_kind, self.settle], wrap=True, spacing=10),
             self.manual_note_box,
             self.scope_row,
+            self.connection_box,
+            self.vna_box,
             self.instrument_box,
             ft.Row(
                 [self.limit_low, self.limit_high, self.stop_on_fail],
@@ -608,6 +749,12 @@ class MeasurePanel:
             inferred = infer_width(self.word_list.value or "", self.word_base.value or "bin")
             if inferred is not None:
                 return inferred
+        if self.word_mode.value == "states":
+            inferred = infer_states_width(
+                self.state_list.value or "", self.word_base.value or "bin"
+            )
+            if inferred is not None:
+                return inferred
         return self._pilotage_width()
 
     def _build_words(self) -> tuple[list[int], int]:
@@ -628,22 +775,53 @@ class MeasurePanel:
             return counter_words(start[0], stop[0], step, width), width
         return walking_words(width, ones=mode == "walk1"), width
 
+    def _tx_level(self) -> int:
+        return int(self.tx_level.value or "1")
+
+    def _build_states(self) -> tuple[list[SweepState], int]:
+        """États à envoyer : ceux du fichier, ou les mots des autres modes sans TR."""
+        if self.word_mode.value == "states":
+            width = self._width()
+            states = parse_states(
+                self.state_list.value or "",
+                width,
+                self.word_base.value or "bin",
+                tx_level=self._tx_level(),
+            )
+            return states, width
+        words, width = self._build_words()
+        return [SweepState(word) for word in words], width
+
     def _preview(self) -> None:
         try:
-            words, width = self._build_words()
+            states, width = self._build_states()
+            if self.probe_kind.value == "vna" and len(states) > MAX_STATES:
+                raise ValueError(f"Mode VNA : {MAX_STATES} états au maximum ({len(states)}).")
         except ValueError as exc:
-            self._words = []
+            self._states = []
             self.words_note.value = str(exc)
             self.words_note.color = RED
             return
-        self._words = words
-        note = describe_words(words, width)
+        self._states = states
+        if self.word_mode.value == "states":
+            note = describe_states(states, width, self._tx_level())
+        else:
+            note = describe_words([state.word for state in states], width)
         if width != self._pilotage_width():
             note += f" · largeur imposée (le Pilotage est sur {self._pilotage_width()} bits)"
-        if len(words) > 5000:
-            note += f" · {len(words)} mots : prévoir plusieurs heures avec une validation manuelle"
+        if len(states) > 5000:
+            note += f" · {len(states)} mots : prévoir plusieurs heures avec une validation manuelle"
         self.words_note.value = note
         self.words_note.color = MUTED
+        if (
+            any(state.tr is not None for state in states)
+            and self.bench.device_ready()
+            and not self.bench.tr_supported()
+        ):
+            self.words_note.value += (
+                " · ⚠ le firmware chargé n'a pas de broche TR (révision 5 requise, onglet FPGA)"
+            )
+            self.words_note.color = AMBER
 
     def _words_changed(self, _: Any = None) -> None:
         self._preview()
@@ -652,11 +830,19 @@ class MeasurePanel:
     def _mode_changed(self, _: Any = None) -> None:
         mode = self.word_mode.value
         self.word_list.visible = mode == "list"
+        self.states_box.visible = mode == "states"
         self.counter_row.visible = mode == "counter"
         kind = self.probe_kind.value
         self.scope_row.visible = kind == "scope"
+        self.connection_box.visible = kind in ("instrument", "vna")
+        self.vna_box.visible = kind == "vna"
         self.instrument_box.visible = kind == "instrument"
         self.manual_note_box.visible = kind == "manual"
+        if kind == "vna" and not self.vna_note.value:
+            self.vna_note.value = (
+                "Un balayage du VNA par état : la matrice S de tous les ports est enregistrée "
+                "dans un fichier Touchstone par état, avec le paramètre suivi dans le tableau."
+            )
         self._preview()
         self._sync()
         if _ is not None:
@@ -687,6 +873,108 @@ class MeasurePanel:
         self.instrument_address.hint_text = hint
         self._update()
 
+    # -- détection du VNA ------------------------------------------------------------------------
+    async def _detect(self, _: Any = None) -> None:
+        await self._discover(scan=False)
+
+    async def _scan(self, _: Any = None) -> None:
+        await self._discover(scan=True)
+
+    async def _discover(self, *, scan: bool) -> None:
+        if self.detect_pending or self.running or self.instrument_pending:
+            return
+        if self.instrument is not None:
+            return
+        self.detect_pending = True
+        self.instrument_status.value = (
+            "Recherche sur le réseau (quelques secondes)…"
+            if scan
+            else "Recherche des instruments (VISA, ce PC)…"
+        )
+        self.instrument_status.color = AMBER
+        self._sync()
+        self._update()
+        address = (self.instrument_address.value or "").strip()
+        hosts = [address] if address and self.instrument_kind.value == "lan" else []
+        try:
+            found = await asyncio.to_thread(discover_instruments, scan_network=scan, hosts=hosts)
+        except Exception as exc:  # une recherche ne doit jamais bloquer l'interface
+            found = []
+            self._log(f"Détection : {exc}", RED)
+        finally:
+            self.detect_pending = False
+        self.found = found
+        self._show_found(scan)
+        self._sync()
+        self._update()
+
+    def _show_found(self, scanned: bool) -> None:
+        self.detected.options = [
+            ft.dropdown.Option(str(index), item.label) for index, item in enumerate(self.found)
+        ]
+        self.detected.visible = len(self.found) > 1
+        if not self.found:
+            self.detected.value = None
+            self.instrument_status.value = (
+                "Aucun instrument trouvé. VNA USB (P9374A) : lancer l'application du VNA et "
+                "installer Keysight IO Libraries. VNA en LAN : saisir son adresse IP "
+                + ("(lue sur l'appareil)." if scanned else "ou « Chercher sur le réseau ».")
+            )
+            self.instrument_status.color = AMBER
+            return
+        self._select_found(0)
+        self.detected.value = "0"
+        count = len(self.found)
+        self.instrument_status.value = (
+            f"{count} instrument(s) trouvé(s) : {self.found[0].label} — cliquer sur Connecter."
+        )
+        self.instrument_status.color = GREEN
+        self._log(f"Détection : {count} instrument(s) trouvé(s).", BLUE)
+
+    def _select_found(self, index: int) -> None:
+        if not 0 <= index < len(self.found):
+            return
+        item = self.found[index]
+        self.instrument_kind.value = item.kind
+        self.instrument_address.value = item.address
+        self.instrument_address.disabled = False
+
+    def _detected_chosen(self, _: Any = None) -> None:
+        try:
+            self._select_found(int(self.detected.value or "0"))
+        except ValueError:
+            return
+        self._update()
+
+    # -- fichier d'états ---------------------------------------------------------------------------
+    def _browse_states(self, _: Any = None) -> None:
+        self.states_picker.pick_files(
+            dialog_title="Choisir un fichier d'états",
+            file_type=ft.FilePickerFileType.CUSTOM,
+            allowed_extensions=["csv", "txt"],
+            allow_multiple=False,
+        )
+
+    def _states_file_chosen(self, event: Any) -> None:
+        if event.files and event.files[0].path:
+            self.load_states_file(Path(event.files[0].path))
+
+    def load_states_file(self, path: Path) -> None:
+        """Charge un fichier d'états dans la liste et passe en mode « Liste d'états »."""
+        try:
+            text = load_states_text(path)
+        except (OSError, ValueError) as exc:
+            self.words_note.value = f"Fichier d'états illisible : {exc}"
+            self.words_note.color = RED
+            self._update()
+            return
+        self.state_list.value = text
+        self.word_mode.value = "states"
+        self._mode_changed()
+        self.words_note.value = f"{path.name} · {self.words_note.value}"
+        self._log(f"Fichier d'états chargé : {path}", BLUE)
+        self._update()
+
     async def _toggle_instrument(self, _: Any = None) -> None:
         if self.instrument_pending or self.running:
             return
@@ -703,10 +991,17 @@ class MeasurePanel:
         self._sync()
         self._update()
         try:
-            timeout = self._number(self.instrument_timeout.value, "Délai", default=10.0)
+            is_vna = self.probe_kind.value == "vna"
+            timeout = self._number(
+                (self.vna_timeout if is_vna else self.instrument_timeout).value,
+                "Délai",
+                default=60.0 if is_vna else 10.0,
+            )
             kind = self.instrument_kind.value or "demo"
             address = (self.instrument_address.value or "").strip()
-            simulated = SimulatedVna() if kind == "demo" else None
+            simulated: SimulatedVna | SimulatedPna | None = None
+            if kind == "demo":
+                simulated = SimulatedPna() if is_vna else SimulatedVna()
 
             def open_and_identify() -> ScpiInstrument:
                 instrument = ScpiInstrument(
@@ -753,10 +1048,82 @@ class MeasurePanel:
             self._number(high, "Borne haute") if high else None,
         )
 
-    async def _make_probe(self) -> MeasureFunction | None:
+    @staticmethod
+    def _integer(text: str | None, name: str, low: int, high: int) -> int:
+        try:
+            value = int((text or "").strip())
+        except ValueError as exc:
+            raise ValueError(f"{name} : entier de {low} à {high} attendu.") from exc
+        if not low <= value <= high:
+            raise ValueError(f"{name} : entier de {low} à {high} attendu.")
+        return value
+
+    def _tracked_parameter(self, ports: int) -> tuple[int, int]:
+        match = _S_PARAMETER.fullmatch((self.vna_track.value or "").strip())
+        if match is None:
+            raise ValueError("Paramètre suivi : S11, S21, S12… (la lettre S et deux chiffres).")
+        i, j = int(match.group(1)), int(match.group(2))
+        if max(i, j) > ports:
+            raise ValueError(f"Paramètre suivi S{i}{j} : le VNA est réglé sur {ports} port(s).")
+        return i, j
+
+    def _campaign_folder(self, *, resume: bool) -> Path:
+        if resume and self.vna_folder is not None:
+            return self.vna_folder
+        text = (self.vna_folder_input.value or "").strip()
+        folder = Path(text) if text else Path("exports") / f"vna-{datetime.now():%Y%m%d-%H%M%S}"
+        return folder if folder.is_absolute() else self.project_root / folder
+
+    async def _drop_instrument(self) -> None:
+        instrument, self.instrument, self.simulated = self.instrument, None, None
+        self.instrument_status.value = "Instrument non connecté"
+        self.instrument_status.color = MUTED
+        if instrument is not None:
+            await asyncio.to_thread(instrument.close)
+
+    async def _make_vna_probe(self, states: Sequence[SweepState], *, resume: bool) -> VnaProbe:
+        if self.instrument is None:
+            raise ValueError("VNA non connecté : « Détecter le VNA » puis Connecter.")
+        if isinstance(self.simulated, SimulatedVna):
+            raise ValueError(
+                "La simulation connectée est celle du mode SCPI : la déconnecter puis la "
+                "reconnecter avec « VNA Keysight » choisi."
+            )
+        channel = self._integer(self.vna_channel.value, "Canal du VNA", 1, 200)
+        ports = int(self.vna_ports.value or "2")
+        track = self._tracked_parameter(ports)
+        frequency_text = (self.vna_freq.value or "").strip()
+        frequency = self._number(frequency_text, "Fréquence suivie") if frequency_text else None
+        folder = self._campaign_folder(resume=resume)
+        driver = PnaDriver(self.instrument, channel, ports)
+        probe = VnaProbe(
+            driver,
+            states,
+            folder,
+            track=track,
+            track_frequency=frequency,
+            skip_existing=bool(self.vna_skip.value),
+            on_word=self.simulated.set_word if self.simulated is not None else None,
+        )
+        try:
+            await probe.prepare()
+        except ScopeConnectionError as exc:
+            await self._drop_instrument()
+            raise ValueError(f"Liaison avec le VNA perdue ({exc}) : le reconnecter.") from exc
+        self.vna_folder = folder
+        self.vna_probe = probe
+        self.vna_note.value = f"{driver.describe()} · fichiers dans {folder}"
+        self.vna_note.color = MUTED
+        return probe
+
+    async def _make_probe(
+        self, states: Sequence[SweepState], *, resume: bool = False
+    ) -> MeasureFunction | None:
         kind = self.probe_kind.value
         if kind == "none":
             return None
+        if kind == "vna":
+            return await self._make_vna_probe(states, resume=resume)
         if kind == "manual":
             return self.manual
         if kind == "scope":
@@ -776,6 +1143,11 @@ class MeasurePanel:
             return ScopeProbe(self.bench.acquire_scope, specs)
         if self.instrument is None:
             raise ValueError("Instrument non connecté : cliquer sur Connecter dans la section 2.")
+        if isinstance(self.simulated, SimulatedPna):
+            raise ValueError(
+                "La simulation connectée est celle du mode VNA : la déconnecter puis la "
+                "reconnecter avec « Instrument SCPI » choisi."
+            )
         reads = commands_from_text(self.instrument_reads.value or "")
         trigger = commands_from_text(self.instrument_trigger.value or "")
         setup = commands_from_text(self.instrument_setup.value or "")
@@ -801,11 +1173,18 @@ class MeasurePanel:
             await asyncio.to_thread(apply_setup)
         return probe
 
-    def _plan(self) -> tuple[FrameConfig, list[int]]:
+    def _plan(self) -> tuple[FrameConfig, list[SweepState]]:
         frame = self._frame_source()
         if frame is None:
             raise ValueError("Corriger d'abord les paramètres de la trame dans Pilotage.")
-        words, width = self._build_words()
+        states, width = self._build_states()
+        if self.probe_kind.value == "vna" and len(states) > MAX_STATES:
+            raise ValueError(f"Mode VNA : {MAX_STATES} états au maximum ({len(states)}).")
+        if any(state.tr is not None for state in states) and not self.bench.tr_supported():
+            raise ValueError(
+                "Des états fixent la broche TR, mais le firmware chargé n'en a pas : charger "
+                "le firmware de révision 5 ou plus (onglet FPGA), ou retirer la colonne TR."
+            )
         try:
             repeats = int((self.repeats.value or "1").strip())
         except ValueError as exc:
@@ -814,7 +1193,7 @@ class MeasurePanel:
             raise ValueError("Répétitions : entier de 1 à 65535.")
         # L'émission continue et le nombre de répétitions du Pilotage ne s'appliquent
         # pas : chaque mot est une trame finie, dont la fin est attendue.
-        return replace(frame, bit_count=width, word=0, repeat_count=repeats), words
+        return replace(frame, bit_count=width, word=0, repeat_count=repeats), states
 
     # -- exécution -----------------------------------------------------------------------------
     def _sync(self) -> None:
@@ -841,6 +1220,16 @@ class MeasurePanel:
             self.word_mode,
             self.word_base,
             self.word_list,
+            self.state_list,
+            self.tx_level,
+            self.load_states_button,
+            self.vna_channel,
+            self.vna_ports,
+            self.vna_track,
+            self.vna_freq,
+            self.vna_folder_input,
+            self.vna_skip,
+            self.vna_timeout,
             self.counter_start,
             self.counter_stop,
             self.counter_step,
@@ -864,8 +1253,14 @@ class MeasurePanel:
         connected = self.instrument is not None
         self.instrument_button.text = "Déconnecter" if connected else "Connecter"
         self.instrument_button.icon = ft.Icons.LINK_OFF if connected else ft.Icons.LINK
-        self.instrument_button.disabled = running or self.instrument_pending
-        self.instrument_kind.disabled = running or connected or self.instrument_pending
+        self.instrument_button.disabled = running or self.instrument_pending or self.detect_pending
+        searching = running or connected or self.instrument_pending or self.detect_pending
+        self.detect_button.disabled = searching
+        self.scan_button.disabled = searching
+        self.detected.disabled = searching
+        self.instrument_kind.disabled = (
+            running or connected or self.instrument_pending or self.detect_pending
+        )
         self.instrument_address.disabled = (
             running or connected or self.instrument_kind.value == "demo" or self.instrument_pending
         )
@@ -879,10 +1274,11 @@ class MeasurePanel:
         if self.running or self.closing:
             return
         try:
-            base, words = self._plan()
+            base, states = self._plan()
             self.limit = self._limit()
             settle = self._number(self.settle.value, "Attente", default=0.0) / 1000
-            probe = await self._make_probe()
+            self.vna_folder = None
+            probe = await self._make_probe(states)
         except (ValueError, ScopeError, OSError) as exc:
             self.status.value = str(exc)
             self.status.color = RED
@@ -891,10 +1287,12 @@ class MeasurePanel:
             return
         self.results_list.controls = []
         self.summary = None
+        self._states = states
         self.runner = SweepRunner(
             base,
-            words,
+            states,
             send=self.bench.send_word,
+            before_word=self._before_word,
             measure=probe,
             settle=settle,
             limit=self.limit,
@@ -905,18 +1303,22 @@ class MeasurePanel:
         self.results = self.runner.results  # la même liste : mise à jour à chaque pas
         self._save_preferences()
         self._log(
-            f"Mesure : {describe_words(words, base.bit_count)} · "
+            f"Mesure : {describe_states(states, base.bit_count, self._tx_level())} · "
             f"{PROBE_KINDS[self.probe_kind.value or 'none']}.",
             BLUE,
         )
         self._launch(0)
+
+    async def _before_word(self, state: SweepState) -> None:
+        if state.tr is not None:
+            await self.bench.set_tr(state.tr)
 
     async def _continue(self, _: Any = None) -> None:
         if self.running or self.runner is None or self.summary is None:
             return
         # Le matériel peut avoir changé depuis l'arrêt : la sonde est recréée.
         try:
-            self.runner.measure = await self._make_probe()
+            self.runner.measure = await self._make_probe(self.runner.states, resume=True)
             self.runner.limit = self._limit()
         except (ValueError, ScopeError, OSError) as exc:
             self.status.value = str(exc)
@@ -943,6 +1345,7 @@ class MeasurePanel:
             summary = SweepSummary(
                 len(runner.words), {}, 0.0, "error", start, f"Erreur interne : {exc}"
             )
+        await self._finish_vna(runner)
         self.summary = summary
         self.running = False
         self.bench.set_busy(False)
@@ -969,11 +1372,36 @@ class MeasurePanel:
         self._sync()
         self._update()
 
+    async def _finish_vna(self, runner: SweepRunner) -> None:
+        """Rend le VNA dans son état d'origine et écrit le récapitulatif de la campagne."""
+        probe, self.vna_probe = self.vna_probe, None
+        if probe is None:
+            return
+        try:
+            await probe.finish()
+        except (ScopeError, OSError) as exc:
+            self._log(f"VNA : état d'origine non rétabli ({exc}).", AMBER)
+        if runner.results:
+            try:
+                path = write_results_csv(runner.results, probe.folder / "resultats.csv")
+            except OSError as exc:
+                self._log(f"Récapitulatif non écrit : {exc}", RED)
+            else:
+                self.export_note.value = f"Campagne enregistrée : {probe.folder} ({path.name})"
+                self.export_note.color = GREEN
+                self._log(self.export_note.value, GREEN)
+
     def _on_step(self, index: int, word: int) -> None:
         runner = self.runner
         width = runner.base.bit_count if runner is not None else 0
         total = len(runner.words) if runner is not None else 0
-        self.current_word.value = f"{word_text(word, width)}  ({index + 1}/{total})"
+        extra = ""
+        if runner is not None and index < len(runner.states):
+            state = runner.states[index]
+            extra = (f" · TR {state.tr}" if state.tr is not None else "") + (
+                f" · {state.name}" if state.name else ""
+            )
+        self.current_word.value = f"{word_text(word, width)}  ({index + 1}/{total}){extra}"
         self.progress.value = index / total if total else 0
         if runner is not None:
             recent = [result.duration for result in self.results[-20:]]
@@ -1110,6 +1538,14 @@ class MeasurePanel:
             "word_mode": self.word_mode,
             "word_base": self.word_base,
             "word_list": self.word_list,
+            "state_list": self.state_list,
+            "tx_level": self.tx_level,
+            "vna_channel": self.vna_channel,
+            "vna_ports": self.vna_ports,
+            "vna_track": self.vna_track,
+            "vna_freq": self.vna_freq,
+            "vna_folder": self.vna_folder_input,
+            "vna_timeout": self.vna_timeout,
             "counter_start": self.counter_start,
             "counter_stop": self.counter_stop,
             "counter_step": self.counter_step,
@@ -1151,6 +1587,8 @@ class MeasurePanel:
             control.value = value
         if isinstance(data.get("stop_on_fail"), bool):
             self.stop_on_fail.value = data["stop_on_fail"]
+        if isinstance(data.get("vna_skip"), bool):
+            self.vna_skip.value = data["vna_skip"]
         self.instrument_address.disabled = self.instrument_kind.value == "demo"
 
     def _save_preferences(self) -> None:
@@ -1158,6 +1596,7 @@ class MeasurePanel:
             name: control.value or "" for name, control in self._preference_controls().items()
         }
         data["stop_on_fail"] = bool(self.stop_on_fail.value)
+        data["vna_skip"] = bool(self.vna_skip.value)
         path = self.project_root / PREFERENCES
         try:
             path.parent.mkdir(parents=True, exist_ok=True)

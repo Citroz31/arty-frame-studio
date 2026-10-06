@@ -1,8 +1,9 @@
 """Sondes du mode mesure : ce qui est mesuré après chaque mot envoyé.
 
-Trois sondes rendent une ``Measurement`` : la validation manuelle de l'opérateur,
-une lecture de l'oscilloscope (déjà connecté dans l'onglet Oscilloscope) et une
-lecture SCPI d'un instrument (analyseur de réseau…).
+Quatre sondes rendent une ``Measurement`` : la validation manuelle de l'opérateur,
+une lecture de l'oscilloscope (déjà connecté dans l'onglet Oscilloscope), une
+lecture SCPI d'un instrument et la matrice S complète d'un VNA Keysight, écrite en
+Touchstone pour chaque état.
 """
 
 from __future__ import annotations
@@ -12,11 +13,22 @@ import math
 import statistics
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
 from .instruments import InstrumentError, ScpiInstrument
 from .model import FrameConfig
+from .pna import PnaDriver
 from .scope import Acquisition
-from .sweep import Measurement
+from .sweep import Measurement, SweepState, word_text
+from .touchstone import (
+    SParameters,
+    magnitude_db,
+    phase_degrees,
+    read_touchstone,
+    touchstone_name,
+    write_touchstone,
+)
 
 # Grandeurs lues sur l'oscilloscope : nom affiché et unité.
 SCOPE_QUANTITIES = {
@@ -166,3 +178,106 @@ class ManualProbe:
             Measurement(values, ("valeur relevée",) if values else (), action=action, note=note)
         )
         return True
+
+
+def state_filename(index: int, state: SweepState, bit_count: int, ports: int) -> str:
+    """``0007_000000000000000000000110_tr1.s2p`` : rang, mot, niveau de TR s'il y en a un."""
+    tr = "" if state.tr is None else f"_tr{state.tr}"
+    return touchstone_name(f"{index + 1:04d}_{word_text(state.word, bit_count)}{tr}", ports)
+
+
+class VnaProbe:
+    """Un balayage du VNA par état, la matrice S écrite en Touchstone, une valeur suivie.
+
+    La valeur suivie (module en dB et phase d'un paramètre S à une fréquence) sert
+    de critère, de statistique et de graphique ; les fichiers ``.sNp`` gardent toute
+    la mesure. Avec ``skip_existing``, un état dont le fichier est déjà là n'est pas
+    remesuré (reprise d'une campagne interrompue).
+    """
+
+    def __init__(
+        self,
+        driver: PnaDriver,
+        states: Sequence[SweepState],
+        folder: Path,
+        *,
+        track: tuple[int, int] = (2, 1),
+        track_frequency: float | None = None,
+        skip_existing: bool = False,
+        on_word: Callable[[int], None] | None = None,
+    ) -> None:
+        if not states:
+            raise ValueError("Aucun état à mesurer.")
+        for port in track:
+            if not 1 <= port <= driver.ports:
+                raise ValueError(
+                    f"Paramètre suivi S{track[0]}{track[1]} : le VNA est réglé sur "
+                    f"{driver.ports} port(s)."
+                )
+        if track_frequency is not None and not math.isfinite(track_frequency):
+            raise ValueError("La fréquence suivie doit être un nombre fini.")
+        self.driver = driver
+        self.states = tuple(states)
+        self.folder = Path(folder)
+        self.track = track
+        self.track_frequency = track_frequency
+        self.skip_existing = skip_existing
+        self._on_word = on_word
+        label = f"S{track[0]}{track[1]}"
+        self.names = (f"{label} (dB)", f"{label} phase (°)")
+
+    async def prepare(self) -> None:
+        await asyncio.to_thread(self.driver.prepare)
+
+    async def finish(self) -> None:
+        await asyncio.to_thread(self.driver.restore)
+
+    def _existing(self, path: Path) -> SParameters | None:
+        if not self.skip_existing or not path.exists():
+            return None
+        try:
+            data = read_touchstone(path)
+        except (OSError, ValueError):
+            return None
+        same_axis = data.frequencies == self.driver.frequencies or (
+            len(data.frequencies) == len(self.driver.frequencies)
+            and all(
+                math.isclose(a, b, rel_tol=1e-6)
+                for a, b in zip(data.frequencies, self.driver.frequencies, strict=True)
+            )
+        )
+        return data if data.ports == self.driver.ports and same_axis else None
+
+    def _tracked(self, data: SParameters) -> tuple[float, ...]:
+        _, value = data.at(self.track[0], self.track[1], self.track_frequency)
+        return magnitude_db(value), phase_degrees(value)
+
+    async def __call__(self, config: FrameConfig, index: int) -> Measurement:
+        state = self.states[index]
+        path = self.folder / state_filename(index, state, config.bit_count, self.driver.ports)
+        existing = await asyncio.to_thread(self._existing, path)
+        if existing is not None:
+            note = "Déjà mesuré (fichier conservé)"
+            return Measurement(self._tracked(existing), self.names, note=note, file=path.name)
+        if self._on_word is not None:
+            self._on_word(config.word)
+        data, problems = await asyncio.to_thread(self.driver.acquire)
+        comments = [
+            "Arty Frame Studio : mesure d'un état",
+            f"état {index + 1}/{len(self.states)} · mot {word_text(state.word, config.bit_count)} "
+            f"(0x{state.word:X})",
+            *([f"TR {state.tr}"] if state.tr is not None else []),
+            *([f"nom {state.name}"] if state.name else []),
+            f"instrument {self.driver.instrument.identity} · canal {self.driver.channel}",
+            f"date {datetime.now().isoformat(timespec='seconds')}",
+        ]
+        await asyncio.to_thread(write_touchstone, path, data, comments=comments)
+        if problems:
+            return Measurement(
+                self._tracked(data),
+                self.names,
+                action="fail",
+                note="Erreur du VNA : " + "; ".join(problems),
+                file=path.name,
+            )
+        return Measurement(self._tracked(data), self.names, file=path.name)

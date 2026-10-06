@@ -36,6 +36,7 @@ manuel, la connexion UART et les réglages de l'oscilloscope sont verrouillés.
 | --- | --- |
 | **Liste de mots** | Un mot par ligne (ou séparés par espaces, virgules, points-virgules). Base binaire par défaut ; préfixe `0x` ou `0b` pour forcer la base d'un mot. |
 | **Compteur** | De *début* à *fin* inclus, avec un *pas* décimal : `0`, `1`, `10`, `11`… |
+| **Liste d'états** | Un état par ligne : `mot ; TR ; nom`, chargé depuis un fichier ou saisi. Voir [le mode VNA](mode-vna.md). |
 | **Un seul bit à 1** | `0…001`, `0…010`, `0…100`… Le bit parcourt le mot, du poids faible au poids fort. |
 | **Un seul bit à 0** | Le complément : un zéro dans des uns. |
 
@@ -73,7 +74,13 @@ est défini. L'écran de l'onglet Oscilloscope suit chaque acquisition.
 L'acquisition a lieu **après** l'émission du mot. Pour observer la trame elle-même,
 augmenter les répétitions par mot ou utiliser l'onglet Oscilloscope seul.
 
-### Instrument SCPI (VNA, multimètre…)
+### VNA Keysight (PNA-X, P9374A) : paramètres S de chaque état
+
+Le choix **VNA Keysight** mesure la **matrice S complète** de chaque état avec un
+canal et un nombre de ports, détecte le VNA (USB, LAN) et écrit un fichier
+Touchstone par état : voir [le mode VNA](mode-vna.md).
+
+### Instrument SCPI (autre appareil, commandes libres)
 
 1. Choisir **Instrument SCPI**, la liaison (LAN, VISA ou **Simulation**) et
    l'adresse, puis **Connecter**. La simulation répond par une valeur fictive qui
@@ -168,8 +175,9 @@ validation manuelle : Entrée valide, `x` rejette, `s` saute, `r` renvoie le mot
 - Les mots font 26 bits au plus (limite du firmware).
 - Pas encore : description d'un composant par **champs nommés** (par exemple
   « atténuation » sur les bits 5 à 0 et « phase » sur les bits 11 à 6, balayer un
-  champ en gardant les autres fixes), enregistrement de la **trace** entière du VNA
-  à chaque mot, et séquences d'initialisation du composant avant le balayage.
+  champ en gardant les autres fixes) et séquences d'initialisation du composant
+  avant le balayage. La **trace entière** d'un VNA Keysight est enregistrée par le
+  [mode VNA](mode-vna.md).
 
 ## 8. Dépannage
 

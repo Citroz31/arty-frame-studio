@@ -27,6 +27,8 @@ class Opcode(IntEnum):
     # Révision 2 du firmware : test des LED et identification.
     LED = 5
     INFO = 6
+    # Révision 5 du firmware : niveau statique de la broche TR (3,3 V ou 0 V).
+    TR = 7
 
 
 LED_MANUAL = 0x80
@@ -37,6 +39,8 @@ CAPABILITY_INFO = 0x0002
 CAPABILITY_CONTINUOUS = 0x0004
 # Révision 4 : bit 2 des flags de SEND, CLK libre pendant LATCH et pause.
 CAPABILITY_FREE_CLOCK = 0x0008
+# Révision 5 : commande TR, sortie statique pour le mode émission/réception.
+CAPABILITY_TR = 0x0010
 
 
 class StatusCode(IntEnum):
@@ -100,6 +104,10 @@ class FirmwareInfo:
     def free_clock(self) -> bool:
         return bool(self.capabilities & CAPABILITY_FREE_CLOCK)
 
+    @property
+    def tr(self) -> bool:
+        return bool(self.capabilities & CAPABILITY_TR)
+
 
 def led_argument(pattern: int | None) -> int:
     """``None`` rend les LED à l'état de la carte ; sinon motif LD4..LD7 sur 4 bits."""
@@ -108,6 +116,13 @@ def led_argument(pattern: int | None) -> int:
     if type(pattern) is not int or not 0 <= pattern <= 0x0F:
         raise ProtocolError("Le motif des LED doit être un entier de 0 à 15.")
     return LED_MANUAL | pattern
+
+
+def tr_argument(level: int) -> int:
+    """Niveau de la broche TR : 1 = 3,3 V, 0 = 0 V."""
+    if type(level) is not int or level not in (0, 1):
+        raise ProtocolError("Le niveau de TR doit valoir 0 (0 V) ou 1 (3,3 V).")
+    return level
 
 
 def info_from_pages(words: list[int]) -> FirmwareInfo:
@@ -145,14 +160,14 @@ def crc16(data: bytes | bytearray | memoryview) -> int:
 def encode_request(
     op: Opcode, seq: int, config: FrameConfig | None = None, *, argument: int | None = None
 ) -> bytes:
-    """``config`` sert à SEND ; ``argument`` est l'octet de LED (motif) et d'INFO (page)."""
+    """``config`` sert à SEND ; ``argument`` est l'octet de LED, d'INFO (page) et de TR (niveau)."""
     try:
         opcode = Opcode(op)
     except (ValueError, TypeError) as exc:
         raise ProtocolError("Commande UART inconnue.") from exc
     if type(seq) is not int or not 0 <= seq <= 255:
         raise ProtocolError("Le numéro de séquence doit être compris entre 0 et 255.")
-    if opcode in (Opcode.LED, Opcode.INFO):
+    if opcode in (Opcode.LED, Opcode.INFO, Opcode.TR):
         if config is not None:
             raise ProtocolError("Seule la commande SEND accepte une configuration.")
         if type(argument) is not int or not 0 <= argument <= 255:
@@ -161,9 +176,11 @@ def encode_request(
             raise ProtocolError("LED : les bits 4 à 6 de l'argument sont réservés.")
         if opcode == Opcode.INFO and argument >= INFO_PAGES:
             raise ProtocolError(f"INFO : page entre 0 et {INFO_PAGES - 1}.")
+        if opcode == Opcode.TR:
+            tr_argument(argument)
         payload = bytes((argument,))
     elif argument is not None:
-        raise ProtocolError("Seules LED et INFO acceptent un octet d'argument.")
+        raise ProtocolError("Seules LED, INFO et TR acceptent un octet d'argument.")
     elif opcode == Opcode.SEND:
         if not isinstance(config, FrameConfig):
             raise ProtocolError("La commande SEND exige une configuration de trame.")

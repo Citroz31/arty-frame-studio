@@ -153,6 +153,29 @@ def format_duration(seconds: float) -> str:
 
 # -- mesures et résultats -------------------------------------------------------
 @dataclass(frozen=True)
+class SweepState:
+    """Un état à mesurer : le mot, le niveau de la broche TR (3,3 V ou 0 V) et un nom.
+
+    ``tr`` vaut ``None`` quand la broche TR n'est pas pilotée par cet état, 1 pour le
+    niveau haut (3,3 V) et 0 pour le niveau bas (0 V).
+    """
+
+    word: int
+    tr: int | None = None
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        if type(self.word) is not int or self.word < 0:
+            raise ValueError("Le mot d'un état est un entier positif.")
+        if self.tr not in (None, 0, 1) or isinstance(self.tr, bool):
+            raise ValueError("TR : 0, 1 ou aucun.")
+
+
+def as_states(items: Iterable[int | SweepState]) -> tuple[SweepState, ...]:
+    return tuple(item if isinstance(item, SweepState) else SweepState(item) for item in items)
+
+
+@dataclass(frozen=True)
 class Limit:
     """Critère de réussite sur la première valeur mesurée (bornes incluses)."""
 
@@ -188,6 +211,7 @@ class Measurement:
     names: tuple[str, ...] = ()
     action: str = "ok"
     note: str = ""
+    file: str = ""  # fichier écrit pour ce pas (Touchstone…)
 
     def __post_init__(self) -> None:
         if self.action not in ("ok", "fail", "skip", "retry"):
@@ -207,6 +231,9 @@ class StepResult:
     note: str = ""
     started: float = 0.0  # secondes depuis l'epoch
     duration: float = 0.0
+    tr: int | None = None
+    name: str = ""
+    file: str = ""
 
     @property
     def word_bin(self) -> str:
@@ -250,14 +277,18 @@ def result_line(result: StepResult) -> str:
         )
     )
     note = f" · {result.note}" if result.note else ""
+    state = (f" TR{result.tr}" if result.tr is not None else "") + (
+        f" « {result.name} »" if result.name else ""
+    )
     return (
-        f"{result.index + 1:>5}  {result.word_bin}  {STATUS_LABELS[result.status]:<6} "
+        f"{result.index + 1:>5}  {result.word_bin}{state}  {STATUS_LABELS[result.status]:<6} "
         f"{values}{note}"
     )
 
 
 # -- exécution ----------------------------------------------------------------
 SendFunction = Callable[[FrameConfig], Awaitable[None]]
+BeforeWordFunction = Callable[[SweepState], Awaitable[None]]
 MeasureFunction = Callable[[FrameConfig, int], Awaitable[Measurement]]
 
 
@@ -268,14 +299,18 @@ class SweepRunner:
     mesure arrête le balayage sans masquer le problème : ``summary.next_index``
     permet de le reprendre au même pas. ``stop()`` s'applique dès que possible,
     même pendant une attente de validation ; ``pause()`` après le pas en cours.
+
+    Chaque élément de ``words`` est un mot ou un ``SweepState`` ; ``before_word``
+    est attendu avant l'envoi d'un état qui fixe le niveau de TR.
     """
 
     def __init__(
         self,
         base: FrameConfig,
-        words: Sequence[int],
+        words: Sequence[int | SweepState],
         *,
         send: SendFunction,
+        before_word: BeforeWordFunction | None = None,
         measure: MeasureFunction | None = None,
         settle: float = 0.0,
         limit: Limit | None = None,
@@ -295,8 +330,12 @@ class SweepRunner:
         if not math.isfinite(settle) or settle < 0:
             raise ValueError("L'attente après l'envoi doit être un nombre positif.")
         self.base = base
-        self.words = tuple(words)
+        self.states = as_states(words)
+        self.words = tuple(state.word for state in self.states)
+        if before_word is None and any(state.tr is not None for state in self.states):
+            raise ValueError("Des états fixent TR mais rien ne pilote la broche TR.")
         self._send = send
+        self._before_word = before_word
         self.measure = measure
         self.settle = settle
         self.limit = limit or Limit()
@@ -396,6 +435,41 @@ class SweepRunner:
             message=message,
         )
 
+    def _result(
+        self,
+        index: int,
+        config: FrameConfig,
+        status: str,
+        *,
+        wall: float,
+        step_started: float,
+        measurement: Measurement | None = None,
+        note: str = "",
+    ) -> StepResult:
+        state = self.states[index]
+        values = measurement.values if measurement is not None else ()
+        names = measurement.names if measurement is not None else ()
+        return StepResult(
+            index,
+            state.word,
+            config.bit_count,
+            status,
+            values,
+            names,
+            note,
+            wall,
+            self._clock() - step_started,
+            tr=state.tr,
+            name=state.name,
+            file=measurement.file if measurement is not None else "",
+        )
+
+    async def _emit(self, state: SweepState, config: FrameConfig) -> None:
+        """Niveau de TR d'abord, puis la trame : TR est stable pendant tout l'envoi."""
+        if state.tr is not None and self._before_word is not None:
+            await self._before_word(state)
+        await self._send(config)
+
     async def run(self, start: int = 0) -> SweepSummary:
         """Exécute les pas ``start`` à la fin ; le résumé donne le pas à reprendre."""
         if not 0 <= start < len(self.words):
@@ -415,7 +489,8 @@ class SweepRunner:
             if self._stop.is_set():
                 self._set_state("stopped")
                 return self._summary(started, "stopped", index)
-            word = self.words[index]
+            state = self.states[index]
+            word = state.word
             config = replace(self.base, word=word)
             if self._on_step is not None:
                 self._on_step(index, word)
@@ -426,11 +501,16 @@ class SweepRunner:
             outcome: StepResult | None = None
             while outcome is None:
                 try:
-                    kind, _ = await self._interruptible(self._send(config))
+                    kind, _ = await self._interruptible(self._emit(state, config))
                 except Exception as exc:  # matériel : arrêter, ne rien deviner
                     self._record(
-                        StepResult(
-                            index, word, config.bit_count, ERROR, note=str(exc), started=wall
+                        self._result(
+                            index,
+                            config,
+                            ERROR,
+                            wall=wall,
+                            step_started=step_started,
+                            note=str(exc),
                         )
                     )
                     self._set_state("error")
@@ -441,14 +521,8 @@ class SweepRunner:
                     self._set_state("stopped")
                     return self._summary(started, "stopped", index)
                 if kind == "skip":
-                    outcome = StepResult(
-                        index,
-                        word,
-                        config.bit_count,
-                        SKIPPED,
-                        note="Sauté",
-                        started=wall,
-                        duration=self._clock() - step_started,
+                    outcome = self._result(
+                        index, config, SKIPPED, wall=wall, step_started=step_started, note="Sauté"
                     )
                     break
                 if self.settle:
@@ -457,14 +531,13 @@ class SweepRunner:
                         self._set_state("stopped")
                         return self._summary(started, "stopped", index)
                     if kind == "skip":
-                        outcome = StepResult(
+                        outcome = self._result(
                             index,
-                            word,
-                            config.bit_count,
+                            config,
                             SKIPPED,
+                            wall=wall,
+                            step_started=step_started,
                             note="Sauté",
-                            started=wall,
-                            duration=self._clock() - step_started,
                         )
                         break
                 if self.measure is None:
@@ -474,14 +547,13 @@ class SweepRunner:
                         kind, measurement = await self._interruptible(self.measure(config, index))
                     except Exception as exc:
                         self._record(
-                            StepResult(
+                            self._result(
                                 index,
-                                word,
-                                config.bit_count,
+                                config,
                                 ERROR,
+                                wall=wall,
+                                step_started=step_started,
                                 note=str(exc),
-                                started=wall,
-                                duration=self._clock() - step_started,
                             )
                         )
                         self._set_state("error")
@@ -502,16 +574,14 @@ class SweepRunner:
                     else:
                         continue
                 status, note = self._judge(measurement)
-                outcome = StepResult(
+                outcome = self._result(
                     index,
-                    word,
-                    config.bit_count,
+                    config,
                     status,
-                    measurement.values,
-                    measurement.names,
-                    note,
-                    wall,
-                    self._clock() - step_started,
+                    wall=wall,
+                    step_started=step_started,
+                    measurement=measurement,
+                    note=note,
                 )
             self._record(outcome)
             index += 1
@@ -540,13 +610,31 @@ def result_columns(results: Sequence[StepResult]) -> list[str]:
 
 
 def write_results_csv(results: Sequence[StepResult], path: Path) -> Path:
-    """Un pas par ligne : mot en binaire, hexadécimal, décimal, statut et mesures."""
+    """Un pas par ligne : mot en binaire, hexadécimal, décimal, statut et mesures.
+
+    Les colonnes ``tr``, ``nom`` et ``fichier`` n'existent que si un pas les renseigne.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     columns = result_columns(results)
+    with_tr = any(result.tr is not None for result in results)
+    with_name = any(result.name for result in results)
+    with_file = any(result.file for result in results)
     with path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.writer(stream)
         writer.writerow(
-            ["pas", "mot_bin", "mot_hex", "mot_dec", "statut", *columns, "note", "horodatage"]
+            [
+                "pas",
+                "mot_bin",
+                "mot_hex",
+                "mot_dec",
+                *(["tr"] if with_tr else []),
+                *(["nom"] if with_name else []),
+                "statut",
+                *columns,
+                *(["fichier"] if with_file else []),
+                "note",
+                "horodatage",
+            ]
         )
         for result in results:
             by_name = dict(zip(result.names, result.values, strict=False))
@@ -565,8 +653,11 @@ def write_results_csv(results: Sequence[StepResult], path: Path) -> Path:
                     result.word_bin,
                     f"0x{result.word:X}",
                     result.word,
+                    *([("" if result.tr is None else result.tr)] if with_tr else []),
+                    *([result.name] if with_name else []),
                     STATUS_LABELS[result.status],
                     *cells,
+                    *([result.file] if with_file else []),
                     result.note,
                     stamp,
                 ]

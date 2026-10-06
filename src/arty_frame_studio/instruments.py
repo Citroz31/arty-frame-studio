@@ -55,7 +55,8 @@ def parse_numbers(reply: str) -> list[float]:
 
 
 def is_query(command: str) -> bool:
-    return command.rstrip().endswith("?")
+    """Vrai si la commande contient une requête (``?``), même suivie d'arguments."""
+    return "?" in re.sub(r"'[^']*'|\"[^\"]*\"", "", command)
 
 
 class ScpiInstrument:
@@ -225,9 +226,9 @@ class SimulatedVna:
 
 
 def open_transport(
-    kind: str, address: str, *, timeout: float = 10.0, simulated: SimulatedVna | None = None
+    kind: str, address: str, *, timeout: float = 10.0, simulated: ScpiTransport | None = None
 ) -> ScpiTransport:
-    """Liaison vers l'instrument : ``lan`` (SCPI brut), ``visa`` ou ``demo``."""
+    """Liaison vers l'instrument : ``lan`` (SCPI brut), ``visa`` ou ``demo`` (simulation)."""
     if kind == "lan":
         return SocketTransport(address, timeout=timeout)
     if kind == "visa":

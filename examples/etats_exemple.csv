@@ -1,0 +1,15 @@
+# Liste d'états pour le mode VNA : un état par ligne, « mot ; TR ; nom ».
+# - mot : binaire par défaut (zéros de tête compris), 0x… pour l'hexadécimal ;
+# - TR  : TX, RX, ou le niveau de la broche (1 = 3,3 V, 0 = 0 V) ; vide = inchangée ;
+# - nom : libre, repris dans resultats.csv et dans l'en-tête de chaque fichier .sNp.
+# Au plus 4096 états de 26 bits au plus. Le mot est celui de la trame complète :
+# les bits qui ne servent pas restent à 0 (ou à la valeur que le composant exige).
+mot;TR;nom
+000000000000;TX;référence
+000000000001;TX;atténuation 0,5 dB
+000000000010;TX;atténuation 1 dB
+000000000100;TX;atténuation 2 dB
+000001000000;TX;phase 5,6°
+000010000000;TX;phase 11,2°
+000000000000;RX;référence RX
+000000000001;RX;atténuation 0,5 dB RX

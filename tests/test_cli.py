@@ -347,7 +347,7 @@ def test_led_test_command_identifies_then_walks_leds(monkeypatch, capsys):
     monkeypatch.setattr(transport.time, "sleep", lambda _: None)
     assert main(["led-test", "--port", "COM7"]) == 0
     out = capsys.readouterr().out
-    assert '"revision": 4' in out and "commandes confirmées" in out
+    assert '"revision": 5' in out and "commandes confirmées" in out
     assert not demo.connected
 
 
@@ -617,3 +617,90 @@ def test_sweep_refuses_incomplete_options_before_touching_hardware(tmp_path: Pat
     assert "--repeats" in capsys.readouterr().err
     assert main(["sweep", "--demo", "--profile", profile, "--counter", "0", "9"]) == 1
     assert "Mot invalide" in capsys.readouterr().err
+
+
+def _states_file(tmp_path: Path) -> Path:
+    path = tmp_path / "etats.csv"
+    path.write_text(
+        "mot;TR;nom\n000000000100;TX;un\n000001000100;RX;deux\n000000000111\n", encoding="utf-8"
+    )
+    return path
+
+
+def test_sweep_measures_a_vna_state_list_into_touchstone_files(tmp_path: Path, capsys) -> None:
+    folder = tmp_path / "campagne"
+    arguments = [
+        "sweep", "--demo", "--profile", str(_profile(tmp_path)),
+        "--states", str(_states_file(tmp_path)), "--probe", "vna", "--vna-demo",
+        "--vna-ports", "2", "--vna-freq", "3.5G", "--vna-dir", str(folder),
+        "--settle-ms", "0", "--min", "-5",
+    ]  # fmt: skip
+    capsys.readouterr()
+    assert main(arguments) == 0
+    text = capsys.readouterr().out
+    assert "3 état(s) de 12 bits" in text and "TR : 1 TX, 1 RX, 1 sans TR" in text
+    assert "N5245B-SIM" in text and "Canal 1 · 2 port(s) · 51 point(s)" in text
+    assert "S21 (dB) -2.3500" in text and "finished · 3 OK" in text
+    assert sorted(path.name for path in folder.glob("*.s2p")) == [
+        "0001_000000000100_tr1.s2p",
+        "0002_000001000100_tr0.s2p",
+        "0003_000000000111.s2p",
+    ]
+    header = (folder / "resultats.csv").read_text(encoding="utf-8").splitlines()[0]
+    assert header.startswith("pas,mot_bin,mot_hex,mot_dec,tr,nom,statut,S21 (dB)")
+    assert main([*arguments, "--vna-skip-existing"]) == 0
+    assert "Déjà mesuré" in capsys.readouterr().out
+
+
+def test_sweep_vna_options_are_checked_before_hardware(tmp_path: Path, capsys, monkeypatch) -> None:
+    from arty_frame_studio import sweep_cli
+
+    profile = str(_profile(tmp_path))
+    base = ["sweep", "--demo", "--profile", profile, "--states", str(_states_file(tmp_path))]
+    assert main([*base, "--probe", "vna"]) == 1
+    assert "--vna-lan, --vna-visa, --vna-demo ou --vna-auto" in capsys.readouterr().err
+    assert main([*base, "--probe", "vna", "--vna-demo", "--vna-param", "gain"]) == 1
+    assert "--vna-param" in capsys.readouterr().err
+    assert main([*base, "--probe", "vna", "--vna-demo", "--vna-ports", "9"]) == 1
+    assert "ports entre 1 et" in capsys.readouterr().err
+    monkeypatch.setattr(sweep_cli, "discover_instruments", lambda **_: [])
+    assert main([*base, "--probe", "vna", "--vna-auto"]) == 1
+    assert "Aucun VNA détecté" in capsys.readouterr().err
+
+
+def test_sweep_refuses_tr_states_with_a_firmware_without_tr(tmp_path: Path, monkeypatch, capsys):
+    from dataclasses import replace
+
+    from arty_frame_studio import sweep_cli
+    from arty_frame_studio.transport import DemoDevice
+
+    demo = DemoDevice()
+    demo.firmware = replace(demo.firmware, revision=4, capabilities=0x0F)
+    monkeypatch.setattr(sweep_cli, "SerialDevice", lambda port: demo)
+    arguments = [
+        "sweep", "--port", "COM7", "--profile", str(_profile(tmp_path)),
+        "--states", str(_states_file(tmp_path)),
+    ]  # fmt: skip
+    capsys.readouterr()
+    assert main(arguments) == 1
+    assert "révision 4" in capsys.readouterr().err and demo.tr_history == []
+
+
+def test_vna_list_prints_what_answers_and_explains_an_empty_result(capsys, monkeypatch) -> None:
+    from arty_frame_studio import sweep_cli
+    from arty_frame_studio.pna import FoundInstrument
+
+    calls = []
+
+    def fake(**kwargs):
+        calls.append(kwargs)
+        return [FoundInstrument("lan", "192.168.1.60", "Keysight Technologies,N5245B,MY1,A.1")]
+
+    monkeypatch.setattr(sweep_cli, "discover_instruments", fake)
+    assert main(["vna-list", "--scan", "--host", "10.0.0.5"]) == 0
+    out = capsys.readouterr().out
+    assert "VNA · Keysight Technologies,N5245B,MY1,A.1 · LAN 192.168.1.60" in out
+    assert calls == [{"scan_network": True, "hosts": ["10.0.0.5"]}]
+    monkeypatch.setattr(sweep_cli, "discover_instruments", lambda **_: [])
+    assert main(["vna-list"]) == 1
+    assert "Aucun instrument trouvé" in capsys.readouterr().err

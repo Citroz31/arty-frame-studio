@@ -16,6 +16,7 @@ from arty_frame_studio.sweep import (
     Measurement,
     StepResult,
     SweepRunner,
+    SweepState,
 )
 
 BASE = FrameConfig(word=0, bit_count=8, divider=20, latch_ticks=8, gap_ticks=40)
@@ -330,3 +331,74 @@ def test_value_statistics_ignore_skipped_and_error_steps():
     stats = sweep.value_statistics(results)
     assert stats == {"count": 2.0, "min": 1.0, "max": 3.0, "mean": 2.0}
     assert sweep.value_statistics([]) == {}
+
+
+# -- états : mot, niveau de TR, nom ------------------------------------------------
+def test_a_state_checks_its_word_and_tr_level():
+    assert SweepState(5).tr is None and SweepState(5, 1, "TX").name == "TX"
+    for bad in ({"word": -1}, {"word": 1, "tr": 2}, {"word": 1, "tr": True}, {"word": 1.5}):
+        with pytest.raises(ValueError):
+            SweepState(**bad)
+
+
+def test_tr_is_set_before_the_word_is_sent_and_only_for_states_that_drive_it():
+    bench = Bench()
+    levels = []
+
+    async def before(state):
+        bench.events.append(("tr", state.tr))
+        levels.append(state.tr)
+
+    states = [SweepState(1, 1, "TX"), SweepState(2), SweepState(3, 0, "RX")]
+    instance, results, _, _ = runner(bench, states, before_word=before)
+    summary = run(instance.run())
+    assert summary.reason == "finished" and levels == [1, 0]
+    assert bench.events[:3] == [("tr", 1), ("send", 1, 8), ("measure", 1)]
+    assert ("tr", None) not in bench.events
+    assert [(r.word, r.tr, r.name) for r in results] == [(1, 1, "TX"), (2, None, ""), (3, 0, "RX")]
+    assert instance.words == (1, 2, 3)
+
+
+def test_states_with_tr_need_a_function_that_drives_the_pin():
+    with pytest.raises(ValueError, match="TR"):
+        SweepRunner(BASE, [SweepState(1, 1)], send=Bench().send)
+    SweepRunner(BASE, [SweepState(1)], send=Bench().send)  # sans TR : rien à piloter
+
+
+def test_a_tr_failure_stops_the_sweep_without_sending_the_word():
+    bench = Bench()
+
+    async def before(state):
+        raise RuntimeError("TR non pris en charge")
+
+    instance, results, _, _ = runner(bench, [SweepState(1, 1)], before_word=before)
+    summary = run(instance.run())
+    assert summary.reason == "error" and "TR non pris en charge" in summary.message
+    assert bench.events == [] and results[0].status == ERROR and results[0].tr == 1
+
+
+def test_a_measurement_file_is_kept_on_the_step_result():
+    async def measure(config, index):
+        return Measurement((1.0,), ("niveau",), file=f"etat{index}.s2p")
+
+    instance, results, _, _ = runner(Bench(), [4, 5], measure=measure)
+    run(instance.run())
+    assert [r.file for r in results] == ["etat0.s2p", "etat1.s2p"]
+
+
+def test_csv_adds_tr_name_and_file_columns_only_when_they_are_used(tmp_path):
+    plain = sweep.write_results_csv([StepResult(0, 1, 8, OK, (1.0,), ("v",))], tmp_path / "a.csv")
+    header = next(csv.reader(plain.read_text(encoding="utf-8").splitlines()))
+    assert "tr" not in header and "nom" not in header and "fichier" not in header
+    results = [
+        StepResult(0, 1, 8, OK, (1.0,), ("v",), tr=1, name="TX", file="0001.s2p"),
+        StepResult(1, 2, 8, OK, (2.0,), ("v",)),
+    ]
+    path = sweep.write_results_csv(results, tmp_path / "b.csv")
+    rows = list(csv.reader(path.read_text(encoding="utf-8").splitlines()))
+    assert rows[0] == [
+        "pas", "mot_bin", "mot_hex", "mot_dec", "tr", "nom", "statut", "v", "fichier",
+        "note", "horodatage",
+    ]  # fmt: skip
+    assert rows[1][4:9] == ["1", "TX", "OK", "1", "0001.s2p"]
+    assert rows[2][4:9] == ["", "", "OK", "2", ""]
