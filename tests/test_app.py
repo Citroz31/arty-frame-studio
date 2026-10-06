@@ -384,6 +384,37 @@ def test_late_uart_replies_are_explained_in_the_journal(tmp_path, monkeypatch):
     run_async(exercise())
 
 
+def test_reset_and_connect_pulses_the_board_reset_once(tmp_path, monkeypatch):
+    calls = []
+
+    class Board:
+        connected = False
+
+        def __init__(self, port, **kwargs):
+            pass
+
+        def connect(self, **kwargs):
+            calls.append(kwargs)
+            raise CommandTimeout(Opcode.PING, 1)
+
+        def close(self):
+            pass
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.mode.value = "uart"
+        studio.port.value = "COM7"
+        studio._buttons()
+        assert studio.reset_connect_button.visible
+        monkeypatch.setattr(app, "SerialDevice", Board)
+        await studio._reset_and_connect()
+        await studio._toggle_connection()
+        assert calls == [{"reset_board": True}, {}]
+        assert any("DTR" in line for line in studio.log_lines)
+
+    run_async(exercise())
+
+
 def test_native_jtag_result_never_claims_uart_firmware_loaded(tmp_path, monkeypatch):
     calls = []
 

@@ -718,3 +718,38 @@ def test_opening_drain_is_bounded_when_the_port_keeps_talking():
     started = time.monotonic()
     device._drain_stale(0.02)
     assert time.monotonic() - started < 0.5 and device.stale_at_open == 0
+
+
+def test_constant_sequence_offset_points_to_a_board_reset():
+    # Journal du 6 octobre : PING séquence 0 -> INFO séquence 2, PING 1 -> INFO 3.
+    def shifted(packet):
+        return response(packet, opcode=0x86, sequence=(packet.sequence + 2) & 0xFF)
+
+    device, _ = make_serial(shifted)
+    with pytest.raises(CommandTimeout):
+        device.connect()
+    assert device.foreign_offsets == [2, 2]
+    notes = " ".join(device.link_notes())
+    assert "Décalage constant de 2 requête(s)" in notes and "RESET" in notes
+
+
+def test_board_reset_pulses_dtr_before_ping():
+    device, endpoint = make_serial()
+    levels = []
+
+    original = type(endpoint)
+
+    def record(self, value):
+        levels.append(value)
+        self.__dict__["_dtr"] = value
+
+    endpoint.__class__ = type(
+        "DtrRecorder",
+        (original,),
+        {"dtr": property(lambda self: self.__dict__.get("_dtr", True), record)},
+    )
+    assert device.connect(reset_board=True).ok
+    # False before open, then the reset pulse True -> False, never left asserted.
+    assert levels[-2:] == [True, False] and endpoint.dtr is False
+    assert device.board_reset
+    device.close()

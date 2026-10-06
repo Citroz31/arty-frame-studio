@@ -89,7 +89,11 @@ def build_layout(s: Studio) -> ft.Control:
     )
     connection = s._card(
         s._heading("Connexion", "Simulation locale ou carte Arty sur USB/UART"),
-        ft.Row([s.mode, s.port, s.refresh_button, s.connect_button], wrap=True, spacing=12),
+        ft.Row(
+            [s.mode, s.port, s.refresh_button, s.connect_button, s.reset_connect_button],
+            wrap=True,
+            spacing=12,
+        ),
         ft.Row([s.connection_status, s.prepare_button], wrap=True, spacing=16),
         s.connection_hint,
         s.firmware_status,

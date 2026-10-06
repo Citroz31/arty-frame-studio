@@ -74,6 +74,11 @@ def _parser() -> argparse.ArgumentParser:
     diagnose.add_argument(
         "--timeout", type=float, default=2, help="Délai PING en secondes (défaut : 2)"
     )
+    diagnose.add_argument(
+        "--reset-board",
+        action="store_true",
+        help="Impulsion DTR avant PING (cavalier JP2) : remet à zéro la logique du FPGA",
+    )
     for name in ("jtag-devices", "jtag-diagnose", "jtag-program"):
         item = commands.add_parser(
             name, help="Windows : FTDI D2XX natif, sans changement de pilote"
@@ -344,7 +349,11 @@ def main(argv: list[str] | None = None) -> int:
             except TransportError as exc:
                 print(f"Liste des ports indisponible : {exc}", file=sys.stderr)
             try:
-                status = probe.connect()
+                if args.reset_board:
+                    print("Impulsion DTR : remise à zéro de la logique du FPGA (cavalier JP2).")
+                    status = probe.connect(reset_board=True)
+                else:
+                    status = probe.connect()
                 print("Firmware Arty Frame Studio : réponse PING valide.")
                 round_trip = getattr(probe, "last_round_trip", None)
                 if round_trip is not None:

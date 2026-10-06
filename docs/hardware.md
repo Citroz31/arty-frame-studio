@@ -85,7 +85,7 @@ TXD du FT2232.
 
 Le cavalier **JP2** relie le signal DTR du FT2232 à `ck_rst`, le reset du
 FPGA. L'application désactive DTR et RTS avant d'ouvrir le port série ;
-un autre terminal série qui active DTR peut maintenir ou relancer le reset.
+un autre terminal série qui active DTR peut maintenir ou relancer le reset. Le bouton **Réinitialiser la carte puis connecter** utilise volontairement ce lien : une impulsion DTR remet à zéro la logique du FPGA (file de réponses, émission en cours) sans recharger le firmware. Sans JP2, le bouton RESET rouge produit le même effet.
 
 ## Signaux et fréquence
 
