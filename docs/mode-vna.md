@@ -137,6 +137,12 @@ exports/vna-20261006-142530/
   existe, avec le même nombre de ports et la même plage de fréquence, est relu
   au lieu d'être remesuré.
 
+* **Arrêter** et **Sauter** ne coupent pas un balayage en cours : un VNA ne se laisse
+  pas interrompre proprement au milieu d'une lecture, et deux séquences de
+  commandes entrelacées fausseraient la sélection de mesure. L'application attend la
+  fin du balayage en cours, puis s'arrête ou passe à l'état suivant, et rétablit
+  le VNA dans son état d'origine.
+
 ## 6. Durée
 
 Un état coûte l'envoi du mot (quelques millisecondes en UART), l'attente de

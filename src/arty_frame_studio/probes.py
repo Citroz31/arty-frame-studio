@@ -223,13 +223,28 @@ class VnaProbe:
         self.track_frequency = track_frequency
         self.skip_existing = skip_existing
         self._on_word = on_word
+        self._inflight: asyncio.Future[tuple[SParameters, list[str]]] | None = None
         label = f"S{track[0]}{track[1]}"
         self.names = (f"{label} (dB)", f"{label} phase (°)")
 
     async def prepare(self) -> None:
         await asyncio.to_thread(self.driver.prepare)
 
+    async def _settle_previous(self) -> None:
+        """Attend la fin d'un balayage abandonné (Arrêter, Sauter) avant tout autre échange.
+
+        Un fil de lecture ne s'interrompt pas : deux séquences SCPI entrelacées
+        laisseraient le VNA avec une sélection de mesure fausse, ou une requête sans
+        réponse qui ferme la liaison.
+        """
+        pending, self._inflight = self._inflight, None
+        if pending is not None:
+            await asyncio.wait({pending})
+            if not pending.cancelled():
+                pending.exception()  # lu : rien à signaler, le pas a été abandonné
+
     async def finish(self) -> None:
+        await self._settle_previous()
         await asyncio.to_thread(self.driver.restore)
 
     def _existing(self, path: Path) -> SParameters | None:
@@ -253,6 +268,7 @@ class VnaProbe:
         return magnitude_db(value), phase_degrees(value)
 
     async def __call__(self, config: FrameConfig, index: int) -> Measurement:
+        await self._settle_previous()
         state = self.states[index]
         path = self.folder / state_filename(index, state, config.bit_count, self.driver.ports)
         existing = await asyncio.to_thread(self._existing, path)
@@ -261,7 +277,9 @@ class VnaProbe:
             return Measurement(self._tracked(existing), self.names, note=note, file=path.name)
         if self._on_word is not None:
             self._on_word(config.word)
-        data, problems = await asyncio.to_thread(self.driver.acquire)
+        self._inflight = asyncio.get_running_loop().run_in_executor(None, self.driver.acquire)
+        data, problems = await asyncio.shield(self._inflight)
+        self._inflight = None
         comments = [
             "Arty Frame Studio : mesure d'un état",
             f"état {index + 1}/{len(self.states)} · mot {word_text(state.word, config.bit_count)} "

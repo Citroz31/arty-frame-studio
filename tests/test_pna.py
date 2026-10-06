@@ -297,3 +297,85 @@ def test_an_unresponsive_candidate_is_skipped_not_fatal():
         identify_instrument=lambda kind, address, timeout: None,
     )
     assert found == []
+
+
+def test_an_abandoned_sweep_finishes_before_any_other_exchange_with_the_vna(tmp_path):
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+    order = []
+
+    class SlowDriver(PnaDriver):
+        def acquire(self):
+            order.append("acquire start")
+            started.set()
+            release.wait(5)
+            order.append("acquire end")
+            return super().acquire()
+
+        def restore(self):
+            order.append("restore")
+            super().restore()
+
+    sim = SimulatedPna()
+    instrument = ScpiInstrument(sim)
+    instrument.identify()
+    pna = SlowDriver(instrument, 1, 2)
+    probe = VnaProbe(pna, STATES, tmp_path, on_word=sim.set_word)
+
+    async def scenario():
+        await probe.prepare()
+        task = asyncio.create_task(probe(FrameConfig(word=4, bit_count=12), 0))
+        while not started.is_set():
+            await asyncio.sleep(0.005)
+        task.cancel()  # Arrêter ou Sauter pendant le balayage
+        await asyncio.gather(task, return_exceptions=True)
+        finishing = asyncio.create_task(probe.finish())
+        await asyncio.sleep(0.05)
+        assert not finishing.done() and order == ["acquire start"]  # il attend le balayage
+        release.set()
+        await finishing
+
+    run(scenario())
+    assert order == ["acquire start", "acquire end", "restore"]
+    assert sim.mode == "CONT" and sim.errors == []
+
+
+def test_skipping_a_state_waits_for_its_sweep_before_the_next_one_starts(tmp_path):
+    import threading
+
+    release = threading.Event()
+    running = []
+    overlaps = []
+
+    class SlowDriver(PnaDriver):
+        def acquire(self):
+            running.append(1)
+            if len(running) > 1:
+                overlaps.append(True)
+            if len(running) == 1:
+                release.wait(5)
+            result = super().acquire()
+            running.pop()
+            return result
+
+    sim = SimulatedPna()
+    instrument = ScpiInstrument(sim)
+    instrument.identify()
+    pna = SlowDriver(instrument, 1, 2)
+    probe = VnaProbe(pna, STATES, tmp_path, on_word=sim.set_word)
+
+    async def scenario():
+        await probe.prepare()
+        first = asyncio.create_task(probe(FrameConfig(word=4, bit_count=12), 0))
+        await asyncio.sleep(0.05)
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        second = asyncio.create_task(probe(FrameConfig(word=68, bit_count=12), 1))
+        await asyncio.sleep(0.05)
+        assert not second.done()
+        release.set()
+        return await second
+
+    result = run(scenario())
+    assert result.action == "ok" and overlaps == []
