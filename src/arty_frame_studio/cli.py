@@ -88,6 +88,13 @@ def _parser() -> argparse.ArgumentParser:
             item.add_argument(
                 "--serial", help="Numéro de série du canal JTAG A, si plusieurs cartes"
             )
+        if name in ("jtag-diagnose", "jtag-program"):
+            item.add_argument(
+                "--tck-mhz",
+                type=float,
+                default=6 if name == "jtag-program" else 1,
+                help="Fréquence JTAG : 1, 2, 3, 5, 6, 10, 15 ou 30 MHz (défaut : %(default)g)",
+            )
         if name == "jtag-program":
             item.add_argument("--project-root", type=Path, default=Path.cwd())
             item.add_argument(
@@ -368,7 +375,9 @@ def main(argv: list[str] | None = None) -> int:
             for ftdi_device in list_ftdi_devices(dll_path=args.ftdi_dll):
                 print(json.dumps(asdict(ftdi_device), ensure_ascii=False))
         elif args.command == "jtag-diagnose":
-            jtag_probe = probe_arty(serial=args.serial, dll_path=args.ftdi_dll)
+            jtag_probe = probe_arty(
+                serial=args.serial, dll_path=args.ftdi_dll, tck_hz=round(args.tck_mhz * 1e6)
+            )
             print(json.dumps(asdict(jtag_probe), ensure_ascii=False))
             print("Artix-7 100T détecté par JTAG. Le firmware UART reste à vérifier par PING.")
         elif args.command == "jtag-program":
@@ -376,8 +385,16 @@ def main(argv: list[str] | None = None) -> int:
             validate_programming_image(image, args.project_root)
             print(f"Bitstream : {image.path}\nPart : {image.part}\nSHA256 : {image.sha256}")
             print("Chargement SRAM par FTDI D2XX Windows ; backend expérimental.")
-            jtag_program = program_arty(image.payload, serial=args.serial, dll_path=args.ftdi_dll)
+            jtag_program = program_arty(
+                image.payload,
+                serial=args.serial,
+                dll_path=args.ftdi_dll,
+                tck_hz=round(args.tck_mhz * 1e6),
+            )
             print(json.dumps(asdict(jtag_program), ensure_ascii=False))
+            print(
+                f"Chargement en {jtag_program.seconds:.1f} s à {jtag_program.tck_hz / 1e6:g} MHz."
+            )
             print(
                 "Configuration SRAM terminée. Vérifiez le firmware UART avec "
                 "diagnose --port COM7 avant d'envoyer une trame."

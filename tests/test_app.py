@@ -312,7 +312,7 @@ def test_valid_native_image_is_checked_before_uart_closes(tmp_path, monkeypatch)
             assert studio.device is None
             assert payload == b"frozen image"
             calls.append("program")
-            return SimpleNamespace(serial="ARTY001", status=0x4010)
+            return SimpleNamespace(serial="ARTY001", status=0x4010, seconds=6.2, tck_hz=6_000_000)
 
         monkeypatch.setattr(studio, "_checked_windows_image", validate)
         monkeypatch.setattr(app, "program_arty", program)
@@ -439,9 +439,9 @@ def test_native_jtag_result_never_claims_uart_firmware_loaded(tmp_path, monkeypa
 def test_native_program_does_not_need_build_tools_or_enable_uart_send(tmp_path, monkeypatch):
     calls = []
 
-    def program(payload, *, serial, dll_path):
+    def program(payload, *, serial, dll_path, tck_hz):
         calls.append((payload, serial, dll_path))
-        return SimpleNamespace(serial="ARTY001A", status=0x4010)
+        return SimpleNamespace(serial="ARTY001A", status=0x4010, seconds=6.2, tck_hz=6_000_000)
 
     async def exercise():
         studio = make_studio(tmp_path)

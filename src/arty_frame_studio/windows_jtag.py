@@ -27,6 +27,30 @@ _DIGILENT_LOW_VALUE = 0xE8
 _DIGILENT_LOW_DIRECTION = 0xEB
 _DIGILENT_HIGH_VALUE = 0x00
 _DIGILENT_HIGH_DIRECTION = 0x60
+# MPSSE du FT2232H : TCK = 60 MHz / (2 * (diviseur + 1)).
+_MPSSE_BASE_HZ = 60_000_000
+SAFE_TCK_HZ = 1_000_000
+# 6 MHz : valeur par défaut d'openFPGALoader pour les câbles FTDI, donc éprouvée
+# sur l'Arty. Le chargement SRAM de 3,8 Mo y dure environ 6 s, contre 35 s à 1 MHz.
+DEFAULT_TCK_HZ = 6_000_000
+TCK_CHOICES_HZ = (
+    1_000_000,
+    2_000_000,
+    3_000_000,
+    5_000_000,
+    6_000_000,
+    10_000_000,
+    15_000_000,
+    30_000_000,
+)
+
+
+def tck_divisor(hz: int) -> int:
+    """Diviseur MPSSE de l'une des fréquences TCK proposées."""
+    if type(hz) is not int or hz not in TCK_CHOICES_HZ:
+        choices = ", ".join(f"{value / 1e6:g}" for value in TCK_CHOICES_HZ)
+        raise ValueError(f"Fréquence JTAG non prise en charge : choisir {choices} MHz.")
+    return _MPSSE_BASE_HZ // (2 * hz) - 1
 
 
 class WindowsJtagError(RuntimeError):
@@ -54,6 +78,9 @@ class JtagProgramResult:
     description: str
     idcode: int
     status: int
+    # Fréquence TCK réellement utilisée et durée du chargement (JPROGRAM à STAT).
+    tck_hz: int = SAFE_TCK_HZ
+    seconds: float = 0.0
 
 
 def _load_dll(dll_path: Path | None, injected: Any) -> Any:
@@ -183,10 +210,17 @@ def _select(library: Any, serial: str | None) -> FtdiDevice:
 
 
 class _Mpsse:
-    def __init__(self, library: Any, handle: _HANDLE) -> None:
+    def __init__(self, library: Any, handle: _HANDLE, tck_hz: int = SAFE_TCK_HZ) -> None:
         self.library = library
         self.handle = handle
         self.initialized = False
+        self.tck_hz = tck_hz
+        self.divisor = tck_divisor(tck_hz)
+
+    def set_clock(self, tck_hz: int) -> None:
+        divisor = tck_divisor(tck_hz)
+        self.write(b"\x86" + divisor.to_bytes(2, "little"))
+        self.tck_hz, self.divisor = tck_hz, divisor
 
     def write(self, commands: bytes) -> None:
         buffer = ctypes.create_string_buffer(commands)
@@ -250,8 +284,8 @@ class _Mpsse:
         self.write(b"\xaa\x87")
         if self.read(2) != b"\xfa\xaa":
             raise WindowsJtagError("Le canal FTDI n'a pas confirmé son mode MPSSE.")
-        # 60 MHz / (2 * (29 + 1)) = 1 MHz. Configure both GPIO banks: a
-        # four-wire-only setup leaves Digilent buffer/mux controls undriven.
+        # Configure both GPIO banks: a four-wire-only setup leaves Digilent
+        # buffer/mux controls undriven. The TCK divisor ends the sequence.
         self.write(
             b"\x8a\x97\x8d\x85"
             + bytes(
@@ -264,9 +298,23 @@ class _Mpsse:
                     _DIGILENT_HIGH_DIRECTION,
                 )
             )
-            + b"\x86\x1d\x00"
+            + b"\x86"
+            + self.divisor.to_bytes(2, "little")
         )
         self.initialized = True
+
+    def identify_with_fallback(self) -> int:
+        """IDCODE à la fréquence demandée ; à 1 MHz si la ligne n'y répond pas.
+
+        Rien n'est encore effacé à ce stade : revenir à 1 MHz est sans risque.
+        """
+        try:
+            return self.idcode()
+        except WindowsJtagError:
+            if self.tck_hz <= SAFE_TCK_HZ:
+                raise
+            self.set_clock(SAFE_TCK_HZ)
+            return self.idcode()
 
     def reset_idle(self) -> None:
         # Cinq TMS=1 imposent Test-Logic-Reset ; TMS=0 rejoint Run-Test/Idle.
@@ -399,13 +447,18 @@ def _cleanup(
 
 
 def probe_arty(
-    serial: str | None = None, dll_path: Path | None = None, *, dll: Any = None
+    serial: str | None = None,
+    dll_path: Path | None = None,
+    *,
+    dll: Any = None,
+    tck_hz: int = SAFE_TCK_HZ,
 ) -> JtagProbeResult:
     """Lit l'IDCODE du XC7A100T, sans instruction de reconfiguration.
 
     Une réponse correcte prouve l'accès à la chaîne JTAG. Elle ne prouve pas
     que le firmware UART de cette application est chargé dans le FPGA.
     """
+    tck_divisor(tck_hz)  # refuse a bad speed before the cable is opened
     library = _load_dll(dll_path, dll)
     device = _select(library, serial)
     handle = _HANDLE()
@@ -417,10 +470,10 @@ def probe_arty(
         ctypes.byref(handle),
     )
     failed = True
-    engine = _Mpsse(library, handle)
+    engine = _Mpsse(library, handle, tck_hz)
     try:
         engine.initialize()
-        identifier = engine.idcode()
+        identifier = engine.identify_with_fallback()
         engine.reset_idle()
         failed = False
         return JtagProbeResult(device.serial, device.description, identifier)
@@ -436,18 +489,21 @@ def program_arty(
     dll_path: Path | None = None,
     *,
     dll: Any = None,
+    tck_hz: int = DEFAULT_TCK_HZ,
 ) -> JtagProgramResult:
     """Charge en SRAM le payload d'un .bit préalablement validé par l'appelant.
 
     Cette opération remplace le circuit actif et ne programme pas la flash.
-    L'IDCODE doit correspondre au XC7A100T avant JPROGRAM. Une panne après
-    l'effacement laisse potentiellement le FPGA sans circuit utilisable ; aucun
-    rechargement implicite ni aucune nouvelle tentative automatique n'a lieu.
+    L'IDCODE doit correspondre au XC7A100T avant JPROGRAM ; s'il n'est pas lu à
+    ``tck_hz``, la fréquence retombe à 1 MHz avant tout effacement. Une panne
+    après l'effacement laisse potentiellement le FPGA sans circuit utilisable ;
+    aucun rechargement implicite ni aucune nouvelle tentative automatique n'a lieu.
     """
     if not isinstance(payload, bytes) or not 4 <= len(payload) <= 20 * 1024 * 1024:
         raise ValueError("Le payload FPGA doit contenir entre 4 octets et 20 Mio.")
     if b"\xaa\x99\x55\x66" not in payload:
         raise ValueError("Le payload FPGA ne contient pas le mot de synchronisation Xilinx.")
+    tck_divisor(tck_hz)  # refuse a bad speed before the cable is opened
     library = _load_dll(dll_path, dll)
     device = _select(library, serial)
     handle = _HANDLE()
@@ -459,13 +515,17 @@ def program_arty(
         ctypes.byref(handle),
     )
     failed = True
-    engine = _Mpsse(library, handle)
+    engine = _Mpsse(library, handle, tck_hz)
     try:
         engine.initialize()
-        identifier = engine.idcode()
+        identifier = engine.identify_with_fallback()
+        started = time.monotonic()
         status = engine.program(payload)
+        seconds = time.monotonic() - started
         failed = False
-        return JtagProgramResult(device.serial, device.description, identifier, status)
+        return JtagProgramResult(
+            device.serial, device.description, identifier, status, engine.tck_hz, seconds
+        )
     except WindowsJtagError as exc:
         raise WindowsJtagError(f"{device.serial} · {device.description} : {exc}") from exc
     finally:

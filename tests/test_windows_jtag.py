@@ -199,7 +199,10 @@ def test_sram_program_trace_and_status():
     driver = FakeD2xx()
     payload = bytes.fromhex("FFFFFFFFAA99556620000000")
     result = jtag.program_arty(payload, dll=driver)
-    assert result == jtag.JtagProgramResult("ARTY123A", "Digilent USB Device A", 0x03631093, 0x4010)
+    assert (result.serial, result.idcode, result.status) == ("ARTY123A", 0x03631093, 0x4010)
+    # Chargement à 6 MHz par défaut : diviseur 4, et durée mesurée.
+    assert result.tck_hz == 6_000_000 and result.seconds >= 0
+    assert b"\x86\x04\x00" in driver.commands[1]
 
     def ir_write(value):
         return (
@@ -352,3 +355,53 @@ def test_failed_recovery_write_preserves_configuration_failure():
     with pytest.raises(jtag.WindowsJtagError, match="DONE/EOS"):
         jtag.program_arty(bytes.fromhex("AA995566"), dll=driver)
     assert driver.calls[-1] == ("FT_Close", ())
+
+
+@pytest.mark.parametrize(
+    ("hz", "divisor"),
+    [(1_000_000, 29), (2_000_000, 14), (6_000_000, 4), (10_000_000, 2), (30_000_000, 0)],
+)
+def test_tck_divisors_match_the_mpsse_formula(hz, divisor):
+    assert jtag.tck_divisor(hz) == divisor
+    assert 60_000_000 / (2 * (divisor + 1)) == hz
+
+
+@pytest.mark.parametrize("hz", [0, 7_000_000, 31_000_000, 6.0, "6"])
+def test_unsupported_tck_is_refused_before_touching_the_cable(hz):
+    driver = FakeD2xx()
+    with pytest.raises(ValueError, match="Fréquence JTAG"):
+        jtag.program_arty(bytes.fromhex("AA995566"), dll=driver, tck_hz=hz)
+    assert not any(name == "FT_OpenEx" for name, _ in driver.calls)
+
+
+def test_slow_probe_keeps_one_megahertz_and_requested_speed_is_applied():
+    driver = FakeD2xx()
+    jtag.probe_arty(dll=driver)
+    assert driver.commands[1].endswith(b"\x86\x1d\x00")
+    fast = FakeD2xx()
+    jtag.probe_arty(dll=fast, tck_hz=15_000_000)
+    assert fast.commands[1].endswith(b"\x86\x01\x00")
+
+
+def test_unreadable_idcode_falls_back_to_one_megahertz_before_erasing():
+    class FlakyFast(FakeD2xx):
+        def FT_Write(self, handle, pointer, length, written):
+            data = ctypes.string_at(pointer, length)
+            self.fast = getattr(self, "fast", False) or data.endswith(b"\x86\x02\x00")
+            if data.endswith(b"\x86\x1d\x00"):
+                self.fast = False
+            wrong, self.idcode = self.idcode, self.idcode if not self.fast else 0xFFFFFFFF
+            try:
+                return super().FT_Write(handle, pointer, length, written)
+            finally:
+                self.idcode = wrong
+
+    driver = FlakyFast()
+    result = jtag.program_arty(
+        bytes.fromhex("FFFFFFFFAA99556620000000"), dll=driver, tck_hz=10_000_000
+    )
+    assert result.tck_hz == 1_000_000 and result.status == 0x4010
+    # The fallback happened before JPROGRAM: no erase at the unreliable speed.
+    first_jprogram = next(i for i, c in enumerate(driver.commands) if b"\x1b\x04\x0b" in c)
+    fallback = next(i for i, c in enumerate(driver.commands) if c == b"\x86\x1d\x00")
+    assert fallback < first_jprogram

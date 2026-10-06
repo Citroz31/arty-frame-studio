@@ -247,7 +247,7 @@ def test_native_jtag_probe_does_not_open_a_com_port(monkeypatch, capsys):
 
     calls = []
 
-    def probe(*, serial, dll_path):
+    def probe(*, serial, dll_path, tck_hz):
         calls.append((serial, dll_path))
         return Result()
 
@@ -283,10 +283,12 @@ def test_native_program_uses_existing_bitstream_without_build_or_com(monkeypatch
         serial: str = "ARTY001A"
         idcode: int = 0x03631093
         status: int = 0x00004010
+        tck_hz: int = 6_000_000
+        seconds: float = 6.2
 
     calls = []
 
-    def program(payload, *, serial, dll_path):
+    def program(payload, *, serial, dll_path, tck_hz):
         calls.append((payload, serial, dll_path))
         return Result()
 

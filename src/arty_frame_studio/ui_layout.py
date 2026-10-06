@@ -293,10 +293,11 @@ def build_layout(s: Studio) -> ft.Control:
         s.selected_firmware_note,
         _section(
             "Options JTAG",
-            "Facultatif : seulement avec plusieurs cartes ou une DLL spécifique",
+            "Vitesse de chargement ; cartes multiples ou DLL spécifique",
             [
                 _path(s, s.ftdi_dll_path, ["dll"]),
                 _grid((s.ftdi_serial, 12)),
+                s.jtag_speed,
             ],
         ),
         ft.Text(

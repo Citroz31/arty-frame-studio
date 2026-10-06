@@ -60,6 +60,8 @@ par les essais du [diagnostic local](rapport-diagnostic-local.md).
    masse sur **JB5 ou JB11**. Ce sont des signaux **3,3 V**. Voir
    [le brochage et les limites physiques](hardware.md).
 
+**Vitesse du chargement.** Le `.bit` de 3,8 Mo se charge à **6 MHz** par défaut (environ 6 à 10 s), la valeur par défaut d'openFPGALoader. Auparavant la liaison JTAG était fixée à 1 MHz (35 s à une minute). Le menu **Vitesse JTAG (chargement SRAM)**, dans FPGA → Options JTAG, propose 1, 2, 3, 5, 6, 10, 15 et 30 MHz ; en ligne de commande : `arty-frame jtag-program --bitstream … --tck-mhz 10`. Si le FPGA ne répond pas à la vitesse choisie, l'application revient à 1 MHz **avant tout effacement** et l'indique dans le journal. Après un chargement, le journal donne la durée et la vitesse. Au-delà de 10 MHz, un câble USB court branché directement sur le PC est conseillé.
+
 La programmation charge uniquement la **SRAM volatile**, pas la flash.
 **Recharger le `.bit` après chaque coupure d'alimentation.** Le programme
 présent en flash, par exemple une démonstration d'origine, peut revenir au

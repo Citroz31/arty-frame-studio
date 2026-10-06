@@ -66,7 +66,7 @@ from .ui_layout import (
     TEXT,
     build_layout,
 )
-from .windows_jtag import probe_arty, program_arty
+from .windows_jtag import DEFAULT_TCK_HZ, SAFE_TCK_HZ, TCK_CHOICES_HZ, probe_arty, program_arty
 
 CHART_HEIGHT = 332
 SIGNALS = (("DATA", "data", "#2563EB"), ("CLK", "clk", "#B45309"), ("LATCH", "latch", "#9333EA"))
@@ -683,6 +683,23 @@ class Studio:
             "",
             width=300,
             on_change=lambda _: None,
+        )
+        self.jtag_speed = ft.Dropdown(
+            label="Vitesse JTAG (chargement SRAM)",
+            value=str(DEFAULT_TCK_HZ),
+            width=300,
+            options=[
+                ft.dropdown.Option(
+                    str(hz),
+                    f"{hz / 1e6:g} MHz"
+                    + (" · recommandé" if hz == DEFAULT_TCK_HZ else "")
+                    + (" · prudent, lent" if hz == SAFE_TCK_HZ else ""),
+                )
+                for hz in TCK_CHOICES_HZ
+            ],
+            tooltip="Le .bit de 3,8 Mo se charge en environ 6 s à 6 MHz, 35 s à 1 MHz. "
+            "Si la ligne ne répond pas à la vitesse choisie, l'application revient "
+            "à 1 MHz avant tout effacement.",
         )
         self.jtag_probe_button = ft.OutlinedButton(
             "Détecter le FPGA sous Windows",
@@ -1850,7 +1867,7 @@ class Studio:
             return
         dll = (self.ftdi_dll_path.value or "").strip()
         serial = (self.ftdi_serial.value or "").strip()
-        self._log("JTAG : profil Digilent Arty · GPIO E8/EB et 00/60 · horloge 1 MHz.")
+        self._log("JTAG : profil Digilent Arty · GPIO E8/EB et 00/60 · détection à 1 MHz.")
         result = await self._tool_action(
             "Détection JTAG Windows",
             lambda: probe_arty(serial=serial or None, dll_path=Path(dll) if dll else None),
@@ -2064,6 +2081,10 @@ class Studio:
             return
         dll = (self.ftdi_dll_path.value or "").strip()
         serial = (self.ftdi_serial.value or "").strip()
+        try:
+            tck_hz = int(self.jtag_speed.value or DEFAULT_TCK_HZ)
+        except ValueError:
+            tck_hz = DEFAULT_TCK_HZ
         prepared: tuple[BitstreamImage, dict[str, Any] | None] | None = None
 
         async def before_program() -> None:
@@ -2086,7 +2107,10 @@ class Studio:
                     self._worker_log("Firmware local vérifié : reçu, sources, timing et SHA256.")
             self._worker_log(f"Bitstream {image.part} · SHA256 {image.sha256}")
             result = program_arty(
-                image.payload, serial=serial or None, dll_path=Path(dll) if dll else None
+                image.payload,
+                serial=serial or None,
+                dll_path=Path(dll) if dll else None,
+                tck_hz=tck_hz,
             )
             return result, manifest
 
@@ -2099,8 +2123,17 @@ class Studio:
                 self._select_firmware(
                     bitstream, FirmwareBuildConfig.from_dict(manifest["firmware_config"])
                 )
-            self.tool_message.value = f"SRAM chargée · {result.serial} · STAT 0x{result.status:08X}"
+            self.tool_message.value = (
+                f"SRAM chargée · {result.serial} · STAT 0x{result.status:08X} · "
+                f"{result.seconds:.1f} s à {result.tck_hz / 1e6:g} MHz"
+            )
             self._log(self.tool_message.value, GREEN)
+            if result.tck_hz < tck_hz:
+                self._log(
+                    f"La ligne JTAG n'a pas répondu à {tck_hz / 1e6:g} MHz : chargement "
+                    "à 1 MHz. Câble USB plus court ou direct sur le PC, sinon garder 1 MHz.",
+                    AMBER,
+                )
             self._log(
                 "La configuration FPGA a abouti. Connectez le port UART pour vérifier PING ; "
                 "ce contrôle ne valide ni le timing GPIO, ni le protocole du fichier chargé.",
