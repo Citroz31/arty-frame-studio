@@ -19,6 +19,7 @@ La charge utile est limitée à 32 octets.
 | 4 | STATUS | vide |
 | 5 | LED | 1 octet : bit 7 manuel, bits 3-0 motif LD7..LD4, bits 6-4 nuls |
 | 6 | INFO | 1 octet : page 0 à 5 |
+| 7 | TR | 1 octet : 1 = 3,3 V, 0 = 0 V, bits 7-1 nuls |
 
 LED et INFO existent à partir de la **révision 2** du firmware. Un firmware de
 révision 1 répond « opcode inconnu » (status 1) ; l'application le traite
@@ -27,6 +28,8 @@ L'émission continue (`repeat_count` = 0) existe à partir de la **révision 3**
 une révision 2 refuse ce SEND (status 2) et ne produit aucune trame.
 La CLK libre (bit 2 des flags) existe à partir de la **révision 4** ; une
 révision 3 refuse ce SEND (status 2).
+TR existe à partir de la **révision 5** ; une révision 4 répond « opcode
+inconnu » (status 1) et l'application refuse l'envoi avant la requête.
 
 SEND correspond au format Python `struct.Struct("<IBHHHHB")` :
 
@@ -139,7 +142,7 @@ et du numéro de séquence. Le firmware reçoit des paquets bornés et abandonne
 un paquet incomplet après son timeout. Il n’offre pas de déduplication persistante :
 une commande SEND ou STOP n’est **jamais répétée automatiquement** après un
 timeout, car elle peut avoir été exécutée. PING (à la connexion), STATUS et
-INFO, sans effet sur la carte, et LED, dont la répétition donne le même état,
+INFO, sans effet sur la carte, et LED et TR, dont la répétition donne le même état,
 sont redemandés une fois avec un nouveau numéro de séquence. En cas d'échec
 des deux tentatives, les diagnostics conservent les octets et le premier
 aperçu RX reçus, même si la deuxième tentative est muette.
@@ -163,6 +166,18 @@ l'état : l'utilisateur voit que le bon `.bit` tourne sur cette carte, et chaque
 réponse confirme le chemin retour. `arty-frame led-test --port COM7` fait de
 même en ligne de commande.
 
+## Broche TR (opcode 7)
+
+TR pilote une sortie **statique** (par défaut JB4, broche C15) : 1 donne 3,3 V,
+0 donne 0 V, sans horloge ni durée. Le niveau est mémorisé par le FPGA jusqu'à la
+commande suivante ; le reset (bouton RESET, DTR de la liaison, chargement du
+firmware) le ramène à 0 V. La commande est indépendante de l'émission : elle
+n'a aucun effet sur DATA, CLK, LATCH ni sur une trame en cours, et la réponse est
+la réponse commune (busy, completed). Un octet autre que `00` ou `01` est refusé
+(status 2) sans toucher la broche. `arty-frame tr --port COM7 1` la positionne en
+ligne de commande ; le mode [VNA](mode-vna.md) la fixe avant chaque état qui le
+demande.
+
 ## Identification (opcode 6)
 
 La réponse INFO est la réponse commune ; son champ `completed` porte le mot
@@ -170,10 +185,10 @@ de 16 bits de la page demandée :
 
 | Page | Contenu |
 | --- | --- |
-| 0 | révision du firmware (4) |
+| 0 | révision du firmware (5) |
 | 1 | horloge du cœur en Hz, bits 15-0 |
 | 2 | horloge du cœur en Hz, bits 31-16 |
-| 3 | capacités : bit 0 test LED, bit 1 INFO, bit 2 émission continue, bit 3 CLK libre |
+| 3 | capacités : bit 0 test LED, bit 1 INFO, bit 2 émission continue, bit 3 CLK libre, bit 4 broche TR |
 | 4 | identifiant de build, bits 15-0 |
 | 5 | identifiant de build, bits 31-16 |
 

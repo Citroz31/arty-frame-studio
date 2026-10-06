@@ -144,3 +144,50 @@ def test_period_rounding_never_relaxes_the_requested_clock(setting):
     period = Decimal(line.split("-period ")[1].split()[0])
     assert period * setting.core_hz <= Decimal(1_000_000_000)
     assert Decimal(1_000_000_000) / period - setting.core_hz < Decimal("0.1")
+
+
+def test_tr_pin_defaults_to_jb4_and_is_a_slow_static_output():
+    config = FirmwareBuildConfig()
+    xdc = config.xdc()
+    assert config.tr_pin == "JB4" and "TR JB4 (C15)" in config.summary()
+    assert "PACKAGE_PIN C15 IOSTANDARD LVCMOS33 SLEW SLOW DRIVE 8} [get_ports tr_out]" in xdc
+    custom = replace(config, tr_pin="JC4", drive_ma=12)
+    assert (
+        "PACKAGE_PIN V11 IOSTANDARD LVCMOS33 SLEW SLOW DRIVE 12} [get_ports tr_out]" in custom.xdc()
+    )
+    assert custom.build_id not in (0, config.build_id) and not custom.is_reference
+    with pytest.raises(ValueError, match="TR"):
+        replace(config, tr_pin="JB5")
+    with pytest.raises(ValueError, match="distinctes"):
+        replace(config, tr_pin="JB1")
+    with pytest.raises(ValueError, match="distinctes"):
+        replace(config, data_pin="JB4")
+
+
+def test_the_default_tr_pin_keeps_the_identifier_of_configurations_built_before_tr():
+    import json
+    import zlib
+
+    config = FirmwareBuildConfig(
+        core_hz=150_000_000, data_pin="JC3", clock_pin="JC1", latch_pin="JC7", drive_ma=12
+    )
+    before_tr = {
+        "clock_pin": "JC1",
+        "core_hz": 150_000_000,
+        "data_pin": "JC3",
+        "drive_ma": 12,
+        "latch_pin": "JC7",
+        "slew": "FAST",
+    }
+    expected = zlib.crc32(json.dumps(before_tr, sort_keys=True, separators=(",", ":")).encode())
+    assert config.build_id == expected & 0x7FFFFFFF
+    assert '"tr_pin"' not in config.canonical_json()
+    assert '"tr_pin":"JC4"' in replace(config, tr_pin="JC4").canonical_json()
+
+
+def test_a_configuration_saved_before_tr_never_collides_with_it():
+    old = {"core_hz": 200_000_000, "data_pin": "JB4", "clock_pin": "JB2", "latch_pin": "JB3"}
+    loaded = FirmwareBuildConfig.from_dict({"schema_version": 1, "firmware": old})
+    assert loaded.data_pin == "JB4" and loaded.tr_pin == "JB7"
+    plain = FirmwareBuildConfig.from_dict({"schema_version": 1, "firmware": {}})
+    assert plain.tr_pin == "JB4"

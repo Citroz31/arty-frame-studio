@@ -17,11 +17,14 @@ set_property -dict {PACKAGE_PIN C2 IOSTANDARD LVCMOS33} [get_ports reset_n]
 set_property -dict {PACKAGE_PIN A9 IOSTANDARD LVCMOS33} [get_ports uart_rx]
 set_property -dict {PACKAGE_PIN D10 IOSTANDARD LVCMOS33} [get_ports uart_tx]
 
-# Outputs: DATA JB1 (E15), CLK JB2 (E16), LATCH JB3 (D15).
+# Outputs: DATA JB1 (E15), CLK JB2 (E16), LATCH JB3 (D15), TR JB4 (C15).
 # Pmod pins 5/11 are ground, 6/12 are 3.3 V supply.
 set_property -dict {PACKAGE_PIN E15 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 8} [get_ports data_out]
 set_property -dict {PACKAGE_PIN E16 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 8} [get_ports frame_clk]
 set_property -dict {PACKAGE_PIN D15 IOSTANDARD LVCMOS33 SLEW FAST DRIVE 8} [get_ports latch_enable]
+
+# TR: static 3.3 V / 0 V level (transmit/receive switch), no clock: JB4 (C15).
+set_property -dict {PACKAGE_PIN C15 IOSTANDARD LVCMOS33 SLEW SLOW DRIVE 8} [get_ports tr_out]
 
 # Four monochrome LEDs LD4-LD7: locked, busy, reserved, completed (LSB first).
 # A host LED command temporarily replaces them with its test pattern.

@@ -112,12 +112,17 @@ def _parser() -> argparse.ArgumentParser:
             else "Faire défiler un motif sur LD4-LD7 pour tester la liaison",
         )
         item.add_argument("--port", required=True, help="COM7, /dev/ttyUSB1, etc.")
+    tr = commands.add_parser(
+        "tr", help="Fixer la broche TR à 3,3 V (1) ou 0 V (0) ; elle garde ce niveau"
+    )
+    tr.add_argument("--port", required=True, help="COM7, /dev/ttyUSB1, etc.")
+    tr.add_argument("level", type=int, choices=(0, 1), help="1 = 3,3 V, 0 = 0 V")
     settings = commands.add_parser(
         "firmware-config", help="Créer ou vérifier une configuration de firmware personnalisé"
     )
     settings.add_argument("--input", type=Path, help="Configuration JSON à compléter/vérifier")
     settings.add_argument("--core-mhz", type=float, help="Horloge du cœur, ex. 150")
-    for pin in ("data", "clock", "latch"):
+    for pin in ("data", "clock", "latch", "tr"):
         settings.add_argument(f"--{pin}", help=f"Broche {pin.upper()} : JA1..JD10")
     settings.add_argument("--drive", type=int, choices=(4, 8, 12, 16))
     settings.add_argument("--slew", choices=("SLOW", "FAST"))
@@ -231,7 +236,12 @@ def _firmware_settings(args: argparse.Namespace) -> FirmwareBuildConfig:
     changes: dict[str, Any] = {}
     if args.core_mhz is not None:
         changes["core_hz"] = round(args.core_mhz * 1e6)
-    for option, field in (("data", "data_pin"), ("clock", "clock_pin"), ("latch", "latch_pin")):
+    for option, field in (
+        ("data", "data_pin"),
+        ("clock", "clock_pin"),
+        ("latch", "latch_pin"),
+        ("tr", "tr_pin"),
+    ):
         if getattr(args, option):
             changes[field] = getattr(args, option).upper()
     if args.drive is not None:
@@ -419,6 +429,24 @@ def main(argv: list[str] | None = None) -> int:
                         f"Test LED : {led_result.commands} commandes confirmées, aller-retour "
                         f"moyen {led_result.mean_ms:.1f} ms, maximum {led_result.max_ms:.1f} ms."
                     )
+            finally:
+                board.close()
+        elif args.command == "tr":
+            board = SerialDevice(args.port)
+            board.connect()
+            try:
+                identity = board.identify()
+                if not identity.tr:
+                    raise ValueError(
+                        f"Le firmware (révision {identity.revision}) n'a pas de broche TR : "
+                        "charger le firmware de révision 5 ou plus."
+                    )
+                status = board.tr(args.level)
+                print(
+                    f"TR : {'3,3 V' if args.level else '0 V'} (commande confirmée, "
+                    f"{status.completed} trame(s) terminée(s)). La broche garde ce niveau "
+                    "jusqu'à la prochaine commande ou un reset de la carte."
+                )
             finally:
                 board.close()
         elif args.command == "firmware-config":

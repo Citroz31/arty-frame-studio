@@ -271,6 +271,10 @@ arty-frame send --profile examples/horloge_seule_10mhz_continue.json --port COM7
 arty-frame ports
 arty-frame info --port COM7
 arty-frame led-test --port COM7
+arty-frame tr --port COM7 1        # broche TR à 3,3 V (0 : 0 V), firmware révision 5
+arty-frame vna-list                # VNA Keysight détectables (VISA, ce PC)
+arty-frame sweep --demo --profile examples/frame_26bits.json --states examples/etats_exemple.csv \
+    --probe vna --vna-demo --width 12 --vna-dir exports/essai
 arty-frame install-fpga-tools --project-root .
 arty-frame firmware-config --core-mhz 150 --clock JB1 --data JB3 --latch JB7 --output fw.json
 ARTY_GITHUB_TOKEN=… arty-frame remote-build --firmware-config fw.json

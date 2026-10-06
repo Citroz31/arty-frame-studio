@@ -142,6 +142,7 @@ def firmware_missing(info: FirmwareInfo) -> str:
         (info.led_test, "sans test LED"),
         (info.continuous, "sans émission continue"),
         (info.free_clock, "sans CLK libre"),
+        (info.tr, "sans broche TR"),
     ):
         if not present:
             return f" · {label} : recharger le firmware fourni à jour"
@@ -448,6 +449,14 @@ class Studio:
             on_click=self._led_test,
             disabled=True,
         )
+        self.tr_switch = ft.Switch(
+            label="TR à 3,3 V",
+            value=False,
+            on_change=self._tr_toggled,
+            disabled=True,
+            tooltip="Broche TR : 3,3 V si activé, 0 V sinon. Niveau statique, sans horloge.",
+        )
+        self.tr_note = ft.Text(size=11, color=MUTED)
         self.led_lamps = [
             ft.Container(width=16, height=16, border_radius=8, bgcolor=LED_OFF) for _ in range(4)
         ]
@@ -618,6 +627,7 @@ class Studio:
                 ("data_pin", "Broche DATA"),
                 ("clock_pin", "Broche CLK"),
                 ("latch_pin", "Broche LATCH"),
+                ("tr_pin", "Broche TR"),
             )
         }
         self.pilotage_pins = {
@@ -632,6 +642,7 @@ class Studio:
                 ("data_pin", "Sortie DATA"),
                 ("clock_pin", "Sortie CLK"),
                 ("latch_pin", "Sortie LATCH"),
+                ("tr_pin", "Sortie TR"),
             )
         }
         self.local_install_button = ft.OutlinedButton(
@@ -1197,6 +1208,23 @@ class Studio:
             or self.serial_pending
             or self.programming_pending
         )
+        tr_capable = self.firmware_info is not None and self.firmware_info.tr
+        self.tr_switch.disabled = (
+            not connected
+            or not tr_capable
+            or self.sweep_active
+            or self.serial_pending
+            or self.programming_pending
+            or self.command_uncertain
+        )
+        self.tr_note.value = (
+            "Niveau statique : 0 V après le chargement du firmware ou un reset ; "
+            "mémorisé par la carte jusqu'à la prochaine commande."
+            if tr_capable
+            else "Firmware sans broche TR : recharger le firmware fourni (révision 5)."
+            if connected and self.firmware_info is not None
+            else ""
+        )
         # Une carte connectée impose l'horloge annoncée par son firmware.
         self.core_clock.disabled = connected or self.serial_pending or self.tool_pending
         simulated = self.mode.value == "demo"
@@ -1422,7 +1450,7 @@ class Studio:
         if not simulated and known is not None:
             self.hardware_pinout.value = (
                 f"Brochage identifié · DATA {known.data_pin} · CLK {known.clock_pin} · "
-                f"LATCH {known.latch_pin} · masse commune"
+                f"LATCH {known.latch_pin} · TR {known.tr_pin} · masse commune"
             )
         elif not simulated:
             self.hardware_pinout.value = (
@@ -1435,7 +1463,7 @@ class Studio:
             + ("identité locale" if simulated else f"build {build}")
             + firmware_missing(info)
         )
-        complete = info.led_test and info.continuous and info.free_clock
+        complete = info.led_test and info.continuous and info.free_clock and info.tr
         self.firmware_status.color = GREEN if complete else AMBER
         self._log(self.firmware_status.value, self.firmware_status.color)
         if info.core_hz != self.core_hz:
@@ -1497,6 +1525,36 @@ class Studio:
         finally:
             self.serial_pending = False
             self._show_leds(None)
+            self._buttons()
+            self._update()
+
+    async def _tr_toggled(self, _: Any = None) -> None:
+        level = 1 if self.tr_switch.value else 0
+        if (
+            self.serial_pending
+            or self.programming_pending
+            or self.sweep_active
+            or self.command_uncertain
+        ):
+            self.tr_switch.value = not self.tr_switch.value
+            self._update()
+            return
+        self.serial_pending = True
+        self._buttons()
+        self._update()
+        try:
+            async with self.serial_lock:
+                device = self.device
+                if device is None or not device.connected:
+                    raise ValueError("Connectez la carte avant de piloter TR.")
+                status = await asyncio.to_thread(device.tr, level)
+            self._status_received(status)
+            self._log(f"TR : {'3,3 V' if level else '0 V'} (commande confirmée).", GREEN)
+        except Exception as exc:
+            self.tr_switch.value = not self.tr_switch.value  # la broche n'a pas changé
+            self._error("Commande TR", exc)
+        finally:
+            self.serial_pending = False
             self._buttons()
             self._update()
 
@@ -1987,6 +2045,7 @@ class Studio:
             data_pin=self.fw_pins["data_pin"].value or "",
             clock_pin=self.fw_pins["clock_pin"].value or "",
             latch_pin=self.fw_pins["latch_pin"].value or "",
+            tr_pin=self.fw_pins["tr_pin"].value or "",
             drive_ma=drive,
             slew=self.fw_slew.value or "",
         )

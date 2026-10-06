@@ -704,3 +704,30 @@ def test_vna_list_prints_what_answers_and_explains_an_empty_result(capsys, monke
     monkeypatch.setattr(sweep_cli, "discover_instruments", lambda **_: [])
     assert main(["vna-list"]) == 1
     assert "Aucun instrument trouvé" in capsys.readouterr().err
+
+
+def test_tr_command_sets_the_pin_and_refuses_a_firmware_without_it(monkeypatch, capsys) -> None:
+    from dataclasses import replace
+
+    from arty_frame_studio import cli
+    from arty_frame_studio.transport import DemoDevice
+
+    demo = DemoDevice()
+    monkeypatch.setattr(cli, "SerialDevice", lambda port: demo)
+    assert main(["tr", "--port", "COM7", "1"]) == 0
+    assert "TR : 3,3 V (commande confirmée" in capsys.readouterr().out and demo.tr_history == [1]
+    assert main(["tr", "--port", "COM7", "0"]) == 0 and demo.tr_history == [1, 0]
+    capsys.readouterr()
+    old = DemoDevice()
+    old.firmware = replace(old.firmware, revision=4, capabilities=0x0F)
+    monkeypatch.setattr(cli, "SerialDevice", lambda port: old)
+    assert main(["tr", "--port", "COM7", "1"]) == 1
+    assert "révision 4" in capsys.readouterr().err and old.tr_history == []
+
+
+def test_firmware_config_accepts_the_tr_pin(tmp_path: Path, capsys) -> None:
+    output = tmp_path / "firmware.json"
+    assert main(["firmware-config", "--tr", "jc4", "--output", str(output)]) == 0
+    assert "TR JC4 (V11)" in capsys.readouterr().out and '"tr_pin": "JC4"' in output.read_text()
+    assert main(["firmware-config", "--tr", "JB1"]) == 1
+    assert "distinctes" in capsys.readouterr().err

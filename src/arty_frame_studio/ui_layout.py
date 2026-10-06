@@ -115,6 +115,12 @@ def build_layout(s: Studio) -> ft.Control:
             spacing=12,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),
+        ft.Row(
+            [s.tr_switch, s.tr_note],
+            wrap=True,
+            spacing=12,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
     )
     s.lsb.width = 210
     s.latch_low.width = 210
@@ -159,7 +165,7 @@ def build_layout(s: Studio) -> ft.Control:
         ),
         _section(
             "Horloge interne et sorties",
-            "Référence : cœur 200 MHz · DATA JB1 · CLK JB2 · LATCH JB3",
+            "Référence : cœur 200 MHz · DATA JB1 · CLK JB2 · LATCH JB3 · TR JB4",
             [
                 _grid((s.core_clock, 12)),
                 _grid(*[(control, 4) for control in s.pilotage_pins.values()]),
@@ -318,7 +324,7 @@ def build_layout(s: Studio) -> ft.Control:
         ),
         ft.TextButton("Aller à Pilotage", icon=ft.Icons.USB, on_click=s._open_control),
         ft.Text(
-            "Référence : DATA JB1/E15 · CLK JB2/E16 · LATCH JB3/D15 · "
+            "Référence : DATA JB1/E15 · CLK JB2/E16 · LATCH JB3/D15 · TR JB4/C15 · "
             "masse JB5 ou JB11. Sorties 3,3 V ; commencer à fréquence réduite.",
             size=12,
             color=BLUE,

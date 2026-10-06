@@ -123,7 +123,8 @@ Le firmware distribué provient du commit `dbe6803` et du
 [run GitHub Actions 37210822783](https://github.com/Citroz31/arty-frame-studio/actions/runs/37210822783),
 publié par son job `publish`. Il ajoute au brochage UART corrigé, aux
 entrées ODDR enregistrées et aux commandes LED et INFO l'émission continue
-jusqu'à STOP (révision 3) et la CLK libre pendant LATCH et pause (révision 4).
+jusqu'à STOP (révision 3), la CLK libre pendant LATCH et pause (révision 4) et la
+broche TR statique, 3,3 V ou 0 V (révision 5).
 `arty-frame firmware-check` contrôle le fichier, les sources et le rapport
 de timing avant son utilisation, sans outil FPGA ni matériel raccordé.
 

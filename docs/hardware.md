@@ -21,11 +21,19 @@ des signaux CLK/DATA/LATCH.
 | Données série | `data_out` | E15 | JB broche 1 |
 | Horloge série | `frame_clk` | E16 | JB broche 2 |
 | Latch enable | `latch_enable` | D15 | JB broche 3 |
+| Niveau TR (TX/RX), statique | `tr_out` | C15 | JB broche 4 |
 | Masse | — | — | JB broche 5 ou 11 |
 | LED verrouillage horloge | `led[0]` | H5 | LD4, première LED verte |
 | LED émission en cours | `led[1]` | J5 | LD5 |
 | LED réservée | `led[2]` | T9 | LD6 |
 | LED trame terminée | `led[3]` | T10 | LD7 |
+
+**TR** est une sortie LVCMOS33 **statique** (8 mA, fronts lents) : 3,3 V ou 0 V
+selon la dernière commande, 0 V à la mise sous tension et après un reset. Elle
+commande l'état émission/réception du composant (le niveau qui signifie TX se
+choisit dans l'application) ; elle n'a pas d'horloge et se pilote depuis
+Pilotage (interrupteur « TR à 3,3 V »), `arty-frame tr` ou le [mode VNA](mode-vna.md).
+Relier sa masse comme pour les autres signaux.
 
 Ce brochage est celui du firmware de référence. Le **test LED** de
 l'application remplace pendant 3 secondes cet affichage par un chenillard
@@ -35,7 +43,7 @@ la liaison UART fonctionne dans les deux sens. Voir [le protocole](protocol.md).
 ## Firmware personnalisé : horloge et broches
 
 L'onglet **FPGA → Firmware personnalisé** (ou `arty-frame firmware-config`)
-choisit l'horloge du cœur et les broches DATA, CLK et LATCH parmi les 32
+choisit l'horloge du cœur et les broches DATA, CLK, LATCH et TR parmi les 32
 broches de signal des Pmod JA, JB, JC et JD, avec le courant (4 à 16 mA) et la
 vitesse des fronts. Un nouveau `.bit` est compilé, localement ou sur GitHub
 Actions ([chaîne FPGA](toolchain.md)) ; la carte annonce ensuite son horloge

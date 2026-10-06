@@ -27,6 +27,7 @@ VCO_MAX_HZ = 1_600_000_000
 DRIVES_MA = (4, 8, 12, 16)
 SLEWS = ("SLOW", "FAST")
 SCHEMA_VERSION = 1
+DEFAULT_TR_PIN = "JB4"
 
 
 @dataclass(frozen=True)
@@ -126,6 +127,8 @@ class FirmwareBuildConfig:
     data_pin: str = "JB1"
     clock_pin: str = "JB2"
     latch_pin: str = "JB3"
+    # Static transmit/receive level (firmware revision 5): 3.3 V or 0 V, no clock.
+    tr_pin: str = DEFAULT_TR_PIN
     drive_ma: int = 8
     slew: str = "FAST"
 
@@ -133,15 +136,15 @@ class FirmwareBuildConfig:
         if type(self.core_hz) is not int:
             raise ValueError("L'horloge de cœur doit être un entier en Hz.")
         pll_for(self.core_hz)
-        pins = (self.data_pin, self.clock_pin, self.latch_pin)
-        for label, pin in zip(("DATA", "CLK", "LATCH"), pins, strict=True):
+        pins = (self.data_pin, self.clock_pin, self.latch_pin, self.tr_pin)
+        for label, pin in zip(("DATA", "CLK", "LATCH", "TR"), pins, strict=True):
             if not isinstance(pin, str) or pin not in PMOD_PINS:
                 raise ValueError(
                     f"Broche {label} inconnue : {pin!r}. Choisir JA1-JA10, JB1-JB10, "
                     "JC1-JC10 ou JD1-JD10 (5, 6, 11 et 12 sont masse et 3,3 V)."
                 )
-        if len(set(pins)) != 3:
-            raise ValueError("DATA, CLK et LATCH doivent utiliser trois broches distinctes.")
+        if len(set(pins)) != 4:
+            raise ValueError("DATA, CLK, LATCH et TR doivent utiliser quatre broches distinctes.")
         if type(self.drive_ma) is not int or self.drive_ma not in DRIVES_MA:
             raise ValueError("Courant de sortie LVCMOS33 : 4, 8, 12 ou 16 mA.")
         if self.slew not in SLEWS:
@@ -166,7 +169,12 @@ class FirmwareBuildConfig:
         return zlib.crc32(self.canonical_json().encode("ascii")) & 0x7FFFFFFF or 1
 
     def canonical_json(self) -> str:
-        return json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+        data = asdict(self)
+        # TR est apparu avec la révision 5 : la broche par défaut ne change pas
+        # l'identifiant des configurations déjà compilées.
+        if self.tr_pin == DEFAULT_TR_PIN:
+            del data["tr_pin"]
+        return json.dumps(data, sort_keys=True, separators=(",", ":"))
 
     def summary(self) -> str:
         pins = ", ".join(
@@ -175,6 +183,7 @@ class FirmwareBuildConfig:
                 ("DATA", self.data_pin),
                 ("CLK", self.clock_pin),
                 ("LATCH", self.latch_pin),
+                ("TR", self.tr_pin),
             )
         )
         return (
@@ -229,11 +238,11 @@ class FirmwareBuildConfig:
         )
         period_text = "5.000" if self.core_hz == REFERENCE_CORE_HZ else str(period)
 
-        def output(port: str, name: str) -> str:
+        def output(port: str, name: str, slew: str | None = None) -> str:
             pin = PMOD_PINS[name].package_pin
             return (
                 f"set_property -dict {{PACKAGE_PIN {pin} IOSTANDARD LVCMOS33 "
-                f"SLEW {self.slew} DRIVE {self.drive_ma}}} [get_ports {port}]"
+                f"SLEW {slew or self.slew} DRIVE {self.drive_ma}}} [get_ports {port}]"
             )
 
         outputs = ", ".join(
@@ -242,6 +251,7 @@ class FirmwareBuildConfig:
                 ("DATA", self.data_pin),
                 ("CLK", self.clock_pin),
                 ("LATCH", self.latch_pin),
+                ("TR", self.tr_pin),
             )
         )
         lines = [
@@ -270,6 +280,10 @@ class FirmwareBuildConfig:
             output("frame_clk", self.clock_pin),
             output("latch_enable", self.latch_pin),
             "",
+            f"# TR: static 3.3 V / 0 V level (transmit/receive switch), no clock: {self.tr_pin}"
+            f" ({PMOD_PINS[self.tr_pin].package_pin}).",
+            output("tr_out", self.tr_pin, "SLOW"),
+            "",
             "# Four monochrome LEDs LD4-LD7: locked, busy, reserved, completed (LSB first).",
             "# A host LED command temporarily replaces them with its test pattern.",
             "set_property -dict {PACKAGE_PIN H5 IOSTANDARD LVCMOS33} [get_ports {led[0]}]",
@@ -293,7 +307,14 @@ class FirmwareBuildConfig:
             raise ValueError(
                 "Configuration firmware invalide : schema_version=1 et firmware requis."
             )
-        values = data["firmware"]
+        values = dict(data["firmware"])
+        if "tr_pin" not in values:
+            # Configuration enregistrée avant TR : si JB4 y sert déjà, prendre une broche libre.
+            used = {values.get(key) for key in ("data_pin", "clock_pin", "latch_pin")}
+            if DEFAULT_TR_PIN in used:
+                values["tr_pin"] = next(
+                    name for name in ("JB7", "JB8", "JB9", "JB10", *PMOD_PINS) if name not in used
+                )
         names = {field.name for field in fields(cls)}
         unknown = set(values) - names
         if unknown:

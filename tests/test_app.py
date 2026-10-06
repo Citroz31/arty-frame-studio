@@ -609,6 +609,43 @@ def test_canvas_geometry_preserves_active_low_latch_polarity():
         assert normal_y + inverted_y == pytest.approx(sum(levels))
 
 
+def test_tr_switch_sets_the_pin_through_the_board_and_reverts_on_failure(tmp_path):
+    from dataclasses import replace
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        assert studio.tr_switch.disabled
+        await studio._toggle_connection()
+        assert not studio.tr_switch.disabled and "0 V après le chargement" in studio.tr_note.value
+        studio.tr_switch.value = True
+        await studio._tr_toggled()
+        assert studio.device.tr_level == 1 and studio.tr_switch.value is True
+        assert any("TR : 3,3 V" in line for line in studio.log_lines)
+        studio.tr_switch.value = False
+        await studio._tr_toggled()
+        assert studio.device.tr_level == 0 and studio.device.tr_history == [1, 0]
+        # Pendant un balayage la broche appartient au balayage : l'interrupteur revient.
+        studio.sweep_active = True
+        studio._buttons()
+        assert studio.tr_switch.disabled
+        studio.tr_switch.value = True
+        await studio._tr_toggled()
+        assert studio.tr_switch.value is False and studio.device.tr_history == [1, 0]
+        studio.sweep_active = False
+        # Une commande refusée laisse l'interrupteur sur le niveau réel de la broche.
+        studio.device.tr = lambda level: (_ for _ in ()).throw(RuntimeError("liaison coupée"))
+        studio.tr_switch.value = True
+        await studio._tr_toggled()
+        assert studio.tr_switch.value is False
+        # Un firmware sans TR désactive l'interrupteur et dit pourquoi.
+        old = replace(studio.device.firmware, revision=4, capabilities=0x0F)
+        studio.firmware_info = old
+        studio._buttons()
+        assert studio.tr_switch.disabled and "Firmware sans broche TR" in studio.tr_note.value
+
+    run_async(exercise())
+
+
 def test_led_test_walks_virtual_and_board_leds_in_demo(tmp_path):
     async def exercise():
         studio = make_studio(tmp_path)
@@ -933,6 +970,8 @@ def test_revision_three_firmware_is_flagged_without_free_clock(tmp_path):
     studio._firmware_identified(FirmwareInfo(3, 200_000_000, 7, 0))
     assert "sans CLK libre" in studio.firmware_status.value
     studio._firmware_identified(FirmwareInfo(4, 200_000_000, 15, 0))
+    assert "sans broche TR" in studio.firmware_status.value  # révision 4 : pas de TR
+    studio._firmware_identified(FirmwareInfo(5, 200_000_000, 31, 0))
     assert "sans" not in studio.firmware_status.value
 
 

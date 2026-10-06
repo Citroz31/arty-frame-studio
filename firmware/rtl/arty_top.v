@@ -19,6 +19,8 @@ module arty_top #(
     output wire data_out,
     output wire frame_clk,
     output wire latch_enable,
+    // Static transmit/receive level set by the host (3.3 V = 1, 0 V = 0).
+    output wire tr_out,
     output wire [3:0] led
 );
     wire input_clock, feedback_raw, feedback_clock, clock_raw, core_clock;
@@ -74,6 +76,7 @@ module arty_top #(
     wire data_rise, data_fall, clock_rise, clock_fall, latch_rise, latch_fall;
     wire led_write;
     wire [4:0] led_value;
+    wire tr_write, tr_value;
     uart_rx #(.CLOCK_HZ(CORE_HZ), .BAUD(115200)) receiver (
         .clk(core_clock), .reset(reset), .rx(uart_rx),
         .data(received_byte), .valid(received_valid)
@@ -93,7 +96,8 @@ module arty_top #(
         .data_rise(data_rise), .data_fall(data_fall),
         .clock_rise(clock_rise), .clock_fall(clock_fall),
         .latch_rise(latch_rise), .latch_fall(latch_fall),
-        .led_write(led_write), .led_value(led_value)
+        .led_write(led_write), .led_value(led_value),
+        .tr_write(tr_write), .tr_value(tr_value)
     );
     // frame_engine decodes the falling-edge values combinationally. Register
     // all six ODDR inputs so only a flip-flop-to-OLOGIC route remains: the
@@ -117,6 +121,17 @@ module arty_top #(
         .C(core_clock), .CE(1'b1), .D1(oddr_inputs[1]), .D2(oddr_inputs[0]),
         .R(reset), .S(1'b0), .Q(latch_enable)
     );
+    // TR: a static level, no clock. The one-cycle write comes from the
+    // reply-queue capacity logic: register it before it reaches the output
+    // flip-flop, which sits near the distant pin. Reset returns the pin to 0 V.
+    reg tr_command, tr_command_value, tr_level;
+    always @(posedge core_clock) begin
+        tr_command <= !reset && tr_write;
+        tr_command_value <= tr_value;
+        if (reset) tr_level <= 1'b0;
+        else if (tr_command) tr_level <= tr_command_value;
+    end
+    assign tr_out = tr_level;
     // LED test: a manual LED command shows its pattern on LD4-LD7, then the
     // status display returns after LED_HOLD_CYCLES; an automatic command or
     // a reset returns at once. led_hold[30] set means status display.
