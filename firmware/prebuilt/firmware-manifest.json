@@ -1,9 +1,9 @@
 {
-  "source_commit": "dbe680347c195c94bc26d02c145862e264aa5c35",
-  "workflow_run": "https://github.com/Citroz31/arty-frame-studio/actions/runs/37210822783",
+  "source_commit": "d0b3c13ad13a78487ffba9bf45a54510c2970b34",
+  "workflow_run": "https://github.com/Citroz31/arty-frame-studio/actions/runs/37473638607",
   "part": "xc7a100tcsg324-1",
   "idcode": "0x03631093",
-  "sha256": "02c208aa8cbe79599f605e2f14d667a8f4a77361e56637832449e359f2edb57e",
+  "sha256": "8225942623b4e49bc8593195d44ece3323c724bbb8a2b93e651b5244c99aac52",
   "payload_bytes": 3825788,
   "tools": {
     "oss_cad_suite": {
@@ -51,20 +51,21 @@
       "data_pin": "JB1",
       "clock_pin": "JB2",
       "latch_pin": "JB3",
+      "tr_pin": "JB4",
       "drive_ma": 8,
       "slew": "FAST"
     }
   },
-  "firmware_summary": "c\u0153ur 200 MHz, DATA JB1 (E15), CLK JB2 (E16), LATCH JB3 (D15), LVCMOS33 8 mA FAST, build 0x00000000",
+  "firmware_summary": "c\u0153ur 200 MHz, DATA JB1 (E15), CLK JB2 (E16), LATCH JB3 (D15), TR JB4 (C15), LVCMOS33 8 mA FAST, build 0x00000000",
   "timing_scope": "nextpnr register paths; excludes physical GPIO/DDR validation",
   "timing_requirement_mhz": 200.0,
-  "routed_core_fmax_mhz": 210.79258728027344,
-  "nextpnr_seed": 8,
+  "routed_core_fmax_mhz": 211.81951904296875,
+  "nextpnr_seed": 1,
   "hardware_validated": false,
   "source_sha256": {
-    "firmware/constraints/arty_a7_100t.xdc": "f9ef2861af004291d081500ec96e9ab1982b5d65d68111615b05f256a7437785",
-    "firmware/rtl/arty_top.v": "751bd4376233474b4d0e86f792079d7c00919873c9a549a924466318967f89ad",
-    "firmware/rtl/frame_controller.v": "b9a5347fcdf8603ae694abd23b18aef9c13cfbaebda96d6e68ef251c15fa348d",
+    "firmware/constraints/arty_a7_100t.xdc": "911033ae70a626408f88d6f0d27a7fd040913cbc4afb86968e5ec1e1677dfde4",
+    "firmware/rtl/arty_top.v": "cfc3dab9cebaab7ac8853b906b9574407e7959cfec2405e6c8da61815d8c67d8",
+    "firmware/rtl/frame_controller.v": "67d61993bfbaacdb0f8be6d1ef60a2b45d4775aede80c8ccffde6c4b4a3894e6",
     "firmware/rtl/frame_engine.v": "5d54669b28332a2c3682323c3a660c1b3dd8b1b26450ea5ad30aeb9cc0a91b17",
     "firmware/rtl/packet_rx.v": "5d0c44fa0e867ae519f7e78f88a6f5e2be61c73b5250d79f6b34ca11270d6587",
     "firmware/rtl/uart_rx.v": "8d609b14214787654cf21e86f13445192b880703d99bbcc9a89ba451e85ba616",

@@ -1,12 +1,12 @@
 {
   "version": 1,
   "part": "xc7a100tcsg324-1",
-  "input_sha256": "9a66842ee0fb2a8092f2845f4b946ff7366ecda3e7d91f83e6f0e9f3f9cb6038",
-  "bitstream_sha256": "02c208aa8cbe79599f605e2f14d667a8f4a77361e56637832449e359f2edb57e",
+  "input_sha256": "605a56329900404c008c14dc344c85187eabf3239d9c359644168d212b6d45e3",
+  "bitstream_sha256": "8225942623b4e49bc8593195d44ece3323c724bbb8a2b93e651b5244c99aac52",
   "timing_clock": "core_clock",
   "timing_requirement_mhz": 200.0,
   "timing_scope": "nextpnr register paths; excludes physical GPIO/DDR validation",
-  "run_dir": "/home/runner/work/arty-frame-studio/arty-frame-studio/build/runs/2214590ccaf6405d9d36ca809402cde3",
+  "run_dir": "/home/runner/work/arty-frame-studio/arty-frame-studio/build/runs/910ef7e85b7940759581353ae1733bc7",
   "build_id": 0,
   "firmware_config": {
     "schema_version": 1,
@@ -15,9 +15,10 @@
       "data_pin": "JB1",
       "clock_pin": "JB2",
       "latch_pin": "JB3",
+      "tr_pin": "JB4",
       "drive_ma": 8,
       "slew": "FAST"
     }
   },
-  "nextpnr_seed": 8
+  "nextpnr_seed": 1
 }
