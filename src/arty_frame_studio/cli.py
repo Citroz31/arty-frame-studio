@@ -346,8 +346,14 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 status = probe.connect()
                 print("Firmware Arty Frame Studio : réponse PING valide.")
+                round_trip = getattr(probe, "last_round_trip", None)
+                if round_trip is not None:
+                    print(f"Temps de réponse PING : {round_trip * 1000:.1f} ms.")
                 print(json.dumps(asdict(status), ensure_ascii=False))
             finally:
+                # Retards et paquets étrangers : utiles même après un échec.
+                for note in getattr(probe, "link_notes", list)():
+                    print(f"Liaison : {note}", file=sys.stderr)
                 probe.close()
         elif args.command == "jtag-devices":
             for ftdi_device in list_ftdi_devices(dll_path=args.ftdi_dll):

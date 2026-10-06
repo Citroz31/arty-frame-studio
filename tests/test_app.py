@@ -355,6 +355,35 @@ def test_windows_ping_timeout_stays_visible_and_never_enables_send(tmp_path, mon
     run_async(exercise())
 
 
+def test_late_uart_replies_are_explained_in_the_journal(tmp_path, monkeypatch):
+    class SlowBoard:
+        connected = False
+
+        def __init__(self, port, **kwargs):
+            pass
+
+        def connect(self):
+            raise CommandTimeout(Opcode.PING, 1, "Réponse(s) tardive(s) à une requête précédente")
+
+        def link_notes(self):
+            return ["Réponses de la carte en retard : jusqu'à 1020 ms pour 750 ms prévus."]
+
+        def close(self):
+            pass
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.mode.value = "uart"
+        studio.port.value = "COM7"
+        monkeypatch.setattr(app, "SerialDevice", SlowBoard)
+        await studio._toggle_connection()
+        lines = [line for line in studio.log_lines if "Liaison UART" in line]
+        assert lines and "1020 ms" in lines[0]
+        assert studio.device is None
+
+    run_async(exercise())
+
+
 def test_native_jtag_result_never_claims_uart_firmware_loaded(tmp_path, monkeypatch):
     calls = []
 

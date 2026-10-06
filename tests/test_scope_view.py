@@ -1,6 +1,7 @@
 """Onglet Oscilloscope sans navigateur : démo, Run/Stop, réglages, curseurs, export."""
 
 import asyncio
+import math
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 from arty_frame_studio.app import Studio
 from arty_frame_studio.model import FrameConfig
 from arty_frame_studio.scope import (
+    Acquisition,
     ChannelSettings,
     KeysightScope,
     Measurements,
@@ -787,3 +789,34 @@ def test_changing_source_updates_address_controls_in_the_page(tmp_path):
     panel.source.value = "lan"
     panel._source_changed(SimpleNamespace(control=panel.source))
     assert not panel.address.disabled and panel.page.updates == updates + 1
+
+
+def test_each_drawn_acquisition_is_stamped_on_the_screen(tmp_path):
+    # Retour d'essai : « Acquisition 11 » dans l'état, mais un écran resté vide.
+    # Le numéro écrit dans le canevas montre si le dessin suit l'acquisition.
+    panel, _ = make_panel(tmp_path)
+
+    async def scenario():
+        await panel._toggle_connection()
+        await panel._single()
+
+    run_async(scenario())
+    stamps = [shape.text for shape in panel.canvas.shapes if shape.data == "stamp"]
+    assert len(stamps) == 1 and stamps[0].startswith(f"Acq. {panel.count} · ")
+    run_async(panel.disconnect())
+
+
+def test_non_finite_points_never_reach_the_canvas():
+    settings = ScopeSettings()
+    trace = Trace(1, (0.0, 1e-8, float("nan"), 3e-8), (0.0, 3.3, 1.0, float("inf")))
+    acquisition = Acquisition(settings, (trace,), {}, True)
+    shapes = scope_canvas_shapes(acquisition, settings, Cursors(), 900)
+    path = next(shape for shape in shapes if shape.data == "trace:1")
+    coordinates = [value for element in path.elements for value in (element.x, element.y)]
+    assert len(path.elements) == 2 and all(math.isfinite(value) for value in coordinates)
+    # A trace with no finite point draws nothing rather than failing.
+    empty = Trace(1, (float("nan"),), (0.0,))
+    shapes = scope_canvas_shapes(
+        Acquisition(settings, (empty,), {}, True), settings, Cursors(), 900
+    )
+    assert not [shape for shape in shapes if shape.data == "trace:1"]

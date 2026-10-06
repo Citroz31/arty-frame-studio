@@ -271,7 +271,7 @@ puis 10 MHz, et utiliser une chaîne de mesure adaptée aux fronts à vérifier.
 | « En attente de déclenchement (mode Normal) » | Vérifier la source et le niveau, cliquer sur **50 %** ou passer en **Auto**. |
 | La trace est visible sur le scope après une trame unique | Cliquer sur **Lire l'écran** pour récupérer cette trace arrêtée. **Single** dans l'application demanderait une nouvelle acquisition après la fin de la trame. |
 | Les réglages sont lus, mais « Aucune acquisition » reste affiché | Lire le message d'erreur dans l'état et le journal, puis réessayer **Lire l'écran**. Sans trace antérieure conservée, les calibres de la grille doivent correspondre aux valeurs lues, par exemple 10 V/div et 500 ns/div. |
-| Le compteur progresse, mais la grille ou le tracé reste figé | Conserver le journal, les calibres affichés sur l'appareil et une capture de l'application pour comparer les relevés. Ce symptôme seul ne permet pas d'identifier sa cause sous Windows. |
+| Le compteur progresse, mais la grille ou le tracé reste figé | Comparer l'état « Acquisition N » au tampon **Acq. N · hh:mm:ss** écrit en bas à droite de l'écran : s'ils diffèrent, le dessin n'a pas été transmis à l'interface. Redimensionner la fenêtre force un nouveau dessin. Conserver le journal, les calibres de l'appareil et une capture de l'application. |
 | Fréquence « — » | Moins de deux fronts à l'écran : augmenter la base de temps ou utiliser **Préréglage de la trame**. |
 | Tensions ×10 ou ÷10 | Accorder le commutateur de la sonde (×1 / ×10) et le réglage **Sonde** de la voie. |
 | Pics ou oscillations à chaque front | Utiliser le ressort de masse court de la sonde, au plus près de JB5/JB11. |

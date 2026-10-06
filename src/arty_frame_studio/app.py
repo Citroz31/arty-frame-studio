@@ -1282,8 +1282,10 @@ class Studio:
                         # répond « commande inconnue » et reste à 200 MHz.
                         info = await asyncio.to_thread(device.identify)
                     except Exception:
+                        self._log_link_notes(device)
                         await asyncio.to_thread(device.close)
                         raise
+                    self._log_link_notes(device)
                     self.device = device
                     self.last_sent = None
                     self.command_uncertain = False
@@ -1323,6 +1325,13 @@ class Studio:
             self.serial_pending = False
             self._buttons()
             self._update()
+
+    def _log_link_notes(self, device: SerialDevice | DemoDevice) -> None:
+        """Retards et paquets étrangers vus pendant la connexion UART."""
+        notes = getattr(device, "link_notes", None)
+        if callable(notes):
+            for note in notes():
+                self._log(f"Liaison UART : {note}", AMBER)
 
     def _firmware_identified(self, info: FirmwareInfo | None) -> None:
         self.firmware_info = info
