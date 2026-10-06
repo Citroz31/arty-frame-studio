@@ -403,6 +403,16 @@ class Studio:
             icon=ft.Icons.USB,
             on_click=self._toggle_connection,
         )
+        # Remise à zéro de la logique du FPGA par DTR (cavalier JP2) : vide une
+        # file de réponses désynchronisée sans recharger le firmware.
+        self.reset_connect_button = ft.TextButton(
+            "Réinitialiser la carte puis connecter",
+            icon=ft.Icons.RESTART_ALT,
+            tooltip="Impulsion DTR vers ck_rst (cavalier JP2) : remet à zéro la logique "
+            "du FPGA et arrête une émission en cours, sans recharger le firmware. "
+            "Sans JP2, appuyer sur le bouton RESET rouge de l'Arty.",
+            on_click=self._reset_and_connect,
+        )
         self.connection_status = ft.Text("Déconnecté", color=MUTED)
         self.mode_badge = ft.Text("Simulation", size=12, color=BLUE)
         self.connection_hint = ft.Text(size=12, color=MUTED)
@@ -1080,6 +1090,8 @@ class Studio:
         self.stop_button.disabled = not connected or self.serial_pending or self.programming_pending
         self.simulate_button.disabled = self.current_config is None
         self.connect_button.disabled = self.serial_pending or self.programming_pending
+        self.reset_connect_button.visible = self.mode.value == "uart" and not connected
+        self.reset_connect_button.disabled = self.serial_pending or self.programming_pending
         self.connect_button.text = "Déconnecter" if connected else "Connecter"
         self.connect_button.tooltip = (
             "Fermer le port n'arrête pas l'émission du FPGA ; utiliser Arrêter pour la terminer."
@@ -1227,7 +1239,14 @@ class Studio:
         except Exception as exc:
             self._error("Détection des ports", exc)
 
-    async def _toggle_connection(self, _: Any = None, *, disconnect_only: bool = False) -> None:
+    async def _reset_and_connect(self, _: Any = None) -> None:
+        if self.device is not None and self.device.connected:
+            return
+        await self._toggle_connection(reset_board=True)
+
+    async def _toggle_connection(
+        self, _: Any = None, *, disconnect_only: bool = False, reset_board: bool = False
+    ) -> None:
         if self.serial_pending or (self.programming_pending and not disconnect_only):
             return
         self.serial_pending = True
@@ -1273,11 +1292,20 @@ class Studio:
                                 "Sélectionnez un port série ou branchez la carte puis actualisez."
                             )
                         device = SerialDevice(self.port.value, baudrate=115200)
+                        if reset_board:
+                            self._log(
+                                "Réinitialisation de la logique de la carte par DTR "
+                                "(cavalier JP2) : une émission en cours est arrêtée.",
+                                AMBER,
+                            )
                         self._log(f"Identification UART sur {self.port.value} · PING puis INFO.")
                     else:
                         device = DemoDevice(core_hz=self.core_hz)
                     try:
-                        status = await asyncio.to_thread(device.connect)
+                        if reset_board and isinstance(device, SerialDevice):
+                            status = await asyncio.to_thread(device.connect, reset_board=True)
+                        else:
+                            status = await asyncio.to_thread(device.connect)
                         # INFO donne l'horloge du cœur ; un firmware de révision 1
                         # répond « commande inconnue » et reste à 200 MHz.
                         info = await asyncio.to_thread(device.identify)

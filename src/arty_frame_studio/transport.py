@@ -174,7 +174,10 @@ class SerialDevice:
         # Réponses tardives sorties dès l'envoi de la requête suivante.
         self.released_by_next = 0
         self.foreign_replies = 0
+        # Écart de séquence (reçue - attendue) des réponses étrangères.
+        self.foreign_offsets: list[int] = []
         self.stale_at_open = 0
+        self.board_reset = False
         self.last_round_trip: float | None = None
 
     @property
@@ -211,6 +214,16 @@ class SerialDevice:
                 f"{self.stale_at_open} paquet(s) d'une session précédente ignoré(s) à "
                 "l'ouverture du port : des réponses étaient restées dans le convertisseur USB."
             )
+        offsets = self.foreign_offsets
+        if len(offsets) >= 2 and len(set(offsets)) == 1:
+            notes.append(
+                f"Décalage constant de {offsets[0]} requête(s) : à chaque requête, la carte "
+                "renvoie la réponse d'une requête plus ancienne, même d'une session "
+                "précédente. Le firmware répond (CRC valide) mais sa file de réponses est "
+                "désynchronisée ; ce n'est pas un problème de port COM. Utiliser "
+                "« Réinitialiser la carte puis connecter » (cavalier JP2) ou appuyer sur le "
+                "bouton RESET rouge de l'Arty (pas PROG), puis reconnecter."
+            )
         if self.foreign_replies:
             notes.append(
                 f"{self.foreign_replies} réponse(s) sans requête correspondante dans cette "
@@ -223,7 +236,13 @@ class SerialDevice:
         with self._lock:
             return self._serial is not None and bool(getattr(self._serial, "is_open", True))
 
-    def connect(self) -> DeviceStatus:
+    def connect(self, *, reset_board: bool = False) -> DeviceStatus:
+        """Ouvre le port puis vérifie PING.
+
+        ``reset_board`` envoie une impulsion DTR : avec le cavalier JP2, elle
+        réinitialise la logique du FPGA (file de réponses, émission en cours)
+        sans recharger le firmware. Sans JP2, elle est sans effet.
+        """
         with self._lock:
             if self.connected:
                 return self.ping()
@@ -260,6 +279,13 @@ class SerialDevice:
                 self._serial.open()
                 self._decoder = PacketDecoder()
                 self._reset_link_statistics()
+                if reset_board:
+                    self._serial.dtr = True
+                    time.sleep(0.05)
+                    self._serial.dtr = False
+                    # PLL verrouillée et reset synchronisé bien avant 250 ms.
+                    time.sleep(0.25)
+                    self.board_reset = True
                 if hasattr(self._serial, "reset_input_buffer"):
                     self._serial.reset_input_buffer()
                 self._drain_stale(self.open_settle)
@@ -455,6 +481,7 @@ class SerialDevice:
                                     )
                                 continue
                             self.foreign_replies += 1
+                            self.foreign_offsets.append((packet.sequence - sequence) & 0xFF)
                             if len(unmatched_sample) < 4:
                                 unmatched_sample.append(
                                     f"op 0x{packet.opcode:02X} "
@@ -567,7 +594,7 @@ class DemoDevice:
         with self._lock:
             return self._connected
 
-    def connect(self) -> DeviceStatus:
+    def connect(self, *, reset_board: bool = False) -> DeviceStatus:
         with self._lock:
             self._connected = True
             return self._snapshot()
