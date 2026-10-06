@@ -144,8 +144,13 @@ def screen_shapes(
     width: float,
     height: float = SCREEN_HEIGHT,
     labels: dict[int, str] | None = None,
+    stamp: str | None = None,
 ) -> list[Any]:
-    """Grille, traces, repères de masse et de déclenchement, sans les curseurs."""
+    """Grille, traces, repères de masse et de déclenchement, sans les curseurs.
+
+    ``stamp`` (numéro et heure de l'acquisition) est écrit dans l'écran : il
+    montre que le dessin affiché est bien celui de la dernière acquisition.
+    """
     labels = labels or {}
     left, right = MARGIN_X, width - MARGIN_X
     top, bottom = MARGIN_TOP, height - MARGIN_BOTTOM
@@ -248,13 +253,18 @@ def screen_shapes(
         for trace in acquisition.traces:
             if not settings.channel(trace.channel).enabled or not trace.times:
                 continue
+            # Un point non fini rendrait le message Flet invalide (NaN en JSON) et
+            # figerait le canevas : il est écarté.
             points = [
                 (
                     clamp(x_of(time), left, right),
                     clamp(y_of(volts, trace.channel), top, bottom),
                 )
                 for time, volts in zip(trace.times, trace.volts, strict=False)
+                if math.isfinite(time) and math.isfinite(volts)
             ]
+            if not points:
+                continue
             points = _decimate(points, plot_width)
             elements = [cv.Path.MoveTo(*points[0])]
             elements.extend(cv.Path.LineTo(*point) for point in points[1:])
@@ -296,6 +306,17 @@ def screen_shapes(
             alignment=ft.alignment.center_left,
         )
     )
+    if stamp:
+        shapes.append(
+            cv.Text(
+                right - 4,
+                bottom - 4,
+                stamp,
+                style=small,
+                alignment=ft.alignment.bottom_right,
+                data="stamp",
+            )
+        )
     trigger_x = x_of(0.0)
     if left <= trigger_x <= right:
         shapes.append(
@@ -385,6 +406,7 @@ class ScopePanel:
         # Réglages en cours d'envoi : une acquisition lancée avant eux ne les écrase pas.
         self.applying = 0
         self.count = 0
+        self.acquired_at: datetime | None = None
         self.width = 900.0
         self.io_lock = asyncio.Lock()
         self.run_task: asyncio.Task[None] | None = None
@@ -1044,8 +1066,17 @@ class ScopePanel:
         # Les mêmes objets pour la grille et les traces : Flet n'envoie alors que
         # les curseurs modifiés, ce qui garde le glisser fluide.
         if not cursors_only or not self._screen:
+            stamp = (
+                f"Acq. {self.count} · {self.acquired_at:%H:%M:%S}"
+                if self.acquisition is not None and self.acquired_at is not None
+                else None
+            )
             self._screen = screen_shapes(
-                self.acquisition, self._display_settings(), self.width, labels=self._labels()
+                self.acquisition,
+                self._display_settings(),
+                self.width,
+                labels=self._labels(),
+                stamp=stamp,
             )
         self.canvas.shapes = self._screen + cursor_shapes(self.cursors, self.width)
         self.cursor_text.value = cursor_readout(self.cursors, self._display_settings())
@@ -1428,6 +1459,7 @@ class ScopePanel:
         self.acquisition_kind = self.source.value
         self.acquisition_expected_clock_hz = expected_clock_hz
         self.count += 1
+        self.acquired_at = datetime.now()
         if acquisition.settings != self.settings and not self.applying and not self.pending:
             # Réglages modifiés sur la face avant : l'écran suit l'appareil.
             self.settings = acquisition.settings

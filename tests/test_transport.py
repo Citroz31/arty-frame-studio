@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from arty_frame_studio.model import FrameConfig
-from arty_frame_studio.protocol import Opcode, PacketDecoder, StatusCode
+from arty_frame_studio.protocol import Opcode, Packet, PacketDecoder, StatusCode
 from arty_frame_studio.transport import (
     CONNECT_PING_ATTEMPTS,
     CommandTimeout,
@@ -610,3 +610,111 @@ def test_free_clock_requires_revision_four_before_writing():
     demo = DemoDevice()
     demo.connect()
     assert demo.identify().free_clock and demo.send(free).busy
+
+
+class SlowSerial(FakeSerial):
+    """Réponses livrées ``delay`` secondes après la requête, comme une liaison lente."""
+
+    def __init__(self, delay, handler=None, preload=b"", lag_by_one=False):
+        super().__init__(handler)
+        self.delay = delay
+        self.lag_by_one = lag_by_one
+        self.pending = []  # (instant de livraison, octets)
+        self.held = b""
+        self.preload = preload
+
+    def open(self):
+        super().open()
+        # Restes d'une session précédente, livrés juste après la purge.
+        if self.preload:
+            self.pending.append((time.monotonic() + 0.002, self.preload))
+
+    def _release(self):
+        now = time.monotonic()
+        for item in [item for item in self.pending if item[0] <= now]:
+            self.pending.remove(item)
+            self._receive.extend(item[1])
+
+    @property
+    def in_waiting(self):
+        self._release()
+        return len(self._receive)
+
+    def write(self, data):
+        packet = PacketDecoder().feed(data)[0]
+        self.requests.append(packet)
+        reply = self.handler(packet)
+        if self.lag_by_one:
+            # La réponse précédente ne sort qu'à l'arrivée de la requête suivante.
+            reply, self.held = self.held, reply
+        self.pending.append((time.monotonic() + self.delay, reply))
+        return len(data)
+
+    def read(self, count):
+        self._release()
+        return super().read(count)
+
+
+def slow_device(endpoint, timeout=0.05, open_settle=0.0):
+    return SerialDevice(
+        "/dev/ttyUSB1",
+        timeout=timeout,
+        open_settle=open_settle,
+        serial_factory=lambda **kwargs: endpoint,
+    )
+
+
+def test_slow_replies_are_measured_and_waited_for_without_relaxing_correlation():
+    # Retour d'essai : chaque réponse arrivait pendant la requête suivante.
+    endpoint = SlowSerial(delay=0.08)
+    device = slow_device(endpoint)
+    assert device.connect().ok
+    # Le PING séquence 0 a répondu en retard pendant la seconde tentative ;
+    # l'attente allongée a reçu la réponse exacte au PING séquence 1.
+    assert [packet.sequence for packet in endpoint.requests] == [0, 1]
+    assert device.late_replies == 1
+    assert 0.07 < device.reply_delay < 0.2
+    assert device.effective_timeout > device.timeout
+    # Les requêtes suivantes attendent d'emblée assez longtemps.
+    assert device.status().ok and device.late_replies == 1
+    notes = device.link_notes()
+    assert notes and "en retard" in notes[0] and "Latency Timer" in notes[0]
+    device.close()
+
+
+def test_reply_released_only_by_the_next_request_is_diagnosed():
+    endpoint = SlowSerial(delay=0.0, lag_by_one=True)
+    device = slow_device(endpoint)
+    with pytest.raises(CommandTimeout) as caught:
+        device.connect()
+    message = str(caught.value)
+    assert "Réponse(s) tardive(s)" in message
+    assert "PING séquence 0" in message and "après l'envoi de PING séquence 1" in message
+    assert device.late_replies == 1 and not device.connected
+
+
+def test_leftover_replies_after_opening_are_drained_and_reported():
+    leftover = response(Packet(1, Opcode.INFO, 1, b""), opcode=0x86, sequence=1)
+    endpoint = SlowSerial(delay=0.0, preload=leftover)
+    device = slow_device(endpoint, open_settle=0.03)
+    assert device.connect().ok
+    assert device.stale_at_open == 1 and device.foreign_replies == 0
+    assert "session précédente" in " ".join(device.link_notes())
+    device.close()
+
+
+def test_opening_drain_is_bounded_when_the_port_keeps_talking():
+    class Chatty(FakeSerial):
+        @property
+        def in_waiting(self):
+            return 64
+
+        def read(self, count):
+            return b"*" * count  # texte d'une autre démo, sans fin
+
+    endpoint = Chatty()
+    device = slow_device(endpoint, open_settle=0.02)
+    device._serial = endpoint
+    started = time.monotonic()
+    device._drain_stale(0.02)
+    assert time.monotonic() - started < 0.5 and device.stale_at_open == 0

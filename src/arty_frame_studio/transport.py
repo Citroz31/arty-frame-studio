@@ -111,6 +111,20 @@ _REPEATABLE = (Opcode.PING, Opcode.STATUS, Opcode.LED, Opcode.INFO)
 LEGACY_FIRMWARE = FirmwareInfo(revision=1, core_hz=REFERENCE_HZ, capabilities=0, build_id=0)
 CONNECT_PING_ATTEMPTS = 2
 STATUS_ATTEMPTS = 2
+# Une réponse plus lente que le délai arrive pendant la requête suivante. Elle
+# est reconnue (opcode et séquence d'une requête déjà envoyée dans la session)
+# pour mesurer le retard et allonger l'attente des requêtes suivantes ; elle
+# n'est jamais acceptée à la place de la réponse attendue.
+LATE_REPLY_MARGIN = 1.5
+MAX_ADAPTIVE_TIMEOUT = 5.0
+_SENT_HISTORY = 32
+
+
+def _opcode_name(value: int) -> str:
+    try:
+        return Opcode(value & 0x7F).name
+    except ValueError:
+        return f"0x{value:02X}"
 
 
 class SerialDevice:
@@ -148,8 +162,61 @@ class SerialDevice:
         self._lock = threading.RLock()
         self._decoder = PacketDecoder()
         self._sequence = 0
+        self._reset_link_statistics()
         # Lu par info() ; SEND refuse une trame calculée pour une autre horloge.
         self.firmware: FirmwareInfo | None = None
+
+    def _reset_link_statistics(self) -> None:
+        # Requêtes de la session sans réponse : séquence -> (opcode, instant d'envoi).
+        self._sent: dict[int, tuple[int, float]] = {}
+        self.reply_delay: float | None = None
+        self.late_replies = 0
+        # Réponses tardives sorties dès l'envoi de la requête suivante.
+        self.released_by_next = 0
+        self.foreign_replies = 0
+        self.stale_at_open = 0
+        self.last_round_trip: float | None = None
+
+    @property
+    def effective_timeout(self) -> float:
+        """Délai par requête, allongé si la session a déjà reçu des réponses tardives."""
+        if self.reply_delay is None:
+            return self.timeout
+        return min(
+            MAX_ADAPTIVE_TIMEOUT,
+            max(self.timeout, LATE_REPLY_MARGIN * self.reply_delay + 0.2),
+        )
+
+    def link_notes(self) -> list[str]:
+        """Constats sur la liaison à reporter dans le journal."""
+        notes = []
+        if self.reply_delay is not None:
+            notes.append(
+                f"Réponses de la carte en retard : jusqu'à {self.reply_delay * 1000:.0f} ms "
+                f"pour {self.timeout * 1000:.0f} ms prévus ({self.late_replies} réponse(s) "
+                f"tardive(s)). Attente portée à {self.effective_timeout * 1000:.0f} ms. "
+                "Une carte saine répond en quelques millisecondes : fermer les logiciels "
+                "qui surveillent les ports série (Keysight Connection Expert, terminaux), "
+                "vérifier le Latency Timer du port FTDI (16 ms par défaut) et le câble USB."
+            )
+        if self.released_by_next and self.released_by_next == self.late_replies:
+            notes.append(
+                "Chaque réponse tardive est arrivée dès l'envoi de la requête suivante : "
+                "la carte semble rendre la réponse précédente avec une requête de retard. "
+                "Recharger le firmware vérifié, puis lancer arty-frame diagnose --port "
+                "<COM> --timeout 3 et conserver sa sortie."
+            )
+        if self.stale_at_open:
+            notes.append(
+                f"{self.stale_at_open} paquet(s) d'une session précédente ignoré(s) à "
+                "l'ouverture du port : des réponses étaient restées dans le convertisseur USB."
+            )
+        if self.foreign_replies:
+            notes.append(
+                f"{self.foreign_replies} réponse(s) sans requête correspondante dans cette "
+                "session : reste d'une session précédente ou autre logiciel sur le port."
+            )
+        return notes
 
     @property
     def connected(self) -> bool:
@@ -192,10 +259,10 @@ class SerialDevice:
                 self._serial.port = self.port
                 self._serial.open()
                 self._decoder = PacketDecoder()
-                if self.open_settle:
-                    time.sleep(self.open_settle)
+                self._reset_link_statistics()
                 if hasattr(self._serial, "reset_input_buffer"):
                     self._serial.reset_input_buffer()
+                self._drain_stale(self.open_settle)
                 return self._exchange(Opcode.PING, attempts=CONNECT_PING_ATTEMPTS)
             except Exception as exc:
                 self.close()
@@ -206,6 +273,24 @@ class SerialDevice:
                     " Fermez les autres logiciels utilisant ce port, puis vérifiez"
                     " son nom et le pilote USB série dans le Gestionnaire de périphériques."
                 ) from exc
+
+    def _drain_stale(self, duration: float) -> None:
+        """Jette ce qui arrive juste après l'ouverture : réponses d'une session close.
+
+        Le convertisseur USB peut livrer après la purge des réponses arrivées
+        pendant que le port était fermé ; elles décaleraient le premier PING.
+        """
+        deadline = time.monotonic() + duration
+        decoder = PacketDecoder()
+        while True:
+            available = int(getattr(self._serial, "in_waiting", 0))
+            if available:
+                self.stale_at_open += len(decoder.feed(self._serial.read(min(available, 256))))
+            # Borné même si des octets arrivent sans arrêt (autre firmware bavard).
+            if time.monotonic() >= deadline:
+                break
+            if not available:
+                time.sleep(min(0.005, max(0.0, deadline - time.monotonic())))
 
     def ping(self) -> DeviceStatus:
         return self._exchange(Opcode.PING)
@@ -320,8 +405,9 @@ class SerialDevice:
             self._sequence = (sequence + 1) & 0xFF
             crc_errors_before = self._decoder.crc_errors
             length_errors_before = self._decoder.length_errors
-            unmatched = 0
             unmatched_sample: list[str] = []
+            late_sample: list[str] = []
+            timeout = self.effective_timeout
             received_bytes = 0
             received_sample = bytearray()
             try:
@@ -331,7 +417,12 @@ class SerialDevice:
                         "La commande UART n'a pas été transmise entièrement."
                         " Vérifiez l'état de la carte avant de la renvoyer."
                     )
-                deadline = time.monotonic() + self.timeout
+                sent_at = time.monotonic()
+                self._sent.pop(sequence, None)
+                self._sent[sequence] = (int(opcode), sent_at)
+                while len(self._sent) > _SENT_HISTORY:
+                    self._sent.pop(next(iter(self._sent)))
+                deadline = sent_at + timeout
                 while time.monotonic() < deadline:
                     available = int(getattr(self._serial, "in_waiting", 0))
                     data = self._serial.read(max(1, min(available, 256)))
@@ -339,17 +430,40 @@ class SerialDevice:
                     received_sample.extend(data[: max(0, 32 - len(received_sample))])
                     for packet in self._decoder.feed(data):
                         if packet.sequence != sequence or packet.opcode != (0x80 | opcode):
-                            unmatched += 1
+                            now = time.monotonic()
+                            earlier = self._sent.get(packet.sequence)
+                            if (
+                                packet.sequence != sequence
+                                and earlier is not None
+                                and packet.opcode == 0x80 | earlier[0]
+                            ):
+                                # Réponse d'une requête précédente de cette session.
+                                delay = now - earlier[1]
+                                del self._sent[packet.sequence]
+                                self.late_replies += 1
+                                if now - sent_at < 0.03:
+                                    self.released_by_next += 1
+                                self.reply_delay = max(self.reply_delay or 0.0, delay)
+                                # La réponse attendue sera sans doute aussi tardive.
+                                deadline = max(deadline, sent_at + self.effective_timeout)
+                                if len(late_sample) < 4:
+                                    late_sample.append(
+                                        f"{_opcode_name(packet.opcode)} séquence "
+                                        f"{packet.sequence} après {delay * 1000:.0f} ms "
+                                        f"({(now - sent_at) * 1000:.0f} ms après l'envoi de "
+                                        f"{opcode.name} séquence {sequence})"
+                                    )
+                                continue
+                            self.foreign_replies += 1
                             if len(unmatched_sample) < 4:
-                                try:
-                                    response_name = Opcode(packet.opcode & 0x7F).name
-                                except ValueError:
-                                    response_name = "inconnu"
                                 unmatched_sample.append(
-                                    f"op 0x{packet.opcode:02X} ({response_name}), "
+                                    f"op 0x{packet.opcode:02X} "
+                                    f"({_opcode_name(packet.opcode)}), "
                                     f"séquence {packet.sequence}"
                                 )
                             continue
+                        self._sent.pop(sequence, None)
+                        self.last_round_trip = time.monotonic() - sent_at
                         try:
                             status = decode_response(packet)
                         except ProtocolError as exc:
@@ -375,10 +489,15 @@ class SerialDevice:
                 details += " Des réponses avec un CRC invalide ont été ignorées."
             if self._decoder.length_errors > length_errors_before:
                 details += " Des paquets avec une longueur invalide ont été ignorés."
-            if unmatched:
+            if late_sample:
                 details += (
-                    " Des réponses ne correspondant pas à la commande ont été ignorées"
-                    f" ({unmatched} paquet(s)) : {' ; '.join(unmatched_sample)}."
+                    " Réponse(s) tardive(s) à une requête précédente, ignorée(s) : "
+                    f"{' ; '.join(late_sample)}. La carte répond, mais au-delà du délai."
+                )
+            if unmatched_sample:
+                details += (
+                    " Des réponses ne correspondant pas à la commande ni à une requête en"
+                    f" attente de cette session ont été ignorées : {' ; '.join(unmatched_sample)}."
                 )
             raise CommandTimeout(
                 opcode,
