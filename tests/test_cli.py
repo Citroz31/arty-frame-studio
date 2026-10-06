@@ -551,3 +551,69 @@ def test_cli_unmonitored_hardware_continues_after_the_port_is_closed(
     assert main(["send", "--profile", str(profile), "--port", "COM7"]) == 0
     assert calls == ["send", "close"]
     assert "commande stop" in capsys.readouterr().err
+
+
+def _profile(tmp_path: Path) -> Path:
+    path = tmp_path / "frame.json"
+    assert main(["profile", str(path)]) == 0
+    return path
+
+
+def test_sweep_sends_counter_words_and_writes_the_csv(tmp_path: Path, capsys) -> None:
+    out = tmp_path / "result.csv"
+    arguments = [
+        "sweep", "--demo", "--profile", str(_profile(tmp_path)), "--base", "dec",
+        "--counter", "0", "3", "--width", "8", "--settle-ms", "0", "--output", str(out),
+    ]  # fmt: skip
+    capsys.readouterr()
+    assert main(arguments) == 0
+    text = capsys.readouterr().out
+    assert "4 mot(s) de 8 bits · 00000000 → 00000011" in text and "finished · 4 OK" in text
+    rows = out.read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 5 and rows[1].split(",")[1] == "00000000"
+
+
+def test_sweep_reads_a_simulated_vna_and_fails_outside_the_limits(tmp_path: Path, capsys) -> None:
+    words = tmp_path / "words.txt"
+    words.write_text("000000\n000100\n001000\n", encoding="utf-8")  # 6-digit words: width 6
+    arguments = [
+        "sweep", "--demo", "--profile", str(_profile(tmp_path)), "--words", str(words),
+        "--probe", "scpi", "--scpi-demo", "--scpi-trigger", "INITiate:IMMediate;*OPC?",
+        "--scpi-read", "CALCulate:MARKer1:Y?", "--scpi-labels", "S21 (dB)", "--min", "-3",
+    ]  # fmt: skip
+    capsys.readouterr()
+    assert main(arguments) == 1  # one word out of limits
+    text = capsys.readouterr().out
+    assert "3 mot(s) de 6 bits" in text and "SIMULATED VNA" in text
+    assert "S21 (dB) -3.5000" in text and "Échec" in text and "2 OK · 1 échec(s)" in text
+    assert main([*arguments, "--stop-on-fail"]) == 1
+    assert "fail ·" in capsys.readouterr().out
+
+
+def test_sweep_manual_validation_prompts_for_each_word(tmp_path: Path, monkeypatch, capsys) -> None:
+    answers = iter(["", "x", "-2,5"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    arguments = [
+        "sweep", "--demo", "--profile", str(_profile(tmp_path)), "--walking-one", "--width", "3",
+        "--probe", "manual", "--settle-ms", "0",
+    ]  # fmt: skip
+    capsys.readouterr()
+    assert main(arguments) == 1
+    text = capsys.readouterr().out
+    assert "3 mot(s) de 3 bits · 001 → 100" in text
+    assert "Échec" in text and "valeur relevée -2.5000" in text and "2 OK · 1 échec(s)" in text
+
+
+def test_sweep_refuses_incomplete_options_before_touching_hardware(tmp_path: Path, capsys) -> None:
+    profile = str(_profile(tmp_path))
+    base = ["sweep", "--demo", "--profile", profile, "--walking-one"]
+    assert main([*base, "--probe", "scpi"]) == 1
+    assert "--scpi-lan, --scpi-visa ou --scpi-demo" in capsys.readouterr().err
+    assert main([*base, "--probe", "scpi", "--scpi-demo"]) == 1
+    assert "au moins un --scpi-read" in capsys.readouterr().err
+    assert main([*base, "--probe", "scope"]) == 1
+    assert "--scope-lan ou --scope-visa" in capsys.readouterr().err
+    assert main([*base, "--repeats", "0"]) == 1
+    assert "--repeats" in capsys.readouterr().err
+    assert main(["sweep", "--demo", "--profile", profile, "--counter", "0", "9"]) == 1
+    assert "Mot invalide" in capsys.readouterr().err

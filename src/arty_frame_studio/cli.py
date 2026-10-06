@@ -31,6 +31,7 @@ from .scope import (
 )
 from .scope_sim import SimulatedKeysight, signal_source
 from .simulation import export_csv, export_vcd, simulate, waveform_svg
+from .sweep_cli import add_sweep_parser, run_sweep
 from .toolchain import Toolchain, ToolchainConfig
 from .transport import (
     DemoDevice,
@@ -199,6 +200,7 @@ def _parser() -> argparse.ArgumentParser:
     scope.add_argument("--csv", type=Path, help="Exporter les points de l'acquisition")
     scope.add_argument("--png", type=Path, help="Copie d'écran de l'oscilloscope réel")
     commands.add_parser("scope-list", help="Lister les instruments VISA (USB et LAN)")
+    add_sweep_parser(commands)
     install = commands.add_parser(
         "install-fpga-tools", help="Installer les outils FPGA portables Windows sans WSL"
     )
@@ -305,6 +307,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{port.device}\t{port.description}\t{port.hwid}")
         elif args.command == "scope":
             return _scope(args)
+        elif args.command == "sweep":
+            return run_sweep(args)
         elif args.command == "scope-list":
             resources = list_visa_resources()
             for resource in resources:

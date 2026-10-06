@@ -407,6 +407,7 @@ class ScopePanel:
         self.applying = 0
         self.count = 0
         self.acquired_at: datetime | None = None
+        self.sweep_locked = False
         self.width = 900.0
         self.io_lock = asyncio.Lock()
         self.run_task: asyncio.Task[None] | None = None
@@ -992,6 +993,19 @@ class ScopePanel:
         for name, slider in self.sliders.items():
             slider.disabled = not (self.cursors.time if name.startswith("x") else self.cursors.volt)
         self.snap_button.disabled = self.acquisition is None
+        if self.sweep_locked:
+            # Le mode mesure pilote l'oscilloscope : pas de réglage concurrent.
+            for control in (
+                self.connect_button,
+                self.single_button,
+                self.autoscale_button,
+                self.preset_button,
+                self.read_button,
+                self.run_button,
+                self.screenshot_button,
+                *controls,
+            ):
+                control.disabled = True
 
     def _show_settings(self, settings: ScopeSettings) -> None:
         """Recopie les réglages (relus de l'appareil) dans les contrôles."""
@@ -1813,6 +1827,27 @@ class ScopePanel:
         self.export_note.value = f"Écran actuel de l'appareil (distinct des points CSV) : {path}"
         self._log(self.export_note.value, GREEN)
         self._update()
+
+    # -- mode mesure ---------------------------------------------------------------
+    @property
+    def connected(self) -> bool:
+        return self.scope is not None
+
+    def set_sweep_locked(self, locked: bool) -> None:
+        self.sweep_locked = locked
+        self._sync()
+        self._update()
+
+    async def acquire_for_sweep(self) -> Acquisition:
+        """Une nouvelle acquisition pour le mode mesure ; l'écran de l'onglet la suit."""
+        if self.scope is None:
+            raise ScopeError("Oscilloscope non connecté : le connecter dans l'onglet Oscilloscope.")
+        await self._stop_run()
+        before = self.count
+        await self._acquire()
+        if self.count == before or self.acquisition is None:
+            raise ScopeError(self.status.value or "Acquisition impossible.")
+        return self.acquisition
 
     async def shutdown(self) -> None:
         self.closing = True

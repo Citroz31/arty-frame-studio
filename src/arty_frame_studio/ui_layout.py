@@ -425,6 +425,7 @@ def build_layout(s: Studio) -> ft.Control:
             ft.Tab(text="Pilotage", icon=ft.Icons.TUNE, content=control_tab),
             ft.Tab(text="Chronogramme", icon=ft.Icons.SHOW_CHART, content=waveform_tab),
             ft.Tab(text="Oscilloscope", icon=ft.Icons.MONITOR_HEART, content=s.scope_panel.build()),
+            ft.Tab(text="Mesure", icon=ft.Icons.QUERY_STATS, content=s.measure_panel.build()),
             ft.Tab(text="FPGA", icon=ft.Icons.MEMORY, content=fpga_tab),
             ft.Tab(text="Journal", icon=ft.Icons.TERMINAL, content=journal_tab),
         ],

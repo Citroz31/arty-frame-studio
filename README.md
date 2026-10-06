@@ -31,6 +31,12 @@ perte de synchronisation SCPI, l'application demande une reconnexion plutôt
 que de réutiliser une réponse tardive. Voir la
 [revue du journal et de l'oscilloscope](docs/review-oscilloscope.md).
 
+L'onglet **[Mesure](docs/mode-mesure.md)** envoie une **suite de mots**
+(liste, compteur, un seul bit qui parcourt le mot) et **attend une validation
+après chacun** : opérateur, oscilloscope Keysight ou instrument SCPI (VNA…). Les
+valeurs, avec critères de réussite, graphique et export CSV, caractérisent un
+composant à commande série.
+
 Le [récapitulatif des apports de Claude](docs/recapitulatif-claude.md) liste
 chaque commit et ce qu'il apporte.
 
@@ -271,6 +277,8 @@ arty-frame stop --port /dev/ttyUSB1
 arty-frame doctor --toolchain toolchain.json
 arty-frame build --toolchain toolchain.json --firmware-config fw.json
 arty-frame program --toolchain toolchain.json
+arty-frame sweep --demo --profile examples/frame_sipo_8bits_10mhz.json --base dec \
+    --counter 0 255 --width 8 --probe scpi --scpi-demo --scpi-read "CALCulate:MARKer1:Y?"
 arty-frame scope-list
 arty-frame scope --lan 192.168.1.50 --preset --csv exports/mesure.csv
 arty-frame scope --demo --profile examples/frame_sipo_8bits_10mhz.json

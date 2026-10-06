@@ -60,6 +60,7 @@ def test_controls_construct_and_draw_chronogramme(tmp_path):
         "Pilotage",
         "Chronogramme",
         "Oscilloscope",
+        "Mesure",
         "FPGA",
         "Journal",
     ]

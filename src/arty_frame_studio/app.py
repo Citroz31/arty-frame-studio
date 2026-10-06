@@ -10,6 +10,7 @@ import asyncio
 import json
 import math
 import os
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime
@@ -28,6 +29,7 @@ from .firmware_config import (
     pll_settings,
 )
 from .local_tools import ensure_local_toolchain
+from .measure_view import MeasurePanel
 from .model import (
     CONTINUOUS,
     MAX_BITS,
@@ -48,10 +50,18 @@ from .prebuilt import validate_programming_image
 from .preparation import prepare_firmware
 from .protocol import DeviceStatus, FirmwareInfo, Opcode
 from .remote_build import GitHubBuildClient, RemoteBuildTarget
+from .scope import Acquisition
 from .scope_view import ScopePanel
 from .simulation import Waveform, export_csv, export_vcd, simulate, waveform_svg
 from .toolchain import Toolchain, ToolchainConfig
-from .transport import CommandTimeout, DemoDevice, SerialDevice, list_ports, run_led_test
+from .transport import (
+    CommandTimeout,
+    DemoDevice,
+    SerialDevice,
+    TransportError,
+    list_ports,
+    run_led_test,
+)
 from .ui_layout import (
     AMBER,
     BG,
@@ -340,6 +350,15 @@ class Studio:
             project_root=self.project_root,
             log=self._log,
             frame_source=lambda: self.current_config,
+        )
+        # Onglet Mesure : une suite de mots, chacun suivi d'une validation.
+        self.sweep_active = False
+        self.measure_panel = MeasurePanel(
+            page,
+            project_root=self.project_root,
+            log=self._log,
+            frame_source=lambda: self.current_config,
+            bench=self,
         )
 
     def _field(
@@ -746,7 +765,7 @@ class Studio:
         return build_layout(self)
 
     def _open_fpga(self, _: Any = None) -> None:
-        self.tabs.selected_index = 3
+        self.tabs.selected_index = 4
         self._update()
 
     def _open_control(self, _: Any = None) -> None:
@@ -1077,6 +1096,7 @@ class Studio:
             or self.serial_pending
             or self.programming_pending
             or self.command_uncertain
+            or self.sweep_active
             or bool(missing_modes)
         )
         self.send_button.text = (
@@ -1106,7 +1126,9 @@ class Studio:
             self.emission_note.color = MUTED
         self.stop_button.disabled = not connected or self.serial_pending or self.programming_pending
         self.simulate_button.disabled = self.current_config is None
-        self.connect_button.disabled = self.serial_pending or self.programming_pending
+        self.connect_button.disabled = (
+            self.serial_pending or self.programming_pending or self.sweep_active
+        )
         self.reset_connect_button.visible = self.mode.value == "uart" and not connected
         self.reset_connect_button.disabled = self.serial_pending or self.programming_pending
         self.connect_button.text = "Déconnecter" if connected else "Connecter"
@@ -1521,8 +1543,57 @@ class Studio:
             self.hardware_status.value = "État inconnu · STOP ou reconnexion requis"
             self._log(f"Lecture de STATUS impossible : {status_error}", RED)
 
+    # -- mode mesure : ce que l'onglet Mesure demande à l'application ---------------
+    def device_ready(self) -> bool:
+        return bool(self.device is not None and self.device.connected)
+
+    def scope_ready(self) -> bool:
+        return self.scope_panel.connected
+
+    def set_busy(self, busy: bool) -> None:
+        """Verrouille l'envoi manuel, la connexion et l'oscilloscope pendant un balayage."""
+        self.sweep_active = busy
+        self.scope_panel.set_sweep_locked(busy)
+        self._buttons()
+        self._update()
+
+    async def acquire_scope(self) -> Acquisition:
+        return await self.scope_panel.acquire_for_sweep()
+
+    async def send_word(self, config: FrameConfig) -> None:
+        """Envoie une trame et attend sa fin ; toute anomalie lève une exception."""
+        if self.command_uncertain:
+            raise TransportError(
+                "Une commande précédente n'est pas confirmée : STOP ou reconnexion requis."
+            )
+        async with self.serial_lock:
+            if self.device is None or not self.device.connected:
+                raise TransportError("La carte n'est plus connectée.")
+            try:
+                status = await asyncio.to_thread(self.device.send, config)
+            except CommandTimeout as exc:
+                await self._recover_command_timeout(exc)
+                raise
+            self.last_sent = config
+        duration = config.frame_duration_ns / 1e9 * max(1, config.repeat_count)
+        deadline = time.monotonic() + duration + 2.0
+        while status.busy:
+            if time.monotonic() > deadline:
+                raise TransportError("La carte n'a pas terminé la trame dans le délai prévu.")
+            await asyncio.sleep(min(0.05, max(0.002, duration / 4)))
+            async with self.serial_lock:
+                if self.device is None or not self.device.connected:
+                    raise TransportError("La carte n'est plus connectée.")
+                status = await asyncio.to_thread(self.device.status)
+        self._status_received(status)
+
     async def _send(self, _: Any) -> None:
-        if self.serial_pending or self.programming_pending or self.command_uncertain:
+        if (
+            self.serial_pending
+            or self.programming_pending
+            or self.command_uncertain
+            or self.sweep_active
+        ):
             return
         try:
             config = self._config()
@@ -2228,7 +2299,11 @@ class Studio:
         # Each instrument must release its connection even if the other fails.
         # ScopePanel waits for any active SCPI exchange before closing it.
         try:
-            await self.scope_panel.shutdown()
+            try:
+                # Arrête d'abord un balayage en cours : il utilise la carte et l'oscilloscope.
+                await self.measure_panel.shutdown()
+            finally:
+                await self.scope_panel.shutdown()
         finally:
             async with self.serial_lock:
                 device, self.device = self.device, None

@@ -442,6 +442,11 @@ même dans sa version 200 MHz. Le détail des limites, des références Keysight
 des exports et de la ligne de commande figure dans
 [Oscilloscope](oscilloscope.md).
 
+**Plusieurs mots à la suite.** L'onglet **Mesure** envoie `00000000`, `00000001`,
+`00000010`… et attend, après chacun, votre validation, une mesure de l'oscilloscope
+ou la lecture d'un instrument SCPI (par exemple un VNA). Voir
+[Mode mesure](mode-mesure.md).
+
 ## 9. Résoudre les difficultés fréquentes
 
 | Observation | Action suivante |
@@ -470,6 +475,7 @@ du chargement et des signaux sur votre carte.
 
 - [Guide Windows et diagnostics détaillés](windows.md)
 - [Oscilloscope : mesures, déclenchement, curseurs](oscilloscope.md)
+- [Mode mesure : suite de mots et validation après chacun](mode-mesure.md)
 - [Brochage et caractéristiques électriques](hardware.md)
 - [Compilation d'un firmware personnalisé](toolchain.md)
 - [Format des commandes UART](protocol.md)
