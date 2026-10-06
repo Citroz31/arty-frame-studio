@@ -99,7 +99,7 @@ Fusionné dans `main` par la pull request [#2](https://github.com/Citroz31/arty-
   phase pendant les bits.
 - **Timing** : quatre chemins critiques enregistrés (entrées ODDR, commande
   LED, place libre de la file de réponses, dernière trame). Fmax routée
-  actuelle : 210,79 MHz pour 200 MHz exigés.
+  actuelle : 211,82 MHz pour 200 MHz exigés (révision 5, graine 1).
 
 ### Application (Python)
 
@@ -127,11 +127,26 @@ Fusionné dans `main` par la pull request [#2](https://github.com/Citroz31/arty-
 
 | Niveau | Résultat sur le dernier commit de code (`d54f494`) |
 | --- | --- |
-| Tests Python | 644 tests, CI verte sous Linux et Windows natif ; Ruff et mypy |
+| Tests Python | 1 026 tests (CI Linux et Windows natif, job de publication) ; Ruff et mypy |
 | Bancs RTL | 6 bancs Icarus : moteur (≈ 2 millions de contrôles par demi-tick), ODDR, protocole, SIPO, carte complète par l'UART, UART à 200 MHz |
-| Compilation réelle | Firmware révision 4 : 210,79 MHz routés pour 200 MHz exigés |
-| Carte réelle | Retour utilisateur : chargement SRAM sous Windows, firmware révision 4, test LED et DATA à 10 MHz sur JB1 observée au DSOX1202A |
+| Compilation réelle | Firmware révision 5 (broche TR) : 211,82 MHz routés pour 200 MHz exigés |
+| Carte réelle | Retour utilisateur (révision 4) : chargement SRAM sous Windows, test LED et DATA à 10 MHz sur JB1 observée au DSOX1202A. Révision 5 et TR : à essayer |
+| VNA | Pilote PNA, liste d'états et Touchstone vérifiés contre un VNA simulé ; **à essayer sur le N5245B et le P9374A** |
 | Oscilloscope | Pilote validé avec l'oscilloscope simulé et des liaisons LAN/VISA simulées ; **à essayer sur le DSOX1202A** |
+
+## Mode mesure, mode VNA et broche TR (6 octobre)
+
+| Commit | Apport |
+| --- | --- |
+| [`eba8846`](https://github.com/Citroz31/arty-frame-studio/commit/eba88466896c2ef88ecee5842398664ff1a6eb42) | Chargement JTAG à 6 MHz par défaut, repli à 1 MHz si l'IDCODE ne se lit pas |
+| [`d1053d1`](https://github.com/Citroz31/arty-frame-studio/commit/d1053d15147438a97943b0716be8bda10718e563) | Onglet Mesure et `arty-frame sweep` : suite de mots, validation après chacun (opérateur, oscilloscope, instrument SCPI) |
+| `9d40ebf` | Mode VNA : liste d'états `mot ; TR ; nom`, canal et ports, un fichier Touchstone par état, détection du VNA, VNA simulé ; opcode TR côté application |
+| `06aab96` | Broche TR (firmware révision 5) : RTL, bancs, `tr_pin` dans la configuration du firmware, interrupteur Pilotage, `arty-frame tr` |
+| `d40072b` | Un balayage VNA abandonné se termine avant tout autre échange avec l'appareil |
+| `d0b3c13` | Banc de carte : le compteur de trames périmé après un STOP n'est plus comparé à zéro |
+| `4f4b200` | Firmware de référence révision 5 republié par le workflow (211,82 MHz) |
+
+Voir [le mode mesure](mode-mesure.md) et [le mode VNA](mode-vna.md).
 
 ## Revues des mises à jour de Codex
 

@@ -1,18 +1,28 @@
 # Vérifications réalisées et limites
 
-Le firmware précompilé, révision 4 du protocole (LED, INFO, émission
-continue et CLK libre), a passé la synthèse, le placement/routage et le
-contrôle strict à 200 MHz : **Fmax après routage 210,79 MHz** avec la graine
-de placement 8. Les valeurs exactes de
+Le firmware précompilé, révision 5 du protocole (LED, INFO, émission
+continue, CLK libre et broche TR), a passé la synthèse, le placement/routage
+et le contrôle strict à 200 MHz : **Fmax après routage 211,82 MHz** avec la
+graine de placement 1, soit environ 6 % de marge. Les valeurs exactes de
 chaque publication sont dans [le manifeste](../firmware/prebuilt/firmware-manifest.json).
 Le compte rendu utilisateur décrit un chargement réussi et DATA observée à
 10 MHz ; les sorties à 200 MHz et la qualification complète restent à tester.
 
 ## Logiciel et simulation
 
-Les **766 tests Python passent** : paramètres et profils, chronogrammes,
-protocole UART, transport, interface, CLI et protections du flux FPGA.
-Ruff, formatage et mypy vérifient le code Python.
+Les **1 026 tests Python passent** (CI Linux, Windows natif et job de publication
+du firmware) : paramètres et profils, chronogrammes, protocole UART, transport,
+interface, CLI, protections du flux FPGA, mode mesure (balayage de mots,
+oscilloscope, instrument SCPI), mode VNA (liste d'états, pilote PNA simulé,
+fichiers Touchstone, détection) et commande TR. Ruff, formatage et mypy
+vérifient le code Python.
+
+Le mode VNA est vérifié contre un **VNA simulé** qui reproduit le jeu de
+commandes PNA (canaux, mesures S, balayage unique avec `*OPC?`, groupes de
+balayages pour le moyennage, lecture `SDATA`, file d'erreurs). Les commandes
+n'ont **pas** été essayées sur un N5245B ou un P9374A réel : voir
+[le mode VNA](mode-vna.md) pour la liste des commandes à comparer au guide de
+programmation de l'appareil.
 
 La [revue oscilloscope](review-oscilloscope.md) vérifie les commandes avec le
 guide 1200 X-Series, renforce la synchronisation LAN/VISA et les acquisitions,
@@ -36,8 +46,8 @@ n'est pas répété ; l'interface exige STOP confirmé ou reconnexion avant de
 permettre une nouvelle émission.
 
 Les **six bancs Icarus Verilog passent** : **1 990 906 vérifications du
-moteur**, **42 cas ODDR**, **44 cas protocole** (dont les formats valides et
-invalides de LED, les six pages INFO, l'émission continue et la CLK libre),
+moteur**, **42 cas ODDR**, **51 cas protocole** (dont les formats valides et
+invalides de LED et de TR, les six pages INFO, l'émission continue et la CLK libre),
 chemin UART complet jusqu'aux sorties DATA/CLK/LATCH et liaison UART à
 **200 MHz / 115200 bauds**. Le banc moteur compare au modèle, à chaque
 demi-tick, l'émission continue (`repeat_count` = 0), dont 70 000 trames
@@ -48,9 +58,11 @@ retour automatique à l'état, retour immédiat), deux pages INFO, une émission
 continue lancée, observée (plus de 100 000 fronts CLK, busy) puis arrêtée
 par STOP, une émission continue en CLK libre (2 000 fronts montants en
 10 µs à 200 MHz, sans interruption) puis STOP, deux resets lorsque
-l'horloge est arrêtée, puis la reprise de fonctionnement.
+l'horloge est arrêtée, puis la reprise de fonctionnement. Il vérifie enfin la broche TR par l'UART :
+0 V au départ, 3,3 V puis 0 V puis 3,3 V sur commandes valides, niveau inchangé
+après une commande invalide, et retour à 0 V après un reset.
 
-Le nouveau banc **SIPO** modélise indépendamment le registre de décalage
+Le banc **SIPO** modélise indépendamment le registre de décalage
 et le registre de sortie. Il vérifie quatre modes et **14 captures à 10 MHz**,
 dont le mot `0xA5` en CLK en rafales et en CLK libre, les décalages de zéros
 supplémentaires, une capture après désactivation d'un LATCH actif bas et STOP.
@@ -107,16 +119,17 @@ Le flux vérifie aussi le maintien du reset asynchrone R des trois ODDR dans
 le netlist routé après normalisation des seules entrées S inactives.
 Voir [les adaptations et le contrôle de timing](toolchain.md).
 
-Le build réel a terminé avec un code de sortie **0** et le mapping **ABC9**.
-Les graines 1, 2, 3, 5 et 7 échouent après routage (191,28, 182,38,
-197,04, 184,88 et 198,29 MHz). Les graines 4 (200,04 MHz) et 6 (205,00 MHz)
-passent sans la marge de 3 % ; la graine **8** donne
-**210,79258728027344 MHz**, **PASS at 200.00 MHz** sur `core_clock`, soit
-environ 5 % de marge. Les chemins limitants sont ceux du moteur de trame,
-où le routage représente 75 à 85 % du délai (ici 1,15 ns de logique,
-3,59 ns de routage) : le placement fait varier la Fmax de 182 à 211 MHz
-pour le même RTL. Le balayage des graines avec marge (voir
-[toolchain](toolchain.md)) évite de publier un routage à la limite.
+Le build réel de la révision 5 a terminé avec un code de sortie **0** et le
+mapping **ABC9**. Le balayage des graines s'arrête à la première qui dépasse
+l'exigence avec la marge de 3 % : la graine **1** donne
+**211,82 MHz**, **PASS at 200.00 MHz** sur `core_clock`, soit environ 6 % de
+marge, sans essayer les autres. La révision 4 avait au contraire besoin de la
+graine 8 (210,79 MHz ; les graines 1, 2, 3, 5 et 7 échouaient entre 182 et
+198 MHz). Les chemins limitants sont ceux du moteur de trame, où le routage
+représente 75 à 85 % du délai : le placement fait varier la Fmax de 182 à
+211 MHz pour le même RTL, d'où le balayage avec marge (voir
+[toolchain](toolchain.md)). La sortie TR est un registre statique qui n'ajoute
+aucun chemin critique.
 
 Un build personnalisé à **150 MHz** (révision 3, run 37207946892, artefact seul) valide
 aussi la période XDC précise : nextpnr applique une contrainte de
@@ -128,7 +141,7 @@ Le parser du projet accepte le `.bit` de **3 825 995 octets**, dont
 **3 825 788 octets** de configuration, et son IDCODE **`0x03631093`**. SHA256 :
 
 ```text
-02c208aa8cbe79599f605e2f14d667a8f4a77361e56637832449e359f2edb57e
+8225942623b4e49bc8593195d44ece3323c724bbb8a2b93e651b5244c99aac52
 ```
 
 Voir [firmware-manifest.json](../firmware/prebuilt/firmware-manifest.json),
@@ -137,8 +150,8 @@ Voir [firmware-manifest.json](../firmware/prebuilt/firmware-manifest.json),
 et refuse tout résultat final absent ou en échec.
 
 Ce fichier a été publié par le job `publish` du
-[run 37210822783](https://github.com/Citroz31/arty-frame-studio/actions/runs/37210822783),
-à partir du commit `dbe6803`, après exécution de toute la suite Python sur le
+[run 37473638607](https://github.com/Citroz31/arty-frame-studio/actions/runs/37473638607),
+à partir du commit `d0b3c13`, après exécution de toute la suite Python sur le
 nouveau contenu ([python-tests.log](../firmware/prebuilt/python-tests.log)).
 Les fichiers RTL/XDC/modèle de primitives correspondent exactement au
 manifeste. Les broches UART sont RX=A9, TX=D10. Les fins de lignes LF des `.v`/`.xdc` sont imposées par
@@ -151,6 +164,12 @@ réussie sous Windows, le dialogue UART, le test LED et l'envoi de **26 bits**
 (`0x1E15470`) avec CLK réglée à **10 MHz**. DATA a été observée sur **JB1**.
 Le backend Windows reconnaît l'Arty A7-100T par JTAG : IDCODE **`0x13631093`**.
 Ces retours complètent le diagnostic initial de COM7 sans firmware chargé.
+
+Ces retours concernent la révision 4. La **révision 5** (broche TR) n'a pas
+encore été chargée sur une carte : vérifier après chargement que le firmware
+annonce « révision 5 », que le test LED défile, puis mesurer TR (JB4) au
+voltmètre ou à l'oscilloscope avec l'interrupteur « TR à 3,3 V » ou
+`arty-frame tr --port COM7 1` (3,3 V) et `0` (0 V).
 
 Aucune Arty réelle n'est raccordée à l'environnement de développement.
 Nous n'avons pas reproduit ces essais dans cet environnement. Le contrôle
