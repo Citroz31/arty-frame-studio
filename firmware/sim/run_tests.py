@@ -56,7 +56,9 @@ def main() -> int:
                 ],
                 check=True,
             )
-            subprocess.run(["vvp", str(compiled)], check=True, timeout=120)
+            # tb_top replays about 42 ms of the real 115200-baud UART at 5 ns steps:
+            # about two minutes on a slow runner. The limit only catches a hang.
+            subprocess.run(["vvp", str(compiled)], check=True, timeout=900)
     print("RTL: toutes les simulations ont réussi (aucune mesure matérielle).")
     return 0
 
