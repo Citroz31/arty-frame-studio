@@ -160,6 +160,27 @@ def test_led_and_info_requests_carry_one_argument_byte():
         led_argument(16)
 
 
+def test_tr_request_carries_the_pin_level_and_refuses_anything_else():
+    from arty_frame_studio.protocol import (
+        CAPABILITY_TR,
+        FirmwareInfo,
+        PacketDecoder,
+        ProtocolError,
+        tr_argument,
+    )
+
+    for level in (0, 1):
+        packet = PacketDecoder().feed(encode_request(Opcode.TR, 9, argument=tr_argument(level)))[0]
+        assert packet.opcode == 7 and packet.payload == bytes((level,))
+    for bad in (2, -1, True, 1.0, None):
+        with pytest.raises(ProtocolError):
+            encode_request(Opcode.TR, 1, argument=bad)
+    with pytest.raises(ProtocolError):
+        tr_argument(2)
+    assert FirmwareInfo(5, 200_000_000, 0x1F, 0).tr
+    assert not FirmwareInfo(4, 200_000_000, 0x0F, 0).tr and CAPABILITY_TR == 0x10
+
+
 def test_info_pages_assemble_core_clock_and_build_identity():
     from arty_frame_studio.protocol import info_from_pages
 

@@ -17,8 +17,9 @@ et des astérisques reçus peuvent venir d'une démonstration déjà présente s
 la carte. Ce ne sont pas des réponses au protocole Arty Frame Studio.
 
 Le [firmware précompilé](../firmware/prebuilt/arty_frame.bit) est fourni
-dans `firmware/prebuilt/`. Sa synthèse et son routage ont réussi avec une
-**Fmax de 210,79 MHz pour une contrainte de 200 MHz**. Un chargement SRAM
+dans `firmware/prebuilt/` (révision 6). Sa synthèse et son routage ont
+réussi avec une **Fmax de 288,93 MHz pour une contrainte de 200 MHz**. Un
+chargement SRAM
 réussi a été rapporté par l'utilisateur ; son retour récent contient encore
 des délais PING/INFO. Le dialogue courant et les sorties restent à confirmer
 par les essais du [diagnostic local](rapport-diagnostic-local.md).
@@ -59,6 +60,8 @@ par les essais du [diagnostic local](rapport-diagnostic-local.md).
    sont **JB1/E15 : DATA**, **JB2/E16 : CLK**, **JB3/D15 : LATCH** ; relier la
    masse sur **JB5 ou JB11**. Ce sont des signaux **3,3 V**. Voir
    [le brochage et les limites physiques](hardware.md).
+
+**Vitesse du chargement.** Le `.bit` de 3,8 Mo se charge à **6 MHz** par défaut (environ 6 à 10 s), la valeur par défaut d'openFPGALoader. Auparavant la liaison JTAG était fixée à 1 MHz (35 s à une minute). Le menu **Vitesse JTAG (chargement SRAM)**, dans FPGA → Options JTAG, propose 1, 2, 3, 5, 6, 10, 15 et 30 MHz ; en ligne de commande : `arty-frame jtag-program --bitstream … --tck-mhz 10`. Si le FPGA ne répond pas à la vitesse choisie, l'application revient à 1 MHz **avant tout effacement** et l'indique dans le journal. Après un chargement, le journal donne la durée et la vitesse. Au-delà de 10 MHz, un câble USB court branché directement sur le PC est conseillé.
 
 La programmation charge uniquement la **SRAM volatile**, pas la flash.
 **Recharger le `.bit` après chaque coupure d'alimentation.** Le programme
@@ -102,8 +105,11 @@ du cœur, les broches DATA/CLK/LATCH, le courant de sortie ou le slew.
    le projet ; les builds et leurs reçus vont sous
    `%LOCALAPPDATA%\ArtyFrameStudio\builds`, dans un sous-dossier propre au projet.
    Ces caches évitent les chemins OneDrive et réduisent la longueur des chemins.
-3. Cliquer sur **Vérifier les outils**. Choisir ensuite les broches et l'horloge
-   du cœur dans **Pilotage** puis **Préparer le firmware depuis Pilotage**, ou
+3. Cliquer sur **Vérifier les outils**. Pour une fréquence CLK quelconque, la
+   saisir dans **Pilotage** puis cliquer sur **Générer le bitstream** :
+   l'application retient la fréquence réalisable la plus proche et compile le
+   `.bit` de son horloge de cœur. Sinon, choisir les broches et l'horloge du
+   cœur dans **Pilotage** puis **Préparer le firmware depuis Pilotage**, ou
    utiliser **FPGA → Personnaliser le firmware → Compiler sur ce PC**.
    Une préparation compatible avec le `.bit` fourni ne télécharge aucun outil.
 4. Attendre le résultat de synthèse et routage. Le timing final doit atteindre

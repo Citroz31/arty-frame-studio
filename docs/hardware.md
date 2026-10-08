@@ -21,11 +21,19 @@ des signaux CLK/DATA/LATCH.
 | Données série | `data_out` | E15 | JB broche 1 |
 | Horloge série | `frame_clk` | E16 | JB broche 2 |
 | Latch enable | `latch_enable` | D15 | JB broche 3 |
+| Niveau TR (TX/RX), statique | `tr_out` | C15 | JB broche 4 |
 | Masse | — | — | JB broche 5 ou 11 |
 | LED verrouillage horloge | `led[0]` | H5 | LD4, première LED verte |
 | LED émission en cours | `led[1]` | J5 | LD5 |
 | LED réservée | `led[2]` | T9 | LD6 |
 | LED trame terminée | `led[3]` | T10 | LD7 |
+
+**TR** est une sortie LVCMOS33 **statique** (8 mA, fronts lents) : 3,3 V ou 0 V
+selon la dernière commande, 0 V à la mise sous tension et après un reset. Elle
+commande l'état émission/réception du composant (le niveau qui signifie TX se
+choisit dans l'application) ; elle n'a pas d'horloge et se pilote depuis
+Pilotage (interrupteur « TR à 3,3 V »), `arty-frame tr` ou le [mode VNA](mode-vna.md).
+Relier sa masse comme pour les autres signaux.
 
 Ce brochage est celui du firmware de référence. Le **test LED** de
 l'application remplace pendant 3 secondes cet affichage par un chenillard
@@ -35,7 +43,7 @@ la liaison UART fonctionne dans les deux sens. Voir [le protocole](protocol.md).
 ## Firmware personnalisé : horloge et broches
 
 L'onglet **FPGA → Firmware personnalisé** (ou `arty-frame firmware-config`)
-choisit l'horloge du cœur et les broches DATA, CLK et LATCH parmi les 32
+choisit l'horloge du cœur et les broches DATA, CLK, LATCH et TR parmi les 32
 broches de signal des Pmod JA, JB, JC et JD, avec le courant (4 à 16 mA) et la
 vitesse des fronts. Un nouveau `.bit` est compilé, localement ou sur GitHub
 Actions ([chaîne FPGA](toolchain.md)) ; la carte annonce ensuite son horloge
@@ -48,12 +56,68 @@ et son identifiant par INFO.
 | JC | U12, V12, V10, V11 | U14, V14, T13, U13 | paires L20, L21, L22, L23 |
 | JD | D4, D3, F4, F3 | E2, D2, H2, G2 | 200 Ω en série |
 
-L'horloge du cœur vaut 100 MHz × M / O (VCO de 800 à 1600 MHz), parmi 32
-valeurs entières de 50 à 200 MHz : par exemple 200, 187,5, 180, 175, 160, 150,
-125 ou 100 MHz. CLK vaut cette horloge divisée par N ; le pas des durées vaut
-un demi-cycle du cœur. Un cœur à 150 MHz permet ainsi une CLK de 150 MHz,
-impossible avec 200 MHz / N. Au-delà de 200 MHz, aucune marge de timing n'est
-démontrée ; ces valeurs ne sont pas proposées.
+L'horloge du cœur vaut **100 MHz × M / (D × O)** : M de 2 à 64, D de 1 à 5,
+O de 1 à 128, avec un comparateur de phase (100 MHz / D) de 19 à 450 MHz et
+un VCO de 800 à 1600 MHz (vitesse -1). Cela donne **6191 horloges distinctes
+de 6,25 à 300 MHz**, arrondies au hertz pour INFO. CLK vaut cette horloge
+divisée par N (1 à 65 535) ; le pas des durées vaut un demi-cycle du cœur.
+Deux domaines d'horloge séparent l'UART et les commandes (100 MHz de la carte,
+fixes) du moteur de trame, seul cadencé par le cœur.
+
+### Fréquence demandée, fréquence la plus proche
+
+Dans **Pilotage**, la fréquence demandée est comparée à toutes les
+combinaisons PLL × N. La ligne « Plus proche réalisable » donne la fréquence
+obtenue, l'écart, le cœur et le réglage PLL. Si le firmware chargé y parvient,
+seul N change ; sinon **Générer le bitstream** adopte ce cœur et produit son
+`.bit` sur ce PC, même carte connectée, puis le sélectionne pour le
+chargement. **Adopter cette horloge** choisit seulement le cœur du prochain
+firmware, par exemple pour une compilation sur GitHub.
+**Ne jamais dépasser la fréquence demandée** retient la plus proche par valeur
+inférieure, pour un récepteur qui ne tolère aucun dépassement.
+
+| Demande | Plus proche | Cœur et PLL | N |
+| --- | --- | --- | --- |
+| 150 MHz | 150 MHz exacts | 150 MHz, ×9 / 1 / 6 | 1 |
+| 151 MHz | 151,428571 MHz (150 MHz sans dépasser) | 151,428571 MHz, ×53 / 5 / 7 | 1 |
+| 122 MHz | 122 MHz exacts | 244 MHz, ×61 / 5 / 5 | 2 |
+| 120 MHz | 120 MHz exacts | 240 MHz, ×12 / 1 / 5 | 2 |
+| 10 MHz | 10 MHz exacts, firmware de référence | 200 MHz, ×10 / 1 / 5 | 20 |
+
+À écart égal, le planificateur préfère le firmware chargé, puis le firmware
+de référence (aucune compilation), puis le cœur le plus proche de 200 MHz :
+un pas des durées fin sans approcher la limite. En ligne de commande :
+`arty-frame clock-plan 151 --output fw.json`, puis
+`arty-frame build --firmware-config fw.json` (ou `remote-build`). L'écart
+entre deux fréquences voisines vaut en moyenne 0,5 MHz vers 150-200 MHz et
+1,5 MHz vers 250-300 MHz.
+
+### Fréquence maximale de cette carte
+
+| Limite | Valeur | Origine |
+| --- | --- | --- |
+| Sortie du PLL | 800 MHz | AMD DS181, vitesse -1 |
+| Réseau d'horloge BUFG | 464 MHz | AMD DS181, vitesse -1 |
+| Moteur de trame, timing routé | **300 MHz**, limite absolue appliquée | mesures ci-dessous |
+| Sortie LVCMOS33 sur un Pmod | non spécifiée pour un signal carré | câblage et charge |
+
+**Limite absolue : cœur à 300 MHz, donc CLK de 300 MHz au plus (N = 1).**
+Au-delà, l'application et la CLI refusent la demande. Le moteur de trame est
+écrit pour cette fréquence : un pas par bit et un pas de fin de trame d'au
+moins deux ticks, des niveaux donnés par le signe de décompteurs, chaque
+multiplexeur de rechargement dans une seule LUT devant la chaîne de retenue.
+Mesures nextpnr-xilinx (48 placements, six réglages PLL de 250 à 300 MHz,
+graines 1 à 8) : Fmax routée de 221 à 344 MHz selon le placement, environ un
+placement sur trois au-dessus de 300 MHz, deux sur trois au-dessus de 275 MHz.
+La compilation essaie jusqu'à 16 graines. Le firmware de référence, cœur à
+200 MHz, atteint 288,93 MHz routés dès la graine 1. Ces rapports couvrent les
+chemins entre registres ; ni la sortie DDR ni la liaison externe ne sont
+certifiées.
+
+À 300 MHz, CLK change toutes les 1,67 ns. Une sortie LVCMOS33 de 3,3 V à
+travers un connecteur Pmod et des fils ne restitue plus un signal carré
+propre : la limite ci-dessus est logique. La fréquence utilisable se mesure à
+l'oscilloscope sur le montage réel, en montant progressivement.
 
 L'application signale les choix électriquement risqués sans les interdire :
 JA/JD et leurs résistances série, DATA et CLK sur la même paire de JB/JC,
@@ -71,7 +135,7 @@ JB/JC sont les Pmod prévus pour les liaisons rapides, avec des paires de
 pistes ; JA/JD comportent des résistances de protection de 200 Ω, pénalisantes
 pour les fronts rapides. Le profil fourni choisit JB. Les sorties sont
 utilisées en LVCMOS33 simples, pas comme une interface différentielle LVDS.
-La présence d'un Pmod rapide ne certifie pas une liaison à 200 MHz. Vérifier
+La présence d'un Pmod rapide ne certifie pas une liaison à haute fréquence. Vérifier
 la révision et les schémas de votre carte avant de reproduire ce raccordement.
 
 Le brochage provient du [Master XDC officiel Arty A7-100](https://github.com/Digilent/digilent-xdc/blob/master/Arty-A7-100-Master.xdc).
@@ -165,8 +229,8 @@ entre les broches doivent être vérifiés sur le montage réel.
 Toutes les sorties utilisent LVCMOS33. Ne pas relier directement un
 périphérique 5 V ou un récepteur incompatible avec 3,3 V. Relier les masses.
 Pour une liaison rapide, le connecteur, la longueur des fils, la charge, les
-résistances de la carte et l'impédance du récepteur sont déterminants. La
-fréquence logique de 200 MHz ne garantit pas un signal exploitable à
+résistances de la carte et l'impédance du récepteur sont déterminants. Une
+fréquence logique de 200 à 300 MHz ne garantit pas un signal exploitable à
 l'extrémité d'un fil Dupont. Commencer avec un diviseur élevé, puis observer
 CLK, DATA et LATCH sur un oscilloscope adapté et valider setup/hold du
 récepteur avant d'augmenter la fréquence. Choisir un autre connecteur exige
@@ -176,7 +240,8 @@ Les rapports de timing du flux libre ne certifient pas les endpoints DDR ni
 la liaison externe. La simulation de l'application représente des fronts
 idéaux ; elle ne simule ni les overshoots, ni le temps de montée, ni le
 skew des broches, ni la métastabilité d'un composant externe. La validation
-physique à 200 MHz et les mesures sur carte n'ont pas été réalisées ici.
+physique au-delà de 10 MHz et les mesures sur carte du moteur révision 6
+n'ont pas été réalisées ici.
 
 ## Sources
 

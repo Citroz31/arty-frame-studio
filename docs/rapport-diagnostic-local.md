@@ -120,7 +120,7 @@ La compilation GitHub reste une alternative. La préparation locale ne demande p
 ### Installer, charger, dialoguer, envoyer, lire
 
 1. **Installer et préparer.** Lancer l’application mise à jour ; préparer les outils locaux seulement si une compilation est nécessaire. Fermer les autres applications JTAG/UART. Garder les pilotes Digilent/FTDI existants.
-2. **Contrôler le fichier.** Conserver ensemble le `.bit`, le manifeste et les rapports. Le firmware de référence cible `xc7a100tcsg324-1`, cœur 200 MHz, DATA JB1, CLK JB2, LATCH JB3, UART 115200 bauds 8N1. Son SHA256 est donné ci-dessous.
+2. **Contrôler le fichier.** Conserver ensemble le `.bit`, le manifeste et les rapports. Le firmware de référence cible `xc7a100tcsg324-1`, cœur 200 MHz, DATA JB1, CLK JB2, LATCH JB3, UART 115200 bauds 8N1. Son SHA256 (révision 6) est donné ci-dessous ; celui de chaque publication figure dans `firmware/prebuilt/SHA256SUMS.txt`.
 3. **Charger la SRAM.** Détecter le JTAG, charger le `.bit`, attendre le résultat et vérifier la LED de verrouillage PLL. La SRAM est volatile : recharger après une coupure. L’IDCODE 100T ne suffit pas à prouver le dialogue applicatif.
 4. **Tester PING puis INFO.** Sélectionner le port de la carte, par exemple COM7 dans ce retour, puis Connecter. Confirmer horloge, révision, capacités et identifiant de build. Si un paquet hors requête apparaît, conserver le journal ; ne pas lancer SEND avant une connexion confirmée.
 5. **Envoyer une trame simple.** Charger l’exemple SIPO **0xA5, 8 bits, 10 MHz**, LATCH actif haut, CLK en rafales. Utiliser une répétition pour faciliter l’observation, puis arrêter l’émission depuis Pilotage.
@@ -129,7 +129,7 @@ La compilation GitHub reste une alternative. La préparation locale ne demande p
 
 ```text
 SHA256 du firmware de référence :
-02c208aa8cbe79599f605e2f14d667a8f4a77361e56637832449e359f2edb57e
+8825690698d6848433a4f60f2bec8ba6ca19e5f873f0cae1c06dd2ca90ebe701
 ```
 
 ### Critères à cocher sur la carte et l’instrument

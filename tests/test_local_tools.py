@@ -208,7 +208,8 @@ def test_install_publishes_only_validated_tools_and_resolved_configuration(
     assert config.part == TARGET_PART
     assert config.nextpnr_backend == "himbaechel"
     assert config.yosys_mapping == "abc9"
-    assert config.nextpnr_seeds == (8,)
+    assert config.nextpnr_seeds == tuple(range(1, 17))
+    assert "nextpnr_seeds" not in settings
     assert config.build_dir.parent == tmp_path / "builds"
     assert len(config.build_dir.name) == 12
     assert not config.build_dir.is_relative_to(project)

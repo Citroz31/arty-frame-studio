@@ -13,7 +13,15 @@ from pathlib import Path
 from typing import Any
 
 from .bitstream import read_bitstream
-from .firmware_config import FirmwareBuildConfig
+from .firmware_config import (
+    MAX_FRAME_CLOCK_HZ,
+    REFERENCE_CORE_HZ,
+    FirmwareBuildConfig,
+    FrameClockPlan,
+    format_hz,
+    frame_clock_neighbors,
+    plan_frame_clock,
+)
 from .local_tools import ensure_local_toolchain
 from .model import CONTINUOUS, FrameConfig, load_profile, save_profile, with_free_clock
 from .prebuilt import validate_programming_image, verify_prebuilt_firmware
@@ -31,6 +39,7 @@ from .scope import (
 )
 from .scope_sim import SimulatedKeysight, signal_source
 from .simulation import export_csv, export_vcd, simulate, waveform_svg
+from .sweep_cli import add_sweep_parser, add_vna_list_parser, run_sweep, run_vna_list
 from .toolchain import Toolchain, ToolchainConfig
 from .transport import (
     DemoDevice,
@@ -88,6 +97,13 @@ def _parser() -> argparse.ArgumentParser:
             item.add_argument(
                 "--serial", help="Numéro de série du canal JTAG A, si plusieurs cartes"
             )
+        if name in ("jtag-diagnose", "jtag-program"):
+            item.add_argument(
+                "--tck-mhz",
+                type=float,
+                default=6 if name == "jtag-program" else 1,
+                help="Fréquence JTAG : 1, 2, 3, 5, 6, 10, 15 ou 30 MHz (défaut : %(default)g)",
+            )
         if name == "jtag-program":
             item.add_argument("--project-root", type=Path, default=Path.cwd())
             item.add_argument(
@@ -104,17 +120,59 @@ def _parser() -> argparse.ArgumentParser:
             else "Faire défiler un motif sur LD4-LD7 pour tester la liaison",
         )
         item.add_argument("--port", required=True, help="COM7, /dev/ttyUSB1, etc.")
+    tr = commands.add_parser(
+        "tr", help="Fixer la broche TR à 3,3 V (1) ou 0 V (0) ; elle garde ce niveau"
+    )
+    tr.add_argument("--port", required=True, help="COM7, /dev/ttyUSB1, etc.")
+    tr.add_argument("level", type=int, choices=(0, 1), help="1 = 3,3 V, 0 = 0 V")
     settings = commands.add_parser(
         "firmware-config", help="Créer ou vérifier une configuration de firmware personnalisé"
     )
     settings.add_argument("--input", type=Path, help="Configuration JSON à compléter/vérifier")
-    settings.add_argument("--core-mhz", type=float, help="Horloge du cœur, ex. 150")
-    for pin in ("data", "clock", "latch"):
+    core = settings.add_mutually_exclusive_group()
+    core.add_argument("--core-mhz", type=float, help="Horloge du cœur, ex. 150")
+    core.add_argument(
+        "--clk-mhz",
+        type=float,
+        help="Fréquence CLK voulue : le cœur réalisable le plus proche est choisi",
+    )
+    settings.add_argument(
+        "--below", action="store_true", help="Avec --clk-mhz : ne jamais dépasser la demande"
+    )
+    for pin in ("data", "clock", "latch", "tr"):
         settings.add_argument(f"--{pin}", help=f"Broche {pin.upper()} : JA1..JD10")
     settings.add_argument("--drive", type=int, choices=(4, 8, 12, 16))
     settings.add_argument("--slew", choices=("SLOW", "FAST"))
     settings.add_argument("--output", type=Path, help="Fichier JSON à écrire")
     settings.add_argument("--xdc", type=Path, help="Écrire aussi les contraintes générées")
+    plan = commands.add_parser(
+        "clock-plan",
+        help="Fréquence CLK réalisable la plus proche (PLL et N) et firmware nécessaire",
+        description=(
+            "Cherche, parmi toutes les horloges de cœur du PLL et tous les diviseurs N, "
+            "la fréquence CLK la plus proche de la demande ; "
+            f"limite absolue : {format_hz(MAX_FRAME_CLOCK_HZ)}."
+        ),
+    )
+    plan.add_argument("mhz", type=float, help="Fréquence CLK voulue en MHz, ex. 150")
+    plan.add_argument("--below", action="store_true", help="Ne jamais dépasser la demande")
+    plan.add_argument(
+        "--current-core-mhz",
+        type=float,
+        help="Cœur du firmware chargé : préféré à écart égal (aucune recompilation)",
+    )
+    plan.add_argument(
+        "--input", type=Path, help="Configuration firmware de départ (broches, courant)"
+    )
+    plan.add_argument(
+        "--output", type=Path, help="Écrire la configuration firmware de ce cœur (JSON)"
+    )
+    plan.add_argument(
+        "--profile",
+        type=Path,
+        help="Écrire aussi un profil de trame à cette fréquence (base : --base-profile)",
+    )
+    plan.add_argument("--base-profile", type=Path, help="Profil de trame à adapter")
     remote = commands.add_parser(
         "remote-build", help="Compiler un firmware sur GitHub Actions et le télécharger"
     )
@@ -192,6 +250,8 @@ def _parser() -> argparse.ArgumentParser:
     scope.add_argument("--csv", type=Path, help="Exporter les points de l'acquisition")
     scope.add_argument("--png", type=Path, help="Copie d'écran de l'oscilloscope réel")
     commands.add_parser("scope-list", help="Lister les instruments VISA (USB et LAN)")
+    add_sweep_parser(commands)
+    add_vna_list_parser(commands)
     install = commands.add_parser(
         "install-fpga-tools", help="Installer les outils FPGA portables Windows sans WSL"
     )
@@ -221,7 +281,18 @@ def _firmware_settings(args: argparse.Namespace) -> FirmwareBuildConfig:
     changes: dict[str, Any] = {}
     if args.core_mhz is not None:
         changes["core_hz"] = round(args.core_mhz * 1e6)
-    for option, field in (("data", "data_pin"), ("clock", "clock_pin"), ("latch", "latch_pin")):
+    if args.clk_mhz is not None:
+        plan = plan_frame_clock(_megahertz(args.clk_mhz), never_above=args.below)
+        print(plan.summary())
+        changes["core_hz"] = plan.core_hz
+    elif args.below:
+        raise ValueError("--below s'utilise avec --clk-mhz.")
+    for option, field in (
+        ("data", "data_pin"),
+        ("clock", "clock_pin"),
+        ("latch", "latch_pin"),
+        ("tr", "tr_pin"),
+    ):
         if getattr(args, option):
             changes[field] = getattr(args, option).upper()
     if args.drive is not None:
@@ -229,6 +300,77 @@ def _firmware_settings(args: argparse.Namespace) -> FirmwareBuildConfig:
     if args.slew is not None:
         changes["slew"] = args.slew
     return replace(firmware, **changes)
+
+
+def _megahertz(value: float) -> str:
+    """MHz saisis → Hz décimaux exacts (150.1 → 150100000)."""
+    if not math.isfinite(value):
+        raise ValueError("Fréquence : nombre fini attendu.")
+    return f"{value!r}e6"
+
+
+def _plan_lines(plan: FrameClockPlan, current_core_hz: int | None) -> list[str]:
+    lines = [f"Demande : {format_hz(plan.requested_hz)}", f"Réalisable : {plan.summary()}"]
+    below, above = frame_clock_neighbors(plan.requested_hz)
+    neighbors = [
+        f"{label} {format_hz(item.achieved_hz)} (cœur {format_hz(item.setting.exact_hz)}, "
+        f"N={item.divider})"
+        for label, item in (("inférieure", below), ("supérieure", above))
+        if item is not None and item.achieved_hz != plan.achieved_hz
+    ]
+    if neighbors:
+        lines.append("Fréquences voisines : " + " ; ".join(neighbors))
+    if plan.core_hz == current_core_hz:
+        lines.append("Le firmware chargé convient : régler seulement N.")
+    elif plan.core_hz == REFERENCE_CORE_HZ:
+        lines.append("Le firmware de référence (fourni) convient : aucune compilation.")
+    else:
+        lines.append(
+            f"Nouveau firmware nécessaire : cœur {plan.core_hz} Hz ({plan.setting.describe()})."
+        )
+    return lines
+
+
+def _clock_plan(args: argparse.Namespace) -> int:
+    current = None if args.current_core_mhz is None else round(args.current_core_mhz * 1e6)
+    plan = plan_frame_clock(_megahertz(args.mhz), never_above=args.below, current_core_hz=current)
+    for line in _plan_lines(plan, current):
+        print(line)
+    if args.output:
+        base = FirmwareBuildConfig.load(args.input) if args.input else FirmwareBuildConfig()
+        firmware = replace(base, core_hz=plan.core_hz)
+        firmware.save(args.output)
+        print(f"Configuration firmware enregistrée : {args.output} ({firmware.summary()})")
+        for note in firmware.warnings():
+            print(f"Attention : {note}")
+        if not firmware.is_reference:
+            print(
+                "Compiler puis charger : arty-frame build --firmware-config "
+                f"{args.output} (local) ou arty-frame remote-build --firmware-config "
+                f"{args.output} (GitHub), puis arty-frame program ou jtag-program."
+            )
+    if args.profile:
+        frame = load_profile(args.base_profile) if args.base_profile else FrameConfig()
+        latch_ns = frame.latch_ticks * frame.tick_ns
+        gap_ns = frame.gap_ticks * frame.tick_ns
+        tick = plan.setting.tick_ns
+        frame = replace(
+            frame,
+            core_hz=plan.core_hz,
+            divider=plan.divider,
+            latch_ticks=max(1, min(65_535, round(latch_ns / tick))),
+            gap_ticks=max(0, min(65_535, round(gap_ns / tick))),
+        )
+        if frame.free_clock:
+            frame = with_free_clock(replace(frame, free_clock=False))
+        save_profile(frame, args.profile)
+        print(
+            f"Profil de trame enregistré : {args.profile} (CLK "
+            f"{format_hz(plan.achieved_hz)}, N={plan.divider}, LATCH "
+            f"{frame.latch_ticks * frame.tick_ns:.6g} ns, pause "
+            f"{frame.gap_ticks * frame.tick_ns:.6g} ns)"
+        )
+    return 0
 
 
 def _scope(args: argparse.Namespace) -> int:
@@ -298,6 +440,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{port.device}\t{port.description}\t{port.hwid}")
         elif args.command == "scope":
             return _scope(args)
+        elif args.command == "sweep":
+            return run_sweep(args)
+        elif args.command == "vna-list":
+            return run_vna_list(args)
         elif args.command == "scope-list":
             resources = list_visa_resources()
             for resource in resources:
@@ -368,7 +514,9 @@ def main(argv: list[str] | None = None) -> int:
             for ftdi_device in list_ftdi_devices(dll_path=args.ftdi_dll):
                 print(json.dumps(asdict(ftdi_device), ensure_ascii=False))
         elif args.command == "jtag-diagnose":
-            jtag_probe = probe_arty(serial=args.serial, dll_path=args.ftdi_dll)
+            jtag_probe = probe_arty(
+                serial=args.serial, dll_path=args.ftdi_dll, tck_hz=round(args.tck_mhz * 1e6)
+            )
             print(json.dumps(asdict(jtag_probe), ensure_ascii=False))
             print("Artix-7 100T détecté par JTAG. Le firmware UART reste à vérifier par PING.")
         elif args.command == "jtag-program":
@@ -376,8 +524,16 @@ def main(argv: list[str] | None = None) -> int:
             validate_programming_image(image, args.project_root)
             print(f"Bitstream : {image.path}\nPart : {image.part}\nSHA256 : {image.sha256}")
             print("Chargement SRAM par FTDI D2XX Windows ; backend expérimental.")
-            jtag_program = program_arty(image.payload, serial=args.serial, dll_path=args.ftdi_dll)
+            jtag_program = program_arty(
+                image.payload,
+                serial=args.serial,
+                dll_path=args.ftdi_dll,
+                tck_hz=round(args.tck_mhz * 1e6),
+            )
             print(json.dumps(asdict(jtag_program), ensure_ascii=False))
+            print(
+                f"Chargement en {jtag_program.seconds:.1f} s à {jtag_program.tck_hz / 1e6:g} MHz."
+            )
             print(
                 "Configuration SRAM terminée. Vérifiez le firmware UART avec "
                 "diagnose --port COM7 avant d'envoyer une trame."
@@ -397,6 +553,26 @@ def main(argv: list[str] | None = None) -> int:
                     )
             finally:
                 board.close()
+        elif args.command == "tr":
+            board = SerialDevice(args.port)
+            board.connect()
+            try:
+                identity = board.identify()
+                if not identity.tr:
+                    raise ValueError(
+                        f"Le firmware (révision {identity.revision}) n'a pas de broche TR : "
+                        "charger le firmware de révision 5 ou plus."
+                    )
+                status = board.tr(args.level)
+                print(
+                    f"TR : {'3,3 V' if args.level else '0 V'} (commande confirmée, "
+                    f"{status.completed} trame(s) terminée(s)). La broche garde ce niveau "
+                    "jusqu'à la prochaine commande ou un reset de la carte."
+                )
+            finally:
+                board.close()
+        elif args.command == "clock-plan":
+            return _clock_plan(args)
         elif args.command == "firmware-config":
             firmware = _firmware_settings(args)
             print(f"Configuration : {firmware.summary()}")

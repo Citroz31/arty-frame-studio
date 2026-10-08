@@ -60,6 +60,7 @@ def test_controls_construct_and_draw_chronogramme(tmp_path):
         "Pilotage",
         "Chronogramme",
         "Oscilloscope",
+        "Mesure",
         "FPGA",
         "Journal",
     ]
@@ -184,7 +185,7 @@ def test_pilotage_preparation_snapshots_frame_without_programming_or_sending(tmp
         studio = make_studio(tmp_path)
         studio.word.value = "00101"
         studio._word_changed()
-        studio.core_clock.value = "150000000"
+        studio.core_clock.value = "150"
         studio._core_changed(None)
         studio.pilotage_pins["data_pin"].value = "JA1"
         studio._pilotage_hardware_changed()
@@ -217,9 +218,9 @@ def test_hardware_pin_edits_are_synchronized_and_duplicate_pins_block_preparatio
     assert studio.pilotage_pins["clock_pin"].value == "JA1"
     assert studio.prepare_local_button.disabled
     studio.fw_pins["clock_pin"].value = "JA2"
-    studio.fw_core.value = "100000000"
+    studio.fw_core.value = "100"
     studio._firmware_changed()
-    assert studio.core_hz == 100000000 and studio.core_clock.value == "100000000"
+    assert studio.core_hz == 100000000 and studio.core_clock.value == "100"
     assert not studio.prepare_local_button.disabled
 
 
@@ -312,7 +313,7 @@ def test_valid_native_image_is_checked_before_uart_closes(tmp_path, monkeypatch)
             assert studio.device is None
             assert payload == b"frozen image"
             calls.append("program")
-            return SimpleNamespace(serial="ARTY001", status=0x4010)
+            return SimpleNamespace(serial="ARTY001", status=0x4010, seconds=6.2, tck_hz=6_000_000)
 
         monkeypatch.setattr(studio, "_checked_windows_image", validate)
         monkeypatch.setattr(app, "program_arty", program)
@@ -439,9 +440,9 @@ def test_native_jtag_result_never_claims_uart_firmware_loaded(tmp_path, monkeypa
 def test_native_program_does_not_need_build_tools_or_enable_uart_send(tmp_path, monkeypatch):
     calls = []
 
-    def program(payload, *, serial, dll_path):
+    def program(payload, *, serial, dll_path, tck_hz):
         calls.append((payload, serial, dll_path))
-        return SimpleNamespace(serial="ARTY001A", status=0x4010)
+        return SimpleNamespace(serial="ARTY001A", status=0x4010, seconds=6.2, tck_hz=6_000_000)
 
     async def exercise():
         studio = make_studio(tmp_path)
@@ -608,6 +609,43 @@ def test_canvas_geometry_preserves_active_low_latch_polarity():
         assert normal_y + inverted_y == pytest.approx(sum(levels))
 
 
+def test_tr_switch_sets_the_pin_through_the_board_and_reverts_on_failure(tmp_path):
+    from dataclasses import replace
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        assert studio.tr_switch.disabled
+        await studio._toggle_connection()
+        assert not studio.tr_switch.disabled and "0 V après le chargement" in studio.tr_note.value
+        studio.tr_switch.value = True
+        await studio._tr_toggled()
+        assert studio.device.tr_level == 1 and studio.tr_switch.value is True
+        assert any("TR : 3,3 V" in line for line in studio.log_lines)
+        studio.tr_switch.value = False
+        await studio._tr_toggled()
+        assert studio.device.tr_level == 0 and studio.device.tr_history == [1, 0]
+        # Pendant un balayage la broche appartient au balayage : l'interrupteur revient.
+        studio.sweep_active = True
+        studio._buttons()
+        assert studio.tr_switch.disabled
+        studio.tr_switch.value = True
+        await studio._tr_toggled()
+        assert studio.tr_switch.value is False and studio.device.tr_history == [1, 0]
+        studio.sweep_active = False
+        # Une commande refusée laisse l'interrupteur sur le niveau réel de la broche.
+        studio.device.tr = lambda level: (_ for _ in ()).throw(RuntimeError("liaison coupée"))
+        studio.tr_switch.value = True
+        await studio._tr_toggled()
+        assert studio.tr_switch.value is False
+        # Un firmware sans TR désactive l'interrupteur et dit pourquoi.
+        old = replace(studio.device.firmware, revision=4, capabilities=0x0F)
+        studio.firmware_info = old
+        studio._buttons()
+        assert studio.tr_switch.disabled and "Firmware sans broche TR" in studio.tr_note.value
+
+    run_async(exercise())
+
+
 def test_led_test_walks_virtual_and_board_leds_in_demo(tmp_path):
     async def exercise():
         studio = make_studio(tmp_path)
@@ -615,7 +653,7 @@ def test_led_test_walks_virtual_and_board_leds_in_demo(tmp_path):
         assert studio.led_test_button.disabled
         await studio._toggle_connection()
         assert studio.firmware_info.led_test
-        assert "révision 4" in studio.firmware_status.value
+        assert "révision 6" in studio.firmware_status.value
         assert not studio.led_test_button.disabled
         seen = []
         original = studio._show_leds
@@ -659,7 +697,7 @@ def test_connected_firmware_clock_requantizes_the_frame(tmp_path):
         studio._frequency_changed(None)
         assert studio.current_config.divider == 4
         # The demo then simulates a firmware built for a 150 MHz core.
-        studio.core_clock.value = "150000000"
+        studio.core_clock.value = "150"
         studio._core_changed(None)
         await studio._toggle_connection()
         assert studio.core_clock.disabled
@@ -676,7 +714,7 @@ def test_connected_firmware_clock_requantizes_the_frame(tmp_path):
 
 def test_core_clock_choice_keeps_requested_frequency_and_durations(tmp_path):
     studio = make_studio(tmp_path)
-    studio.core_clock.value = "100000000"
+    studio.core_clock.value = "100"
     studio._core_changed(None)
     config = studio.current_config
     assert config.core_hz == 100_000_000
@@ -692,7 +730,7 @@ def test_firmware_card_summarizes_warns_and_rejects_invalid_pins(tmp_path):
     studio.fw_pins["data_pin"].value = "JC3"
     studio.fw_pins["clock_pin"].value = "JC1"
     studio.fw_pins["latch_pin"].value = "JC7"
-    studio.fw_core.value = "150000000"
+    studio.fw_core.value = "150"
     studio._firmware_changed()
     assert "Firmware personnalisé" in studio.fw_summary.value
     assert "CLK maximale 150 MHz" in studio.fw_summary.value
@@ -739,7 +777,7 @@ def test_local_and_remote_builds_receive_the_selected_firmware(tmp_path, monkeyp
 
     async def exercise():
         studio = make_studio(tmp_path)
-        studio.fw_core.value = "100000000"
+        studio.fw_core.value = "100"
         monkeypatch.setattr(studio, "_toolchain", lambda: Chain())
         await studio._build(None)
         assert studio.windows_bitstream_path.value == studio.bitstream_path.value
@@ -932,6 +970,8 @@ def test_revision_three_firmware_is_flagged_without_free_clock(tmp_path):
     studio._firmware_identified(FirmwareInfo(3, 200_000_000, 7, 0))
     assert "sans CLK libre" in studio.firmware_status.value
     studio._firmware_identified(FirmwareInfo(4, 200_000_000, 15, 0))
+    assert "sans broche TR" in studio.firmware_status.value  # révision 4 : pas de TR
+    studio._firmware_identified(FirmwareInfo(5, 200_000_000, 31, 0))
     assert "sans" not in studio.firmware_status.value
 
 
@@ -1391,3 +1431,169 @@ def test_workspace_warnings_flag_onedrive_and_long_paths():
     warnings = workspace_warnings(synced)
     assert len(warnings) == 2
     assert "OneDrive" in warnings[0] and "260" in warnings[1]
+
+
+def test_clock_planner_finds_the_nearest_frequency_and_adopts_its_core(tmp_path):
+    studio = make_studio(tmp_path)
+    # 150 MHz: the reference core gives 200 or 100 MHz, equally far: the lower
+    # one. A 150 MHz core is exact.
+    studio.frequency.value = "150"
+    studio._frequency_changed(None)
+    assert studio.current_config.divider == 2
+    assert "CLK 150 MHz (exacte)" in studio.clock_plan_note.value
+    assert "Nouveau firmware nécessaire" in studio.clock_plan_note.value
+    assert not studio.clock_adopt_button.disabled
+    studio._adopt_clock_plan()
+    assert studio.core_hz == 150_000_000 and studio.core_clock.value == "150"
+    assert studio.fw_core.value == "150"
+    config = studio.current_config
+    assert (config.core_hz, config.divider, config.frequency_hz) == (150_000_000, 1, 150e6)
+    assert "avec ce firmware" in studio.clock_plan_note.value
+    assert studio.clock_adopt_button.disabled
+    # Never above the request: 151 MHz then stays at 150 MHz.
+    studio.clock_below.value = True
+    studio.frequency.value = "151"
+    studio._frequency_changed(None)
+    assert studio.current_config.frequency_hz == 150e6
+    assert "150 MHz avec ce firmware, N = 1" in studio.clock_plan_note.value
+    # Above the absolute limit: refused by the planner.
+    studio.frequency.value = "400"
+    studio._frequency_changed(None)
+    assert "limite absolue" in studio.clock_plan_note.value
+    assert studio.clock_adopt_button.disabled
+
+
+def _fake_preparation(calls):
+    from arty_frame_studio.model import save_profile
+
+    def prepare(root, frame, firmware, tools, *, log=None):
+        calls.append((frame.core_hz, frame.divider, firmware.core_hz))
+        profile = root / "profiles" / "pilotage-frame.json"
+        profile.parent.mkdir(parents=True, exist_ok=True)
+        save_profile(frame, profile)
+        return SimpleNamespace(
+            bitstream=root / f"core-{firmware.core_hz}.bit",
+            firmware=firmware,
+            frame_profile=profile,
+            reused=firmware.is_reference,
+        )
+
+    return prepare
+
+
+def test_generate_bitstream_builds_the_planned_core_without_a_board(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app, "prepare_firmware", _fake_preparation(calls))
+    monkeypatch.setattr(app, "program_arty", lambda *_args, **_kw: pytest.fail("JTAG"))
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.toolchain_path.value = str(tmp_path / "toolchain.json")
+        (tmp_path / "toolchain.json").write_text("{}")
+        studio.frequency.value = "165"
+        studio._frequency_changed(None)
+        assert not studio.clock_build_button.disabled
+        await studio._generate_clock_plan()
+        # 165 MHz exact: 100 MHz x 33 / (4 x 5), N = 1, adopted by the frame.
+        assert calls == [(165_000_000, 1, 165_000_000)]
+        assert studio.core_hz == 165_000_000 and studio.fw_core.value == "165"
+        assert studio.windows_bitstream_path.value == str(tmp_path / "core-165000000.bit")
+        assert "compilé en local" in studio.preparation_note.value
+        # A frequency the reference firmware reaches reuses the supplied .bit.
+        studio.frequency.value = "10"
+        studio._frequency_changed(None)
+        await studio._generate_clock_plan()
+        assert calls[-1] == (200_000_000, 20, 200_000_000)
+        assert "réutilisé" in studio.preparation_note.value
+        assert studio.last_sent is None and not studio.page.messages
+
+    run_async(exercise())
+
+
+def test_generate_bitstream_with_a_board_connected_targets_the_adopted_clock(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app, "prepare_firmware", _fake_preparation(calls))
+    monkeypatch.setattr(app, "program_arty", lambda *_args, **_kw: pytest.fail("JTAG"))
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.toolchain_path.value = str(tmp_path / "toolchain.json")
+        (tmp_path / "toolchain.json").write_text("{}")
+        studio.device = DemoDevice()
+        studio.device.connect()
+        studio.frequency.value = "270"
+        studio._frequency_changed(None)
+        assert "Nouveau firmware nécessaire (cœur 270 MHz)" in studio.clock_plan_note.value
+        # Adopting then preparing separately must not fall back to the
+        # loaded firmware's 200 MHz core.
+        studio._adopt_clock_plan()
+        await studio._prepare_from_pilotage()
+        assert calls == [(270_000_000, 1, 270_000_000)]
+        assert studio.fw_core.value == "270"
+        # The connected board keeps its own time base for Envoyer.
+        assert studio.core_hz == 200_000_000
+        assert studio.current_config.core_hz == 200_000_000
+        await studio._generate_clock_plan()
+        assert calls[-1] == (270_000_000, 1, 270_000_000)
+        assert studio.windows_bitstream_path.value == str(tmp_path / "core-270000000.bit")
+        assert studio.last_sent is None
+
+    run_async(exercise())
+
+
+def test_preparation_without_adoption_keeps_the_connected_board_core(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app, "prepare_firmware", _fake_preparation(calls))
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.toolchain_path.value = str(tmp_path / "toolchain.json")
+        (tmp_path / "toolchain.json").write_text("{}")
+        studio.device = DemoDevice()
+        studio.device.connect()
+        # INFO announced a custom 270 MHz core; the FPGA tab still shows 200 MHz.
+        studio._apply_core(270_000_000)
+        studio.frequency.value = "135"
+        studio._frequency_changed(None)
+        assert studio.fw_core.value == "200"
+        await studio._prepare_from_pilotage()
+        assert calls == [(270_000_000, 2, 270_000_000)]
+        assert studio.fw_core.value == "270"
+
+    run_async(exercise())
+
+
+def test_generate_bitstream_refuses_a_frequency_beyond_the_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        app, "prepare_firmware", lambda *_a, **_kw: pytest.fail("no build beyond 300 MHz")
+    )
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.frequency.value = "400"
+        studio._frequency_changed(None)
+        assert studio.clock_build_button.disabled
+        await studio._generate_clock_plan()
+        assert any("limite absolue" in line for line in studio.log_lines)
+
+    run_async(exercise())
+
+
+def test_core_clock_fields_accept_typed_mhz_at_their_precision(tmp_path):
+    assert app.core_from_mhz("151.43") == 151_428_571
+    assert app.core_from_mhz("151.4") == 151_428_571
+    assert app.core_from_mhz("200") == 200_000_000
+    with pytest.raises(ValueError, match="151.428571"):
+        app.core_from_mhz("151.40")
+    with pytest.raises(ValueError, match="la plus proche est 150 MHz"):
+        app.core_from_mhz("150.01")
+    with pytest.raises(ValueError, match="nombre"):
+        app.core_from_mhz("abc")
+    studio = make_studio(tmp_path)
+    studio.core_clock.value = "151.43"
+    studio._core_changed(None)
+    assert studio.core_hz == 151_428_571 and studio.core_clock.value == "151.428571"
+    assert "53 / (5 × 7)" in studio.core_clock.helper_text
+    studio.core_clock.value = "151.40"
+    studio._core_changed(None)
+    assert studio.core_hz == 151_428_571 and studio.core_clock.error_text

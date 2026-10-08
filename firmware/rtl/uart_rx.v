@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 module uart_rx #(
-    parameter integer CLOCK_HZ=200000000,
+    parameter integer CLOCK_HZ=100000000,
     parameter integer BAUD=115200
 ) (
     input wire clk, reset, rx,

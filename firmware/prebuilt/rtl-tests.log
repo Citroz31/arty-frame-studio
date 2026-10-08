@@ -1,11 +1,15 @@
-PASS tb_engine: 1990906 half-tick waveform checks
-/home/runner/work/arty-frame-studio/arty-frame-studio/tests/rtl/tb_engine.sv:214: $finish called at 4983135000 (1ps)
-PASS tb_oddr: 42 aligned pin-edge checks
-/home/runner/work/arty-frame-studio/arty-frame-studio/tests/rtl/tb_oddr.sv:42: $finish called at 107500 (1ps)
-PASS tb_protocol: 44 request/response cases
-/home/runner/work/arty-frame-studio/arty-frame-studio/tests/rtl/tb_protocol.sv:231: $finish called at 13872600 (1ps)
-PASS tb_top: UART PING/SEND/STATUS/LED/INFO, 200 MHz modeled burst, continuous and free-CLK SEND/STOP, 2 stopped-clock asynchronous resets and UART recovery
-/home/runner/work/arty-frame-studio/arty-frame-studio/tests/rtl/tb_top.sv:262: $finish called at 34789947600 (1ps)
-PASS tb_uart: production 200 MHz / 115200 baud loopback
-/home/runner/work/arty-frame-studio/arty-frame-studio/tests/rtl/tb_uart.sv:37: $finish called at 700142500 (1ps)
+PASS tb_engine: 1991761 half-tick waveform checks
+/home/runner/work/arty-frame-studio/arty-frame-studio/tests/rtl/tb_engine.sv:233: $finish called at 4987415000 (1ps)
+PASS tb_oddr: 44 aligned pin-edge checks
+/home/runner/work/arty-frame-studio/arty-frame-studio/tests/rtl/tb_oddr.sv:42: $finish called at 112500 (1ps)
+PASS tb_protocol: 51 request/response cases, core half period 2.1 ns
+/home/runner/work/arty-frame-studio/arty-frame-studio/tests/rtl/tb_protocol.sv:286: $finish called at 15547600 (1ps)
+PASS tb_protocol: 51 request/response cases, core half period 40.0 ns
+/home/runner/work/arty-frame-studio/arty-frame-studio/tests/rtl/tb_protocol.sv:286: $finish called at 19272600 (1ps)
+PASS tb_sipo: 4 modes, 14 receiver captures at 10 MHz, active-low release counterexample and continuous STOP
+/home/runner/work/arty-frame-studio/arty-frame-studio/tests/rtl/tb_sipo.sv:111: $finish called at 14337600 (1ps)
+PASS tb_top: UART PING/SEND/STATUS/LED/INFO/TR, 200 MHz modeled burst, continuous and free-CLK SEND/STOP, 2 stopped-clock asynchronous resets and UART recovery
+/home/runner/work/arty-frame-studio/arty-frame-studio/tests/rtl/tb_top.sv:299: $finish called at 42049872600 (1ps)
+PASS tb_uart: production 100 MHz control clock / 115200 baud loopback
+/home/runner/work/arty-frame-studio/arty-frame-studio/tests/rtl/tb_uart.sv:37: $finish called at 710225000 (1ps)
 RTL: toutes les simulations ont réussi (aucune mesure matérielle).

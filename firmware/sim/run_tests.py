@@ -9,6 +9,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+VARIANTS = {"tb_protocol": [[], [("CORE_HALF_NS", "40.0")]]}
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -40,23 +42,29 @@ def main() -> int:
             check=True,
         )
         for test in tests:
-            compiled = output / (test.stem + ".vvp")
-            subprocess.run(
-                [
-                    "iverilog",
-                    "-g2012",
-                    "-Wall",
-                    "-s",
-                    test.stem,
-                    "-o",
-                    str(compiled),
-                    *map(str, rtl),
-                    str(models),
-                    str(test),
-                ],
-                check=True,
-            )
-            subprocess.run(["vvp", str(compiled)], check=True, timeout=120)
+            # Extra parameter sets: the protocol bench also runs a core clock
+            # slower than the control clock, the other side of engine_link.
+            for index, overrides in enumerate(VARIANTS.get(test.stem, [[]])):
+                compiled = output / f"{test.stem}-{index}.vvp"
+                subprocess.run(
+                    [
+                        "iverilog",
+                        "-g2012",
+                        "-Wall",
+                        "-s",
+                        test.stem,
+                        *(f"-P{test.stem}.{name}={value}" for name, value in overrides),
+                        "-o",
+                        str(compiled),
+                        *map(str, rtl),
+                        str(models),
+                        str(test),
+                    ],
+                    check=True,
+                )
+                # tb_top replays about 42 ms of the real 115200-baud UART at 5 ns
+                # steps: minutes on a slow runner. The limit only catches a hang.
+                subprocess.run(["vvp", str(compiled)], check=True, timeout=900)
     print("RTL: toutes les simulations ont réussi (aucune mesure matérielle).")
     return 0
 

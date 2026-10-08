@@ -115,6 +115,12 @@ def build_layout(s: Studio) -> ft.Control:
             spacing=12,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),
+        ft.Row(
+            [s.tr_switch, s.tr_note],
+            wrap=True,
+            spacing=12,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
     )
     s.lsb.width = 210
     s.latch_low.width = 210
@@ -139,6 +145,9 @@ def build_layout(s: Studio) -> ft.Control:
         s._heading("Horloge et séquence", "Lecture de DATA au front montant de CLK"),
         _grid((s.frequency, 7), (s.divider, 5)),
         s.frequency_actual,
+        s.clock_below,
+        s.clock_plan_note,
+        ft.Row([s.clock_adopt_button, s.clock_build_button], wrap=True),
         _grid((s.latch_ns, 6), (s.gap_ns, 6), (s.repeat, 6)),
         ft.Column([s.continuous, s.free_clock], spacing=4),
         s.emission_note,
@@ -159,7 +168,7 @@ def build_layout(s: Studio) -> ft.Control:
         ),
         _section(
             "Horloge interne et sorties",
-            "Référence : cœur 200 MHz · DATA JB1 · CLK JB2 · LATCH JB3",
+            "Référence : cœur 200 MHz · DATA JB1 · CLK JB2 · LATCH JB3 · TR JB4",
             [
                 _grid((s.core_clock, 12)),
                 _grid(*[(control, 4) for control in s.pilotage_pins.values()]),
@@ -293,10 +302,11 @@ def build_layout(s: Studio) -> ft.Control:
         s.selected_firmware_note,
         _section(
             "Options JTAG",
-            "Facultatif : seulement avec plusieurs cartes ou une DLL spécifique",
+            "Vitesse de chargement ; cartes multiples ou DLL spécifique",
             [
                 _path(s, s.ftdi_dll_path, ["dll"]),
                 _grid((s.ftdi_serial, 12)),
+                s.jtag_speed,
             ],
         ),
         ft.Text(
@@ -317,7 +327,7 @@ def build_layout(s: Studio) -> ft.Control:
         ),
         ft.TextButton("Aller à Pilotage", icon=ft.Icons.USB, on_click=s._open_control),
         ft.Text(
-            "Référence : DATA JB1/E15 · CLK JB2/E16 · LATCH JB3/D15 · "
+            "Référence : DATA JB1/E15 · CLK JB2/E16 · LATCH JB3/D15 · TR JB4/C15 · "
             "masse JB5 ou JB11. Sorties 3,3 V ; commencer à fréquence réduite.",
             size=12,
             color=BLUE,
@@ -424,6 +434,7 @@ def build_layout(s: Studio) -> ft.Control:
             ft.Tab(text="Pilotage", icon=ft.Icons.TUNE, content=control_tab),
             ft.Tab(text="Chronogramme", icon=ft.Icons.SHOW_CHART, content=waveform_tab),
             ft.Tab(text="Oscilloscope", icon=ft.Icons.MONITOR_HEART, content=s.scope_panel.build()),
+            ft.Tab(text="Mesure", icon=ft.Icons.QUERY_STATS, content=s.measure_panel.build()),
             ft.Tab(text="FPGA", icon=ft.Icons.MEMORY, content=fpga_tab),
             ft.Tab(text="Journal", icon=ft.Icons.TERMINAL, content=journal_tab),
         ],

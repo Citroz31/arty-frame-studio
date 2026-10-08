@@ -7,7 +7,13 @@ import math
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
-from .firmware_config import MAX_CORE_HZ, MIN_CORE_HZ, REFERENCE_CORE_HZ
+from .firmware_config import (
+    MAX_CORE_HZ,
+    MAX_FRAME_CLOCK_HZ,
+    MIN_CORE_HZ,
+    REFERENCE_CORE_HZ,
+    format_hz,
+)
 
 # Horloge de cœur du firmware de référence ; un firmware personnalisé annonce
 # la sienne par INFO. Un tick vaut un demi-cycle de cœur (2,5 ns à 200 MHz).
@@ -125,8 +131,8 @@ class FrameConfig:
 def check_core_hz(core_hz: int) -> int:
     if type(core_hz) is not int or not MIN_CORE_HZ <= core_hz <= MAX_CORE_HZ:
         raise ValueError(
-            f"Horloge de cœur entière entre {MIN_CORE_HZ // 10**6} et "
-            f"{MAX_CORE_HZ // 10**6} MHz requise."
+            f"Horloge de cœur entière entre {format_hz(MIN_CORE_HZ)} et "
+            f"{format_hz(MAX_CORE_HZ)} requise."
         )
     return core_hz
 
@@ -136,17 +142,33 @@ def tick_ns(core_hz: int = REFERENCE_HZ) -> float:
     return 1e9 / (2 * check_core_hz(core_hz))
 
 
-def divider_for_frequency(hz: float, core_hz: int = REFERENCE_HZ) -> int:
-    """Choisit la fréquence réalisable la plus élevée sans dépasser la demande.
+def divider_for_frequency(hz: float, core_hz: int = REFERENCE_HZ, *, nearest: bool = False) -> int:
+    """Diviseur N d'une fréquence CLK demandée, pour l'horloge de cœur donnée.
 
-    Un récepteur dimensionné pour ``hz`` n'est ainsi jamais surcadencé : 150 MHz
-    donne 100 MHz (N=2), pas 200 MHz. Les comparaisons finales corrigent
-    l'arrondi flottant du quotient, sans tolérance autorisant un dépassement.
+    Par défaut, la fréquence réalisable la plus élevée sans dépasser la demande :
+    un récepteur dimensionné pour ``hz`` n'est ainsi jamais surcadencé : 150 MHz
+    donne 100 MHz (N=2), pas 200 MHz. ``nearest`` choisit la plus proche,
+    au-dessus ou au-dessous (à égalité, la plus basse) : 150 MHz donne alors
+    200 MHz (N=1). Les comparaisons finales corrigent l'arrondi flottant du
+    quotient, sans tolérance autorisant un dépassement. La demande ne dépasse
+    jamais la limite absolue du FPGA, ``MAX_FRAME_CLOCK_HZ``.
     """
     check_core_hz(core_hz)
-    if not math.isfinite(hz) or not core_hz / MAX_COUNTER <= hz <= core_hz:
+    if not math.isfinite(hz) or not 0 < hz <= MAX_FRAME_CLOCK_HZ:
         raise ValueError(
-            f"Fréquence entre {core_hz / MAX_COUNTER:.3f} Hz et {core_hz / 1e6:g} MHz requise."
+            f"Fréquence positive jusqu'à {format_hz(MAX_FRAME_CLOCK_HZ)} requise "
+            "(limite absolue du FPGA)."
+        )
+    if nearest:
+        lower = max(1, min(MAX_COUNTER, math.floor(core_hz / hz)))
+        return min(
+            {lower, min(MAX_COUNTER, lower + 1)},
+            key=lambda divider: (abs(core_hz / divider - hz), core_hz / divider),
+        )
+    if hz < core_hz / MAX_COUNTER:
+        raise ValueError(
+            f"Fréquence d'au moins {core_hz / MAX_COUNTER:.3f} Hz requise avec un cœur à "
+            f"{format_hz(core_hz)} (N = {MAX_COUNTER} au plus)."
         )
     divider = math.ceil(core_hz / hz)
     if divider > 1 and core_hz / (divider - 1) <= hz:

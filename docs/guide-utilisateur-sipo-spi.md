@@ -96,7 +96,7 @@ Le parcours Windows natif n'exige pas de remplacement du pilote avec Zadig.
    valeur obligatoire : le numéro varie selon le PC.
 6. Cliquer sur **Connecter**. Le programme teste le dialogue puis identifie
    le firmware. Pour utiliser toutes les options de ce guide, vérifier
-   **révision 4**, **cœur 200 MHz** et le brochage de référence.
+   **révision 6**, **cœur 200 MHz** et le brochage de référence.
 7. Cliquer sur **Tester les LED** : les LED vertes LD4 à LD7 doivent défiler.
    Ce test confirme le dialogue UART avec le firmware de la carte.
 
@@ -442,6 +442,11 @@ même dans sa version 200 MHz. Le détail des limites, des références Keysight
 des exports et de la ligne de commande figure dans
 [Oscilloscope](oscilloscope.md).
 
+**Plusieurs mots à la suite.** L'onglet **Mesure** envoie `00000000`, `00000001`,
+`00000010`… et attend, après chacun, votre validation, une mesure de l'oscilloscope
+ou la lecture d'un instrument SCPI (par exemple un VNA). Voir
+[Mode mesure](mode-mesure.md).
+
 ## 9. Résoudre les difficultés fréquentes
 
 | Observation | Action suivante |
@@ -470,12 +475,13 @@ du chargement et des signaux sur votre carte.
 
 - [Guide Windows et diagnostics détaillés](windows.md)
 - [Oscilloscope : mesures, déclenchement, curseurs](oscilloscope.md)
+- [Mode mesure : suite de mots et validation après chacun](mode-mesure.md)
 - [Brochage et caractéristiques électriques](hardware.md)
 - [Compilation d'un firmware personnalisé](toolchain.md)
 - [Format des commandes UART](protocol.md)
 - [Dépôt et dernière version](https://github.com/Citroz31/arty-frame-studio)
 
-Le guide vise le firmware de référence **révision 4, cœur 200 MHz**. Avec un
+Le guide vise le firmware de référence **révision 6, cœur 200 MHz**. Avec un
 firmware personnalisé, l'application lit l'horloge réelle et adapte les
 paramètres ; vérifier à nouveau la fréquence obtenue, les durées et le brochage
 avant de reproduire l'exemple.

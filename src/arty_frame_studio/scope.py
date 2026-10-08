@@ -54,7 +54,8 @@ _RUN_BIT = 8
 LOGIC_HIGH = 3.3
 _HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.\-]{0,252}")
 _MAX_BLOCK_BYTES = 64 * 1024 * 1024
-_MAX_LINE_BYTES = 1024 * 1024
+# Une trace ASCII d'un VNA (16 001 points × 2 × 22 caractères) dépasse 700 Kio.
+_MAX_LINE_BYTES = 16 * 1024 * 1024
 _VISA_RESOURCE = re.compile(r"(?:USB|TCPIP|GPIB)\d*::[^\r\n\0]+::INSTR", re.IGNORECASE)
 
 

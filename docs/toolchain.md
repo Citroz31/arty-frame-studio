@@ -13,8 +13,9 @@ Vivado ni droits administrateur. GitHub Actions reste disponible.
 
 Le [firmware précompilé](../firmware/prebuilt/arty_frame.bit) a été produit
 avec cette chaîne : synthèse, placement/routage et contrôle de timing réussis
-à **200 MHz**, avec une Fmax après routage de **210,79 MHz** (graine 8). Les sorties
-physiques et le chargement de ce firmware n'ont pas encore été testés sur carte.
+à **200 MHz**, avec une Fmax après routage de **288,93 MHz** (graine 1). Les
+sorties physiques et le chargement de ce firmware (révision 6) n'ont pas
+encore été testés sur carte.
 
 ## Outils épinglés et provenance
 
@@ -58,8 +59,8 @@ et les fichiers extraits. Les builds sont conservés séparément dans
 
 Depuis **Pilotage**, **Préparer le firmware depuis Pilotage** réutilise le
 firmware compatible ou compile les réglages choisis sur ce PC. La compilation
-utilise Yosys ABC9, le backend nextpnr `himbaechel`, la graine 8 et une marge de
-timing recherchée de 3 %. Le `.bit` n'est disponible pour programmation que si
+utilise Yosys ABC9, le backend nextpnr `himbaechel`, le balayage des graines
+de placement (jusqu'à 16) et une marge de timing recherchée de 3 %. Le `.bit` n'est disponible pour programmation que si
 le timing à l'horloge choisie, les resets ODDR et le format/cible du fichier
 sont validés. La marge est un objectif de placement ; un résultat qui atteint
 l'horloge demandée reste accepté même si sa marge est inférieure à 3 %.
@@ -105,25 +106,29 @@ Le fichier publié dans `firmware/prebuilt/` est accompagné de :
 | [build.log](../firmware/prebuilt/build.log) | Commandes et résultats, dont le rapport de fréquence après routage |
 | [timing.json](../firmware/prebuilt/timing.json) | Rapport de timing nextpnr |
 
-Le build de référence utilise **ABC9**, la graine nextpnr **8** (seule des
-graines 1 à 8 à dépasser 206 MHz) et la cible `xc7a100tcsg324-1`. Le
-rapport final indique **210,79258728027344 MHz** sur `core_clock`, avec
-**PASS at 200.00 MHz**. Le `.bit` contient un IDCODE
-`0x03631093`, compatible avec l'IDCODE `0x13631093` rapporté sur la carte
-(révision différente). Les trois resets ODDR R→SR ont été vérifiés dans le
-netlist routé. Le fichier mesure **3 825 995 octets** et son SHA256 est :
+Le build de référence utilise **ABC9**, la graine nextpnr **1** (la première
+essayée dépasse déjà 200 MHz avec 3 % de marge) et la cible
+`xc7a100tcsg324-1`. Le rapport final indique **288,933837890625 MHz** sur
+`core_clock`, avec **PASS at 200.00 MHz**, et 149,43 MHz sur `ctrl_clock`
+(**PASS at 100.00 MHz**). Le `.bit` contient un IDCODE `0x03631093`,
+compatible avec l'IDCODE `0x13631093` rapporté sur la carte (révision
+différente). Les trois resets ODDR R→SR ont été vérifiés dans le netlist
+routé et les compteurs du PLL relus dans le FASM redonnent ×10 / 1 / 5. Le
+fichier mesure **3 825 995 octets** et son SHA256 est :
 
 ```text
-02c208aa8cbe79599f605e2f14d667a8f4a77361e56637832449e359f2edb57e
+8825690698d6848433a4f60f2bec8ba6ca19e5f873f0cae1c06dd2ca90ebe701
 ```
 
 ## Reproduire un build dans un environnement de développement
 
-Le firmware distribué provient du commit `dbe6803` et du
-[run GitHub Actions 37210822783](https://github.com/Citroz31/arty-frame-studio/actions/runs/37210822783),
+Le firmware distribué provient du commit `7ab7829` et du
+[run GitHub Actions 37723093682](https://github.com/Citroz31/arty-frame-studio/actions/runs/37723093682),
 publié par son job `publish`. Il ajoute au brochage UART corrigé, aux
 entrées ODDR enregistrées et aux commandes LED et INFO l'émission continue
-jusqu'à STOP (révision 3) et la CLK libre pendant LATCH et pause (révision 4).
+jusqu'à STOP (révision 3), la CLK libre pendant LATCH et pause (révision 4), la
+broche TR statique, 3,3 V ou 0 V (révision 5), et le moteur haute fréquence à
+deux domaines d'horloge (révision 6).
 `arty-frame firmware-check` contrôle le fichier, les sources et le rapport
 de timing avant son utilisation, sans outil FPGA ni matériel raccordé.
 
@@ -186,12 +191,19 @@ fronts. La configuration par défaut reproduit exactement le firmware de
 référence et le XDC du dépôt, qu'un test compare octet par octet.
 
 Pour une autre configuration, le build écrit un XDC généré dans son dossier
-`<build_dir>/runs/<id>/`, passe `CORE_HZ`, `PLL_MULT`, `PLL_OUT_DIV` et `BUILD_ID`
-à `arty_top` par `chparam` de Yosys, demande `--freq` à l'horloge choisie et
-exige le timing à cette horloge. Les sources du dépôt ne sont pas modifiées.
-Le reçu `successful-build.json` mémorise la configuration ; `program`
-vérifie la même configuration. Une incohérence entre `CORE_HZ` et le PLL
-arrête l'élaboration du RTL.
+`<build_dir>/runs/<id>/`, passe `CORE_HZ`, `PLL_MULT`, `PLL_IN_DIV`,
+`PLL_OUT_DIV` et `BUILD_ID` à `arty_top` par `chparam` de Yosys, demande
+`--freq` à l'horloge choisie et exige le timing à cette horloge. La période du
+XDC est la période exacte du PLL, `10 ns × D × O / M`, tronquée au
+nanoseconde-milliardième : la contrainte n'est jamais plus faible que
+l'horloge. Les sources du dépôt ne sont pas modifiées. Le reçu
+`successful-build.json` mémorise la configuration et le réglage PLL ;
+`program` vérifie la même configuration. Une incohérence entre `CORE_HZ` et le
+PLL, ou un réglage hors des limites -1, arrête l'élaboration du RTL.
+
+Après routage, le build relit le PLL dans le FASM : les compteurs DIVCLK,
+CLKFBOUT et CLKOUT0 (temps haut + temps bas, EDGE, NO_COUNT) doivent
+redonner exactement M, D et O. Sinon aucun bitstream n'est produit.
 
 Préparer ou compiler :
 
@@ -209,6 +221,8 @@ Fmax au moins égale à l'horloge). Le chemin est ensuite proposé à
 minutes. En ligne de commande :
 
 ```bash
+arty-frame clock-plan 151 --output fw.json                     # fréquence la plus proche
+arty-frame firmware-config --clk-mhz 151 --clock JB1 --data JB3 --latch JB7 --output fw.json
 arty-frame firmware-config --core-mhz 150 --clock JB1 --data JB3 --latch JB7 --output fw.json
 arty-frame build --toolchain toolchain.json --firmware-config fw.json     # local
 ARTY_GITHUB_TOKEN=… arty-frame remote-build --firmware-config fw.json      # GitHub
@@ -239,7 +253,9 @@ sur la branche.
 
 Le PLL utilise **`PLLE2_ADV`**, dont le paramètre
 `COMPENSATION="INTERNAL"` est défini, avec entrée 100 MHz, VCO 1 GHz et sortie
-200 MHz. `PLLE2_BASE` n'expose pas ce paramètre ; la synthèse réelle a permis
+200 MHz pour la référence ; un firmware personnalisé règle aussi
+`DIVCLK_DIVIDE`. Les tables de verrouillage et de filtre de nextpnr-xilinx
+dépendent de M seul, pour M de 2 à 64. `PLLE2_BASE` n'expose pas ce paramètre ; la synthèse réelle a permis
 de corriger cette erreur que le précédent modèle de simulation acceptait.
 
 Les trois ODDR conservent leur reset asynchrone **R**. Le packer himbaechel
@@ -262,25 +278,33 @@ Le XDC impose **10 ns sur clk100 et 5 ns sur core_clock** ; nextpnr reçoit
 également `--freq 200`. Le build exige le rapport final après routage
 `Max frequency for clock 'core_clock': … (PASS at 200.00 MHz)`, avec Fmax
 au moins 200 MHz et une contrainte au moins aussi stricte. Un firmware
-personnalisé applique la même règle à son horloge de cœur. Un rapport de
-placement provisoire n'est pas une preuve de fermeture du timing.
+personnalisé applique la même règle à son horloge de cœur. Le domaine de
+contrôle (UART, paquets, réponses), cadencé par l'oscillateur de 100 MHz, doit
+aussi passer à 100 MHz. Les chemins entre les deux domaines traversent
+`engine_link` (synchroniseurs à deux bascules, poignée de main) et nextpnr
+les rapporte sans verdict. Un rapport de placement provisoire n'est pas une
+preuve de fermeture du timing.
 `--timing-allow-fail` est interdit. Un rapport final absent ou en échec
 bloque la conversion en bitstream.
 
-Les chemins du cœur sont proches de 5 ns : le seul placement fait varier la
-Fmax routée d'environ 15 % (182 à 220 MHz observés). Le build essaie donc les
-graines de placement de `nextpnr_seeds` (par défaut 1 à 8) et s'arrête à la
-première qui dépasse l'exigence de `timing_margin` (par défaut 0.03, soit
-206 MHz pour 200 MHz). Sinon, il garde la graine **la plus rapide** parmi
-celles qui respectent le timing : ses fichiers FASM, `timing.json` et
-`routed.json` sont restaurés et `build.log` indique la graine retenue. Un
-échec de timing passe à la graine suivante, toute autre erreur de nextpnr
-arrête le build. La graine retenue figure dans le reçu et dans le manifeste.
-Le timing exigé reste le même : la graine ne change que le placement, jamais
-la contrainte ; `timing_margin` à 0 reprend la première graine qui passe.
-La configuration générée par l'installeur Windows utilise uniquement la
-graine 8, déjà retenue pour le firmware de référence ; `nextpnr_seeds` reste
-modifiable dans `toolchain.json` pour essayer d'autres placements.
+Le placement seul fait varier la Fmax routée du moteur d'environ ±15 % (221
+à 344 MHz observés entre 250 et 300 MHz). Le build essaie donc les graines de
+placement de `nextpnr_seeds` (par défaut 1 à 16) et s'arrête à la première
+qui dépasse l'exigence de `timing_margin` (par défaut 0.03, soit 206 MHz pour
+200 MHz). Après 8 essais, il s'arrête aussi dès qu'un placement passe et garde
+la graine **la plus rapide** parmi celles qui respectent le timing : ses
+fichiers FASM, `timing.json` et `routed.json` sont restaurés et `build.log`
+indique la graine retenue. Les graines 9 à 16 ne servent donc qu'aux
+exigences qu'aucun des 8 premiers placements n'a tenues, près de la limite
+absolue de 300 MHz. Un échec de timing passe à la graine suivante, toute
+autre erreur de nextpnr arrête le build ; si aucune graine ne passe, le
+message invite à choisir une horloge plus basse. La graine retenue figure
+dans le reçu et dans le manifeste. Le timing exigé reste le même : la graine
+ne change que le placement, jamais la contrainte ; `timing_margin` à 0
+reprend la première graine qui passe. La configuration générée par
+l'installeur Windows utilise ce balayage par défaut ; une ancienne
+`toolchain.json` limitée à la graine 8 peut être régénérée (« Installer les
+outils Windows locaux ») ou débarrassée de `nextpnr_seeds`.
 
 Avant chaque essai, les sorties de l'essai précédent sont supprimées ; les
 copies du meilleur résultat sont conservées séparément. Une sortie FASM,

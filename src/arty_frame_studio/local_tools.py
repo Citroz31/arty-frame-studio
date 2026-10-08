@@ -245,7 +245,8 @@ def _settings(installation: Path, project: Path) -> dict[str, Any]:
         "prjxray_db": str(xc7 / "share/nextpnr/external/prjxray-db/artix7"),
         "part": TARGET_PART,
         "build_dir": str(build),
-        "nextpnr_seeds": [8],
+        # Seeds: the default sweep, which stops at the first route with the
+        # margin. A single seed cannot close timing at every core frequency.
         "timing_margin": 0.03,
     }
 

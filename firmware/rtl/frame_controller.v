@@ -1,27 +1,38 @@
 `timescale 1ns/1ps
+// Packet controller in the control clock domain (clk). The frame engine runs
+// on core_clk, the frame clock chosen by the firmware configuration; the two
+// clocks are unrelated and only engine_link crosses between them. UART
+// traffic, validation and replies therefore never depend on the core clock.
 module frame_controller #(
     parameter integer PACKET_TIMEOUT_CYCLES=40000000,
     // INFO pages 0-5: revision, CORE_HZ low/high, capabilities, BUILD_ID low/high.
+    // CORE_HZ is the engine (frame) clock, not the control clock.
     // Capabilities: bit 0 LED, bit 1 INFO, bit 2 continuous SEND (repeat 0),
-    // bit 3 free-running CLK (SEND flags bit 2).
-    parameter [15:0] FIRMWARE_REVISION=16'd4,
+    // bit 3 free-running CLK (SEND flags bit 2), bit 4 TR output (opcode 7).
+    parameter [15:0] FIRMWARE_REVISION=16'd6,
     parameter [31:0] CORE_HZ=32'd200000000,
-    parameter [15:0] CAPABILITIES=16'h000F,
+    parameter [15:0] CAPABILITIES=16'h001F,
     parameter [31:0] BUILD_ID=32'h0
 ) (
     input wire clk, reset,
+    input wire core_clk, core_reset,
     input wire [7:0] rx_data,
     input wire rx_valid,
     output wire [7:0] tx_data,
     output wire tx_valid,
     input wire tx_ready,
+    // Control-domain view of the engine, for the status LEDs.
     output wire busy,
     output wire [15:0] completed,
+    // Core domain: the six ODDR inputs.
     output wire data_rise, data_fall, clock_rise, clock_fall,
     output wire latch_rise, latch_fall,
     // One-cycle LED command, at reply acceptance: {manual, pattern[3:0]}.
     output wire led_write,
-    output wire [4:0] led_value
+    output wire [4:0] led_value,
+    // One-cycle TR command, at reply acceptance: the new static output level.
+    output wire tr_write,
+    output wire tr_value
 );
     wire request_valid;
     wire [7:0] op, seq, length, parser_status;
@@ -38,12 +49,12 @@ module frame_controller #(
     // driving the engine. No payload-dependent validation lies on START's
     // high-fanout path to the 200 MHz engine registers.
     reg captured_valid, captured_empty, captured_send_shape;
-    reg captured_led_shape, captured_info_shape;
+    reg captured_led_shape, captured_info_shape, captured_tr_shape;
     reg [7:0] captured_op, captured_seq, captured_parser_status;
     reg [111:0] captured_payload;
     reg [4:0] captured_shift_amount;
     reg [31:0] captured_word_overflow;
-    reg validated_valid, send_eligible, stop_eligible, led_eligible;
+    reg validated_valid, send_eligible, stop_eligible, led_eligible, tr_eligible;
     reg [15:0] validated_info;
     reg [7:0] validated_op, validated_seq, validated_status;
     reg [111:0] validated_payload;
@@ -69,6 +80,7 @@ module frame_controller #(
                        next_static_status = 2;
                 5: if (!captured_led_shape) next_static_status = 2;
                 6: if (!captured_info_shape) next_static_status = 2;
+                7: if (!captured_tr_shape) next_static_status = 2;
                 default: next_static_status = 1;
             endcase
         end
@@ -95,6 +107,7 @@ module frame_controller #(
             captured_send_shape <= 0;
             captured_led_shape <= 0;
             captured_info_shape <= 0;
+            captured_tr_shape <= 0;
             captured_op <= 0;
             captured_seq <= 0;
             captured_parser_status <= 0;
@@ -105,6 +118,7 @@ module frame_controller #(
             send_eligible <= 0;
             stop_eligible <= 0;
             led_eligible <= 0;
+            tr_eligible <= 0;
             validated_info <= 0;
             validated_op <= 0;
             validated_seq <= 0;
@@ -126,6 +140,8 @@ module frame_controller #(
             // LED: {manual, 3'b0, pattern[3:0]}. INFO: one page byte, 0 to 5.
             captured_led_shape <= length == 1 && payload[6:4] == 0;
             captured_info_shape <= length == 1 && payload[7:0] <= 5;
+            // TR: one byte, 0 or 1 (bits 7 to 1 reserved, zero).
+            captured_tr_shape <= length == 1 && payload[7:1] == 0;
             captured_op <= op;
             captured_seq <= seq;
             captured_parser_status <= parser_status;
@@ -143,6 +159,8 @@ module frame_controller #(
                 && captured_op == 3 && captured_empty;
             led_eligible <= captured_valid && captured_parser_status == 0
                 && captured_op == 5 && captured_led_shape;
+            tr_eligible <= captured_valid && captured_parser_status == 0
+                && captured_op == 7 && captured_tr_shape;
             validated_info <= info_word(captured_payload[2:0]);
             validated_op <= captured_op;
             validated_seq <= captured_seq;
@@ -184,18 +202,32 @@ module frame_controller #(
     reg [7:0] status, reply_busy;
     reg [15:0] reply_completed;
 
-    wire start = send_eligible && reply_capacity && !busy;
+    // Engine status seen from the control domain. A SEND not yet taken by
+    // the engine counts as busy with no frame completed; a STOP in flight
+    // counts as idle, as its reply already said. Neither can be overtaken:
+    // SEND is refused (BUSY) while either is in flight.
+    wire start_pending, stop_pending, engine_busy;
+    wire [15:0] engine_completed;
+    wire view_busy = start_pending || (engine_busy && !stop_pending);
+    wire [15:0] view_completed = start_pending ? 16'd0 : engine_completed;
+    wire send_blocked = start_pending || stop_pending || engine_busy;
+    assign busy = view_busy;
+    assign completed = view_completed;
+
+    wire start = send_eligible && reply_capacity && !send_blocked;
     wire stop = stop_eligible && reply_capacity;
     assign led_write = led_eligible && reply_capacity;
     assign led_value = {validated_payload[7], validated_payload[3:0]};
+    assign tr_write = tr_eligible && reply_capacity;
+    assign tr_value = validated_payload[0];
 
     always @* begin
         status = validated_status;
-        reply_busy = {7'b0, busy};
-        reply_completed = completed;
+        reply_busy = {7'b0, view_busy};
+        reply_completed = view_completed;
         // BUSY and completion are sampled at actual acceptance, rather than
         // when the request entered the validation pipeline.
-        if (send_eligible && busy) status = 3;
+        if (send_eligible && send_blocked) status = 3;
         // INFO returns its page word in the 16-bit field of the common reply.
         if (validated_op == 6 && validated_status == 0) reply_completed = validated_info;
         if (start) begin
@@ -206,12 +238,43 @@ module frame_controller #(
         end
     end
 
-    frame_engine #(.WORD_PREALIGNED(1)) engine (
-        .clk(clk), .reset(reset), .start(start), .stop(stop),
-        .word_in({6'b0, validated_aligned_word}), .bits_in(validated_payload[36:32]),
-        .divider_in(validated_payload[55:40]), .latch_ticks_in(validated_payload[71:56]),
-        .gap_ticks_in(validated_payload[87:72]), .repeat_in(validated_payload[103:88]),
-        .flags_in(validated_payload[106:104]), .busy(busy), .completed(completed),
+    // SEND plan, written with the start request: frame_plan computes the
+    // sequencer constants here, at the control clock, and the core domain
+    // loads them without arithmetic. The plan changes only at the next
+    // accepted SEND, which waits until the engine has taken this one: the
+    // engine samples stable values across the clock boundary.
+    wire [182:0] next_plan;
+    frame_plan #(.WORD_PREALIGNED(1), .PLAN_BITS(183)) planner (
+        .word_in({6'b0, validated_aligned_word}),
+        .bits_in(validated_payload[36:32]),
+        .divider_in(validated_payload[55:40]),
+        .latch_ticks_in(validated_payload[71:56]),
+        .gap_ticks_in(validated_payload[87:72]),
+        .repeat_in(validated_payload[103:88]),
+        .flags_in(validated_payload[106:104]),
+        .plan(next_plan)
+    );
+    reg [182:0] send_plan;
+    always @(posedge clk) begin
+        if (reset) send_plan <= 0;
+        else if (start) send_plan <= next_plan;
+    end
+
+    wire core_start, core_stop, core_busy;
+    wire [15:0] core_completed;
+    engine_link link (
+        .ctrl_clk(clk), .ctrl_reset(reset),
+        .start_request(start), .stop_request(stop),
+        .start_pending(start_pending), .stop_pending(stop_pending),
+        .engine_busy(engine_busy), .engine_completed(engine_completed),
+        .core_clk(core_clk), .core_reset(core_reset),
+        .core_start(core_start), .core_stop(core_stop),
+        .core_busy(core_busy), .core_completed(core_completed)
+    );
+
+    frame_sequencer #(.PLAN_BITS(183)) engine (
+        .clk(core_clk), .reset(core_reset), .start(core_start), .stop(core_stop),
+        .plan(send_plan), .busy(core_busy), .completed(core_completed),
         .data_rise(data_rise), .data_fall(data_fall),
         .clock_rise(clock_rise), .clock_fall(clock_fall),
         .latch_rise(latch_rise), .latch_fall(latch_fall)
@@ -295,7 +358,7 @@ module frame_controller #(
                 preparing <= 1;
             end else if (preparing) begin
                 // One CRC byte per cycle, avoiding a 64-bit combinatorial
-                // cascade on the 200 MHz response preparation path.
+                // cascade on the response preparation path.
                 response_crc <= crc_byte(response_crc, tx_packet[crc_index*8 +: 8]);
                 if (crc_index == 9) begin
                     tx_packet[95:80] <= crc_byte(response_crc, tx_packet[crc_index*8 +: 8]);

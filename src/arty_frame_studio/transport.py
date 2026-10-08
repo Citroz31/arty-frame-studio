@@ -14,6 +14,7 @@ from .protocol import (
     CAPABILITY_FREE_CLOCK,
     CAPABILITY_INFO,
     CAPABILITY_LED,
+    CAPABILITY_TR,
     INFO_PAGES,
     DeviceStatus,
     FirmwareInfo,
@@ -25,6 +26,7 @@ from .protocol import (
     encode_request,
     info_from_pages,
     led_argument,
+    tr_argument,
 )
 
 
@@ -103,10 +105,10 @@ def list_ports() -> list[PortInfo]:
     return sorted(ports, key=lambda port: port.device)
 
 
-# PING, STATUS et INFO ne modifient pas la carte, et répéter un même motif LED
-# donne le même état : une réponse perdue peut être redemandée. SEND et STOP ne
-# sont jamais répétés automatiquement.
-_REPEATABLE = (Opcode.PING, Opcode.STATUS, Opcode.LED, Opcode.INFO)
+# PING, STATUS et INFO ne modifient pas la carte, et répéter un même motif LED ou
+# un même niveau de TR donne le même état : une réponse perdue peut être
+# redemandée. SEND et STOP ne sont jamais répétés automatiquement.
+_REPEATABLE = (Opcode.PING, Opcode.STATUS, Opcode.LED, Opcode.INFO, Opcode.TR)
 # Firmware antérieur à INFO : référence à 200 MHz, sans test LED.
 LEGACY_FIRMWARE = FirmwareInfo(revision=1, core_hz=REFERENCE_HZ, capabilities=0, build_id=0)
 CONNECT_PING_ATTEMPTS = 2
@@ -130,7 +132,7 @@ def _opcode_name(value: int) -> str:
 class SerialDevice:
     """Une requête à la fois, confirmation avec numéro de séquence et opcode.
 
-    PING (à la connexion), STATUS, LED et INFO sont redemandés une fois après
+    PING (à la connexion), STATUS, LED, TR et INFO sont redemandés une fois après
     un délai dépassé ; SEND et STOP ne le sont jamais. ``serial_factory`` reçoit
     ``port=None`` et retourne un port non ouvert, ouvert ensuite par ``open()`` :
     il permet de vérifier le protocole sans matériel.
@@ -330,6 +332,17 @@ class SerialDevice:
     def led(self, pattern: int | None) -> DeviceStatus:
         """Affiche ``pattern`` (bit 0 = LD4) quelques secondes, ou ``None`` : état."""
         return self._exchange(Opcode.LED, argument=led_argument(pattern), attempts=2)
+
+    def tr(self, level: int) -> DeviceStatus:
+        """Fixe la broche TR à 3,3 V (1) ou 0 V (0) ; elle garde ce niveau jusqu'au suivant."""
+        tr_argument(level)
+        firmware = self.firmware or LEGACY_FIRMWARE
+        if not firmware.tr:
+            raise TransportError(
+                f"Ce firmware (révision {firmware.revision}) n'a pas de broche TR : "
+                "charger le firmware révision 5 ou plus (onglet FPGA)."
+            )
+        return self._exchange(Opcode.TR, argument=level, attempts=2)
 
     def info(self) -> FirmwareInfo:
         """Lit l'identité du firmware ; DeviceError UNKNOWN_OPCODE avant la révision 2."""
@@ -564,8 +577,9 @@ class DemoDevice:
 
     Le nombre de trames terminées inclut le latch et l'intervalle. Les temps ne
     sont pas ralentis : une émission courte peut finir avant le prochain poll.
-    La démo simule un firmware de révision 4 à l'horloge ``core_hz`` ; le motif
-    des LED virtuelles est exposé par ``led_pattern`` (``None`` : état). Une
+    La démo simule un firmware de révision 6 à l'horloge ``core_hz`` ; le motif
+    des LED virtuelles est exposé par ``led_pattern`` (``None`` : état) et le
+    niveau de la broche TR par ``tr_level`` (0 V au départ). Une
     émission continue reste active jusqu'à STOP, son compteur modulo 65 536.
     """
 
@@ -573,14 +587,20 @@ class DemoDevice:
         self, *, clock: Callable[[], float] = time.monotonic, core_hz: int = REFERENCE_HZ
     ) -> None:
         self.firmware = FirmwareInfo(
-            revision=4,
+            revision=6,
             core_hz=core_hz,
             capabilities=(
-                CAPABILITY_LED | CAPABILITY_INFO | CAPABILITY_CONTINUOUS | CAPABILITY_FREE_CLOCK
+                CAPABILITY_LED
+                | CAPABILITY_INFO
+                | CAPABILITY_CONTINUOUS
+                | CAPABILITY_FREE_CLOCK
+                | CAPABILITY_TR
             ),
             build_id=0,
         )
         self.led_pattern: int | None = None
+        self.tr_level = 0
+        self.tr_history: list[int] = []
         self._clock = clock
         self._lock = threading.RLock()
         self._connected = False
@@ -642,6 +662,13 @@ class DemoDevice:
             self.led_pattern = pattern
             return self._snapshot()
 
+    def tr(self, level: int) -> DeviceStatus:
+        with self._lock:
+            self._require_connected()
+            self.tr_level = tr_argument(level)
+            self.tr_history.append(level)
+            return self._snapshot()
+
     def info(self) -> FirmwareInfo:
         with self._lock:
             self._require_connected()
@@ -653,6 +680,7 @@ class DemoDevice:
     def close(self) -> None:
         with self._lock:
             self.led_pattern = None
+            self.tr_level = 0  # la carte remet TR à 0 V à la réinitialisation
             self._update()
             self._busy = False
             self._started_at = None

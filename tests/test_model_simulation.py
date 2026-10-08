@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from arty_frame_studio.firmware_config import MAX_CORE_HZ, MAX_FRAME_CLOCK_HZ
 from arty_frame_studio.model import (
     FrameConfig,
     binary_bit_count,
@@ -97,10 +98,25 @@ def test_exact_dividers_and_immediately_lower_frequencies() -> None:
             assert 200e6 / selected <= below
 
 
-@pytest.mark.parametrize("frequency", [0, -1, 1, 201e6, float("nan"), float("inf")])
+@pytest.mark.parametrize(
+    "frequency", [0, -1, 1, MAX_FRAME_CLOCK_HZ + 1, float("nan"), float("inf")]
+)
 def test_unachievable_frequency_is_rejected(frequency: float) -> None:
     with pytest.raises(ValueError):
         divider_for_frequency(frequency)
+
+
+def test_nearest_divider_may_exceed_the_request_but_never_the_absolute_limit() -> None:
+    # Never above by default; the nearest on request, ties to the lower one.
+    assert divider_for_frequency(150e6) == 2
+    assert divider_for_frequency(151e6, nearest=True) == 1
+    assert divider_for_frequency(140e6, nearest=True) == 2
+    assert divider_for_frequency(400e3, nearest=True) == 500
+    # Above the core: N = 1 either way; below 1 tick period: N = 65 535.
+    assert divider_for_frequency(MAX_FRAME_CLOCK_HZ) == 1
+    assert divider_for_frequency(1.0, nearest=True) == 65_535
+    with pytest.raises(ValueError, match="limite absolue"):
+        divider_for_frequency(MAX_FRAME_CLOCK_HZ * 1.01, nearest=True)
 
 
 @pytest.mark.parametrize(
@@ -257,11 +273,10 @@ def test_core_clock_sets_frequency_ticks_and_waveform_time() -> None:
     assert waveform.transitions[1].time_ns == pytest.approx(1e9 / 300e6)
     assert divider_for_frequency(80e6, core_hz=150_000_000) == 2
     assert divider_for_frequency(150e6, core_hz=150_000_000) == 1
+    assert divider_for_frequency(160e6, core_hz=150_000_000) == 1
     assert ticks_for_ns(10, core_hz=150_000_000) == 3
-    with pytest.raises(ValueError, match="150 MHz"):
-        divider_for_frequency(160e6, core_hz=150_000_000)
     with pytest.raises(ValueError, match="cœur"):
-        FrameConfig(core_hz=250_000_000)
+        FrameConfig(core_hz=MAX_CORE_HZ + 1)
 
 
 def test_version_one_profiles_load_as_reference_firmware(tmp_path: Path) -> None:

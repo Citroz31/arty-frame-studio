@@ -5,7 +5,8 @@ import pytest
 
 from arty_frame_studio import cli
 from arty_frame_studio.cli import main
-from arty_frame_studio.model import FrameConfig
+from arty_frame_studio.firmware_config import FirmwareBuildConfig
+from arty_frame_studio.model import FrameConfig, load_profile
 from arty_frame_studio.protocol import DeviceStatus, FirmwareInfo, Opcode, StatusCode
 from arty_frame_studio.scope import KeysightScope
 from arty_frame_studio.scope_sim import SimulatedKeysight, signal_source
@@ -247,7 +248,7 @@ def test_native_jtag_probe_does_not_open_a_com_port(monkeypatch, capsys):
 
     calls = []
 
-    def probe(*, serial, dll_path):
+    def probe(*, serial, dll_path, tck_hz):
         calls.append((serial, dll_path))
         return Result()
 
@@ -283,10 +284,12 @@ def test_native_program_uses_existing_bitstream_without_build_or_com(monkeypatch
         serial: str = "ARTY001A"
         idcode: int = 0x03631093
         status: int = 0x00004010
+        tck_hz: int = 6_000_000
+        seconds: float = 6.2
 
     calls = []
 
-    def program(payload, *, serial, dll_path):
+    def program(payload, *, serial, dll_path, tck_hz):
         calls.append((payload, serial, dll_path))
         return Result()
 
@@ -345,7 +348,7 @@ def test_led_test_command_identifies_then_walks_leds(monkeypatch, capsys):
     monkeypatch.setattr(transport.time, "sleep", lambda _: None)
     assert main(["led-test", "--port", "COM7"]) == 0
     out = capsys.readouterr().out
-    assert '"revision": 4' in out and "commandes confirmées" in out
+    assert '"revision": 6' in out and "commandes confirmées" in out
     assert not demo.connected
 
 
@@ -549,3 +552,218 @@ def test_cli_unmonitored_hardware_continues_after_the_port_is_closed(
     assert main(["send", "--profile", str(profile), "--port", "COM7"]) == 0
     assert calls == ["send", "close"]
     assert "commande stop" in capsys.readouterr().err
+
+
+def _profile(tmp_path: Path) -> Path:
+    path = tmp_path / "frame.json"
+    assert main(["profile", str(path)]) == 0
+    return path
+
+
+def test_sweep_sends_counter_words_and_writes_the_csv(tmp_path: Path, capsys) -> None:
+    out = tmp_path / "result.csv"
+    arguments = [
+        "sweep", "--demo", "--profile", str(_profile(tmp_path)), "--base", "dec",
+        "--counter", "0", "3", "--width", "8", "--settle-ms", "0", "--output", str(out),
+    ]  # fmt: skip
+    capsys.readouterr()
+    assert main(arguments) == 0
+    text = capsys.readouterr().out
+    assert "4 mot(s) de 8 bits · 00000000 → 00000011" in text and "finished · 4 OK" in text
+    rows = out.read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 5 and rows[1].split(",")[1] == "00000000"
+
+
+def test_sweep_reads_a_simulated_vna_and_fails_outside_the_limits(tmp_path: Path, capsys) -> None:
+    words = tmp_path / "words.txt"
+    words.write_text("000000\n000100\n001000\n", encoding="utf-8")  # 6-digit words: width 6
+    arguments = [
+        "sweep", "--demo", "--profile", str(_profile(tmp_path)), "--words", str(words),
+        "--probe", "scpi", "--scpi-demo", "--scpi-trigger", "INITiate:IMMediate;*OPC?",
+        "--scpi-read", "CALCulate:MARKer1:Y?", "--scpi-labels", "S21 (dB)", "--min", "-3",
+    ]  # fmt: skip
+    capsys.readouterr()
+    assert main(arguments) == 1  # one word out of limits
+    text = capsys.readouterr().out
+    assert "3 mot(s) de 6 bits" in text and "SIMULATED VNA" in text
+    assert "S21 (dB) -3.5000" in text and "Échec" in text and "2 OK · 1 échec(s)" in text
+    assert main([*arguments, "--stop-on-fail"]) == 1
+    assert "fail ·" in capsys.readouterr().out
+
+
+def test_sweep_manual_validation_prompts_for_each_word(tmp_path: Path, monkeypatch, capsys) -> None:
+    answers = iter(["", "x", "-2,5"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    arguments = [
+        "sweep", "--demo", "--profile", str(_profile(tmp_path)), "--walking-one", "--width", "3",
+        "--probe", "manual", "--settle-ms", "0",
+    ]  # fmt: skip
+    capsys.readouterr()
+    assert main(arguments) == 1
+    text = capsys.readouterr().out
+    assert "3 mot(s) de 3 bits · 001 → 100" in text
+    assert "Échec" in text and "valeur relevée -2.5000" in text and "2 OK · 1 échec(s)" in text
+
+
+def test_sweep_refuses_incomplete_options_before_touching_hardware(tmp_path: Path, capsys) -> None:
+    profile = str(_profile(tmp_path))
+    base = ["sweep", "--demo", "--profile", profile, "--walking-one"]
+    assert main([*base, "--probe", "scpi"]) == 1
+    assert "--scpi-lan, --scpi-visa ou --scpi-demo" in capsys.readouterr().err
+    assert main([*base, "--probe", "scpi", "--scpi-demo"]) == 1
+    assert "au moins un --scpi-read" in capsys.readouterr().err
+    assert main([*base, "--probe", "scope"]) == 1
+    assert "--scope-lan ou --scope-visa" in capsys.readouterr().err
+    assert main([*base, "--repeats", "0"]) == 1
+    assert "--repeats" in capsys.readouterr().err
+    assert main(["sweep", "--demo", "--profile", profile, "--counter", "0", "9"]) == 1
+    assert "Mot invalide" in capsys.readouterr().err
+
+
+def _states_file(tmp_path: Path) -> Path:
+    path = tmp_path / "etats.csv"
+    path.write_text(
+        "mot;TR;nom\n000000000100;TX;un\n000001000100;RX;deux\n000000000111\n", encoding="utf-8"
+    )
+    return path
+
+
+def test_sweep_measures_a_vna_state_list_into_touchstone_files(tmp_path: Path, capsys) -> None:
+    folder = tmp_path / "campagne"
+    arguments = [
+        "sweep", "--demo", "--profile", str(_profile(tmp_path)),
+        "--states", str(_states_file(tmp_path)), "--probe", "vna", "--vna-demo",
+        "--vna-ports", "2", "--vna-freq", "3.5G", "--vna-dir", str(folder),
+        "--settle-ms", "0", "--min", "-5",
+    ]  # fmt: skip
+    capsys.readouterr()
+    assert main(arguments) == 0
+    text = capsys.readouterr().out
+    assert "3 état(s) de 12 bits" in text and "TR : 1 TX, 1 RX, 1 sans TR" in text
+    assert "N5245B-SIM" in text and "Canal 1 · 2 port(s) · 51 point(s)" in text
+    assert "S21 (dB) -2.3500" in text and "finished · 3 OK" in text
+    assert sorted(path.name for path in folder.glob("*.s2p")) == [
+        "0001_000000000100_tr1.s2p",
+        "0002_000001000100_tr0.s2p",
+        "0003_000000000111.s2p",
+    ]
+    header = (folder / "resultats.csv").read_text(encoding="utf-8").splitlines()[0]
+    assert header.startswith("pas,mot_bin,mot_hex,mot_dec,tr,nom,statut,S21 (dB)")
+    assert main([*arguments, "--vna-skip-existing"]) == 0
+    assert "Déjà mesuré" in capsys.readouterr().out
+
+
+def test_sweep_vna_options_are_checked_before_hardware(tmp_path: Path, capsys, monkeypatch) -> None:
+    from arty_frame_studio import sweep_cli
+
+    profile = str(_profile(tmp_path))
+    base = ["sweep", "--demo", "--profile", profile, "--states", str(_states_file(tmp_path))]
+    assert main([*base, "--probe", "vna"]) == 1
+    assert "--vna-lan, --vna-visa, --vna-demo ou --vna-auto" in capsys.readouterr().err
+    assert main([*base, "--probe", "vna", "--vna-demo", "--vna-param", "gain"]) == 1
+    assert "--vna-param" in capsys.readouterr().err
+    assert main([*base, "--probe", "vna", "--vna-demo", "--vna-ports", "9"]) == 1
+    assert "ports entre 1 et" in capsys.readouterr().err
+    monkeypatch.setattr(sweep_cli, "discover_instruments", lambda **_: [])
+    assert main([*base, "--probe", "vna", "--vna-auto"]) == 1
+    assert "Aucun VNA détecté" in capsys.readouterr().err
+
+
+def test_sweep_refuses_tr_states_with_a_firmware_without_tr(tmp_path: Path, monkeypatch, capsys):
+    from dataclasses import replace
+
+    from arty_frame_studio import sweep_cli
+    from arty_frame_studio.transport import DemoDevice
+
+    demo = DemoDevice()
+    demo.firmware = replace(demo.firmware, revision=4, capabilities=0x0F)
+    monkeypatch.setattr(sweep_cli, "SerialDevice", lambda port: demo)
+    arguments = [
+        "sweep", "--port", "COM7", "--profile", str(_profile(tmp_path)),
+        "--states", str(_states_file(tmp_path)),
+    ]  # fmt: skip
+    capsys.readouterr()
+    assert main(arguments) == 1
+    assert "révision 4" in capsys.readouterr().err and demo.tr_history == []
+
+
+def test_vna_list_prints_what_answers_and_explains_an_empty_result(capsys, monkeypatch) -> None:
+    from arty_frame_studio import sweep_cli
+    from arty_frame_studio.pna import FoundInstrument
+
+    calls = []
+
+    def fake(**kwargs):
+        calls.append(kwargs)
+        return [FoundInstrument("lan", "192.168.1.60", "Keysight Technologies,N5245B,MY1,A.1")]
+
+    monkeypatch.setattr(sweep_cli, "discover_instruments", fake)
+    assert main(["vna-list", "--scan", "--host", "10.0.0.5"]) == 0
+    out = capsys.readouterr().out
+    assert "VNA · Keysight Technologies,N5245B,MY1,A.1 · LAN 192.168.1.60" in out
+    assert calls == [{"scan_network": True, "hosts": ["10.0.0.5"]}]
+    monkeypatch.setattr(sweep_cli, "discover_instruments", lambda **_: [])
+    assert main(["vna-list"]) == 1
+    assert "Aucun instrument trouvé" in capsys.readouterr().err
+
+
+def test_tr_command_sets_the_pin_and_refuses_a_firmware_without_it(monkeypatch, capsys) -> None:
+    from dataclasses import replace
+
+    from arty_frame_studio import cli
+    from arty_frame_studio.transport import DemoDevice
+
+    demo = DemoDevice()
+    monkeypatch.setattr(cli, "SerialDevice", lambda port: demo)
+    assert main(["tr", "--port", "COM7", "1"]) == 0
+    assert "TR : 3,3 V (commande confirmée" in capsys.readouterr().out and demo.tr_history == [1]
+    assert main(["tr", "--port", "COM7", "0"]) == 0 and demo.tr_history == [1, 0]
+    capsys.readouterr()
+    old = DemoDevice()
+    old.firmware = replace(old.firmware, revision=4, capabilities=0x0F)
+    monkeypatch.setattr(cli, "SerialDevice", lambda port: old)
+    assert main(["tr", "--port", "COM7", "1"]) == 1
+    assert "révision 4" in capsys.readouterr().err and old.tr_history == []
+
+
+def test_firmware_config_accepts_the_tr_pin(tmp_path: Path, capsys) -> None:
+    output = tmp_path / "firmware.json"
+    assert main(["firmware-config", "--tr", "jc4", "--output", str(output)]) == 0
+    assert "TR JC4 (V11)" in capsys.readouterr().out and '"tr_pin": "JC4"' in output.read_text()
+    assert main(["firmware-config", "--tr", "JB1"]) == 1
+    assert "distinctes" in capsys.readouterr().err
+
+
+def test_clock_plan_reports_the_nearest_frequency_and_writes_the_build_inputs(
+    tmp_path: Path, capsys
+) -> None:
+    firmware = tmp_path / "firmware.json"
+    profile = tmp_path / "frame.json"
+    assert main(["clock-plan", "151", "--output", str(firmware), "--profile", str(profile)]) == 0
+    out = capsys.readouterr().out
+    assert "Réalisable : CLK 151.428571 MHz" in out and "N=1" in out
+    assert "inférieure 150 MHz" in out
+    assert "Nouveau firmware nécessaire : cœur 151428571 Hz" in out
+    assert "remote-build --firmware-config" in out
+    assert FirmwareBuildConfig.load(firmware).core_hz == 151_428_571
+    frame = load_profile(profile)
+    assert (frame.core_hz, frame.divider) == (151_428_571, 1)
+    # Never above: 150 MHz exactly, with a 150 MHz core.
+    assert main(["clock-plan", "151", "--below"]) == 0
+    assert "Réalisable : CLK 150 MHz (écart -1 MHz, -6623 ppm)" in capsys.readouterr().out
+    # The reference firmware already gives 10 MHz.
+    assert main(["clock-plan", "10"]) == 0
+    assert "firmware de référence (fourni) convient" in capsys.readouterr().out
+    # Above the absolute limit: refused.
+    assert main(["clock-plan", "301"]) == 1
+    assert "limite absolue" in capsys.readouterr().err
+
+
+def test_firmware_config_accepts_a_requested_clk_frequency(tmp_path: Path, capsys) -> None:
+    output = tmp_path / "firmware.json"
+    assert main(["firmware-config", "--clk-mhz", "122", "--output", str(output)]) == 0
+    out = capsys.readouterr().out
+    assert "CLK 122 MHz (exacte) = cœur 244 MHz / N=2" in out
+    assert FirmwareBuildConfig.load(output).core_hz == 244_000_000
+    assert main(["firmware-config", "--below"]) == 1
+    assert "--clk-mhz" in capsys.readouterr().err

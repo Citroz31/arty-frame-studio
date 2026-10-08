@@ -11,6 +11,7 @@ module tb_top;
     wire [7:0] returned_data;
     wire returned_valid;
     wire data_pin, clock_pin, latch_pin;
+    wire tr_pin;
     wire [3:0] led;
     reg [7:0] captured [0:255];
     integer clock_pin_edges=0, edges_at_status;
@@ -23,15 +24,17 @@ module tb_top;
     integer reset_checks=0;
     reg [2:0] expected;
 
-    // A 2 ms LED hold keeps the pattern visible past one 12-byte UART reply.
-    arty_top #(.LED_HOLD_CYCLES(400000)) board(.clk100(clk100),.reset_n(reset_n),.uart_rx(host_serial),
+    // A 2 ms LED hold (100 MHz control clock) keeps the pattern visible past
+    // one 12-byte UART reply.
+    arty_top #(.LED_HOLD_CYCLES(200000)) board(.clk100(clk100),.reset_n(reset_n),.uart_rx(host_serial),
         .uart_tx(board_serial),.data_out(data_pin),.frame_clk(clock_pin),
-        .latch_enable(latch_pin),.led(led));
+        .latch_enable(latch_pin),.tr_out(tr_pin),.led(led));
     always @(posedge board.core_clock or negedge board.core_clock)
         core_edges=core_edges+1;
-    uart_tx host_tx(.clk(host_clock),.reset(!reset_n),.data(host_data),
+    // The host side runs its own 200 MHz clock, unrelated to the board's.
+    uart_tx #(.CLOCK_HZ(200000000)) host_tx(.clk(host_clock),.reset(!reset_n),.data(host_data),
         .valid(host_valid),.ready(host_ready),.tx(host_serial));
-    uart_rx host_rx(.clk(host_clock),.reset(!reset_n),.rx(board_serial),
+    uart_rx #(.CLOCK_HZ(200000000)) host_rx(.clk(host_clock),.reset(!reset_n),.rx(board_serial),
         .data(returned_data),.valid(returned_valid));
     always @(posedge host_clock) if(returned_valid) begin
         captured[captured_count]=returned_data;
@@ -129,6 +132,18 @@ module tb_top;
         end
     endtask
 
+    // Same as check_response, but the 16-bit frame counter is whatever the
+    // board reports: STOP leaves the counter of a continuous emission as it is.
+    task check_response_any_count;
+        input integer offset;
+        input [7:0] op,seq,status,busy;
+        begin
+            wait(captured_count>=offset+12);
+            #0.1;
+            check_response(offset,op,seq,status,busy,{captured[offset+9],captured[offset+8]});
+        end
+    endtask
+
     // Golden pin waveform for word 10b, N=1, latch_ticks=2, gap_ticks=1.
     initial begin
         @(posedge data_pin);
@@ -183,10 +198,10 @@ module tb_top;
         payload[7:0]=1;
         request(6,41,1);
         check_response(72,6,41,0,0,16'hc200);
-        // INFO page 3: capabilities LED, INFO, continuous SEND, free CLK.
+        // INFO page 3: capabilities LED, INFO, continuous SEND, free CLK, TR.
         payload[7:0]=3;
         request(6,42,1);
-        check_response(84,6,42,0,0,16'h000f);
+        check_response(84,6,42,0,0,16'h001f);
 
         // Continuous SEND (repeat_count 0), 10 ns frames: during the
         // milliseconds of UART traffic the frame counter wraps several
@@ -242,6 +257,27 @@ module tb_top;
         if({data_pin,clock_pin,latch_pin}!==3'b000 || clock_pin_edges!=edges_at_status)
             $fatal(1,"Pins still active after STOP of free-CLK emission");
 
+        // TR: a static level set through the production UART. It starts low,
+        // follows valid commands, ignores an invalid one, and the board reset
+        // below returns it to 0 V.
+        if(tr_pin!==1'b0) $fatal(1,"TR not low at start");
+        payload=0; payload[7:0]=8'h01;
+        request(7,48,1);
+        check_response_any_count(156,7,48,0,0);
+        if(tr_pin!==1'b1) $fatal(1,"TR did not go high");
+        payload[7:0]=8'h02;
+        request(7,49,1);
+        check_response_any_count(168,7,49,2,0);
+        if(tr_pin!==1'b1) $fatal(1,"Invalid TR command changed the pin");
+        payload[7:0]=8'h00;
+        request(7,50,1);
+        check_response_any_count(180,7,50,0,0);
+        if(tr_pin!==1'b0) $fatal(1,"TR did not return low");
+        payload[7:0]=8'h01;
+        request(7,51,1);
+        check_response_any_count(192,7,51,0,0);
+        if(tr_pin!==1'b1) $fatal(1,"TR did not go high again");
+
         // Repeated long frames leave enough time to interrupt DATA/CLK and
         // LATCH independently. Commands still arrive over the production UART.
         payload=0;
@@ -250,6 +286,7 @@ module tb_top;
         request(2,34,14);
         wait(data_pin && clock_pin);
         reset_without_clock(3'b110);
+        if(tr_pin!==1'b0) $fatal(1,"Reset did not return TR to 0 V");
         request(1,35,0);
         check_response(0,1,35,0,0,0);
         request(2,36,14);
@@ -258,7 +295,7 @@ module tb_top;
         request(1,37,0);
         check_response(0,1,37,0,0,0);
         if(reset_checks!=2) $fatal(1,"Missing asynchronous reset cases");
-        $display("PASS tb_top: UART PING/SEND/STATUS/LED/INFO, 200 MHz modeled burst, continuous and free-CLK SEND/STOP, %0d stopped-clock asynchronous resets and UART recovery",reset_checks);
+        $display("PASS tb_top: UART PING/SEND/STATUS/LED/INFO/TR, 200 MHz modeled burst, continuous and free-CLK SEND/STOP, %0d stopped-clock asynchronous resets and UART recovery",reset_checks);
         $finish;
     end
     initial begin #60000000; $fatal(1,"Timeout"); end

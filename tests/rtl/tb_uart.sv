@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 module tb_uart;
     reg clk=0;
-    always #2.5 clk=~clk;
+    always #5 clk=~clk;
     reg reset=1;
     reg [7:0] input_data=0;
     reg input_valid=0;
@@ -33,8 +33,8 @@ module tb_uart;
         wait(received==8);
         repeat(2000) @(posedge clk);
         if(received!=8) $fatal(1,"UART emitted extra bytes");
-        $display("PASS tb_uart: production 200 MHz / 115200 baud loopback");
+        $display("PASS tb_uart: production 100 MHz control clock / 115200 baud loopback");
         $finish;
     end
-    initial begin #1000000; $fatal(1,"Timeout"); end
+    initial begin #2000000; $fatal(1,"Timeout"); end
 endmodule

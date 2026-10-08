@@ -501,6 +501,51 @@ def test_led_command_encodes_manual_pattern_and_automatic_mode():
         device.led(16)
 
 
+def test_tr_command_sets_the_level_repeats_once_and_needs_a_firmware_with_tr():
+    lost = {"count": 1}
+
+    def handler(packet):
+        if packet.opcode == Opcode.TR and lost["count"]:
+            lost["count"] -= 1
+            return b""
+        return info_handler([5, 200_000_000 & 0xFFFF, 200_000_000 >> 16, 0x1F, 0, 0])(packet)
+
+    device, endpoint = make_serial(handler)
+    device.connect()
+    with pytest.raises(TransportError, match="pas de broche TR"):
+        device.tr(1)  # firmware pas encore identifié : prudence
+    device.identify()
+    assert device.tr(1).ok and device.tr(0).ok
+    sent = [p.payload for p in endpoint.requests if p.opcode == Opcode.TR]
+    assert sent == [b"\x01", b"\x01", b"\x00"]  # la réponse perdue est redemandée
+    for bad in (2, -1, True):
+        with pytest.raises(ValueError):
+            device.tr(bad)
+
+
+def test_firmware_without_the_tr_capability_is_refused_before_anything_is_sent():
+    device, endpoint = make_serial(info_handler([4, 200_000_000 & 0xFFFF, 3051, 0x0F, 0, 0]))
+    device.connect()
+    device.identify()
+    with pytest.raises(TransportError, match="révision 4.*révision 5"):
+        device.tr(1)
+    assert not [p for p in endpoint.requests if p.opcode == Opcode.TR]
+
+
+def test_demo_has_a_tr_pin_at_zero_volts_until_commanded():
+    demo = DemoDevice()
+    demo.connect()
+    assert demo.identify().tr and demo.tr_level == 0
+    demo.tr(1)
+    assert demo.tr_level == 1 and demo.tr_history == [1]
+    with pytest.raises(ValueError):
+        demo.tr(3)
+    demo.close()
+    assert demo.tr_level == 0
+    with pytest.raises(TransportError):
+        demo.tr(1)
+
+
 def test_demo_simulates_revision_two_firmware_and_virtual_leds():
     demo = DemoDevice(core_hz=100_000_000)
     demo.connect()
@@ -576,7 +621,7 @@ def test_demo_continuous_emission_runs_until_stop_with_a_wrapping_counter():
     clock = Clock()
     demo = DemoDevice(clock=clock)
     demo.connect()
-    assert demo.identify().continuous and demo.identify().revision == 4
+    assert demo.identify().continuous and demo.identify().revision == 6
     config = FrameConfig(word=1, bit_count=1, divider=1, latch_ticks=1, gap_ticks=0, repeat_count=0)
     duration = config.frame_duration_ns / 1e9
     assert demo.send(config).busy
