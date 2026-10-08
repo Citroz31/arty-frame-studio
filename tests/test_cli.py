@@ -5,7 +5,8 @@ import pytest
 
 from arty_frame_studio import cli
 from arty_frame_studio.cli import main
-from arty_frame_studio.model import FrameConfig
+from arty_frame_studio.firmware_config import FirmwareBuildConfig
+from arty_frame_studio.model import FrameConfig, load_profile
 from arty_frame_studio.protocol import DeviceStatus, FirmwareInfo, Opcode, StatusCode
 from arty_frame_studio.scope import KeysightScope
 from arty_frame_studio.scope_sim import SimulatedKeysight, signal_source
@@ -347,7 +348,7 @@ def test_led_test_command_identifies_then_walks_leds(monkeypatch, capsys):
     monkeypatch.setattr(transport.time, "sleep", lambda _: None)
     assert main(["led-test", "--port", "COM7"]) == 0
     out = capsys.readouterr().out
-    assert '"revision": 5' in out and "commandes confirmées" in out
+    assert '"revision": 6' in out and "commandes confirmées" in out
     assert not demo.connected
 
 
@@ -731,3 +732,38 @@ def test_firmware_config_accepts_the_tr_pin(tmp_path: Path, capsys) -> None:
     assert "TR JC4 (V11)" in capsys.readouterr().out and '"tr_pin": "JC4"' in output.read_text()
     assert main(["firmware-config", "--tr", "JB1"]) == 1
     assert "distinctes" in capsys.readouterr().err
+
+
+def test_clock_plan_reports_the_nearest_frequency_and_writes_the_build_inputs(
+    tmp_path: Path, capsys
+) -> None:
+    firmware = tmp_path / "firmware.json"
+    profile = tmp_path / "frame.json"
+    assert main(["clock-plan", "151", "--output", str(firmware), "--profile", str(profile)]) == 0
+    out = capsys.readouterr().out
+    assert "Réalisable : CLK 151.428571 MHz" in out and "N=1" in out
+    assert "inférieure 150 MHz" in out
+    assert "Nouveau firmware nécessaire : cœur 151428571 Hz" in out
+    assert "remote-build --firmware-config" in out
+    assert FirmwareBuildConfig.load(firmware).core_hz == 151_428_571
+    frame = load_profile(profile)
+    assert (frame.core_hz, frame.divider) == (151_428_571, 1)
+    # Never above: 150 MHz exactly, with a 150 MHz core.
+    assert main(["clock-plan", "151", "--below"]) == 0
+    assert "Réalisable : CLK 150 MHz (écart -1 MHz, -6623 ppm)" in capsys.readouterr().out
+    # The reference firmware already gives 10 MHz.
+    assert main(["clock-plan", "10"]) == 0
+    assert "firmware de référence (fourni) convient" in capsys.readouterr().out
+    # Above the absolute limit: refused.
+    assert main(["clock-plan", "301"]) == 1
+    assert "limite absolue" in capsys.readouterr().err
+
+
+def test_firmware_config_accepts_a_requested_clk_frequency(tmp_path: Path, capsys) -> None:
+    output = tmp_path / "firmware.json"
+    assert main(["firmware-config", "--clk-mhz", "122", "--output", str(output)]) == 0
+    out = capsys.readouterr().out
+    assert "CLK 122 MHz (exacte) = cœur 244 MHz / N=2" in out
+    assert FirmwareBuildConfig.load(output).core_hz == 244_000_000
+    assert main(["firmware-config", "--below"]) == 1
+    assert "--clk-mhz" in capsys.readouterr().err

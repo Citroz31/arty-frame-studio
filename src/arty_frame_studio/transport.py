@@ -577,7 +577,7 @@ class DemoDevice:
 
     Le nombre de trames terminées inclut le latch et l'intervalle. Les temps ne
     sont pas ralentis : une émission courte peut finir avant le prochain poll.
-    La démo simule un firmware de révision 5 à l'horloge ``core_hz`` ; le motif
+    La démo simule un firmware de révision 6 à l'horloge ``core_hz`` ; le motif
     des LED virtuelles est exposé par ``led_pattern`` (``None`` : état) et le
     niveau de la broche TR par ``tr_level`` (0 V au départ). Une
     émission continue reste active jusqu'à STOP, son compteur modulo 65 536.
@@ -587,7 +587,7 @@ class DemoDevice:
         self, *, clock: Callable[[], float] = time.monotonic, core_hz: int = REFERENCE_HZ
     ) -> None:
         self.firmware = FirmwareInfo(
-            revision=5,
+            revision=6,
             core_hz=core_hz,
             capabilities=(
                 CAPABILITY_LED

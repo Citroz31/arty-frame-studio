@@ -621,7 +621,7 @@ def test_demo_continuous_emission_runs_until_stop_with_a_wrapping_counter():
     clock = Clock()
     demo = DemoDevice(clock=clock)
     demo.connect()
-    assert demo.identify().continuous and demo.identify().revision == 5
+    assert demo.identify().continuous and demo.identify().revision == 6
     config = FrameConfig(word=1, bit_count=1, divider=1, latch_ticks=1, gap_ticks=0, repeat_count=0)
     duration = config.frame_duration_ns / 1e9
     assert demo.send(config).busy

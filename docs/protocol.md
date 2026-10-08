@@ -30,6 +30,14 @@ La CLK libre (bit 2 des flags) existe à partir de la **révision 4** ; une
 révision 3 refuse ce SEND (status 2).
 TR existe à partir de la **révision 5** ; une révision 4 répond « opcode
 inconnu » (status 1) et l'application refuse l'envoi avant la requête.
+La **révision 6** garde le même protocole et les mêmes capacités. L'UART, les
+paquets et les réponses fonctionnent à l'horloge fixe de 100 MHz de la carte ;
+seul le moteur de trame suit l'horloge du cœur (jusqu'à **300 MHz**, annoncée
+par INFO pages 1-2, arrondie au hertz). SEND et STOP franchissent un
+synchroniseur entre les deux domaines : le premier front suit la réponse de
+quelques cycles. Un SEND accepté compte comme busy dès sa réponse, un STOP
+accepté comme arrêté ; STATUS ne montre jamais un état antérieur à la
+dernière commande acceptée.
 
 SEND correspond au format Python `struct.Struct("<IBHHHHB")` :
 
@@ -44,7 +52,8 @@ SEND correspond au format Python `struct.Struct("<IBHHHHB")` :
 | flags | uint8 | bit 0 : LSB first ; bit 1 : latch actif bas ; bit 2 : CLK libre |
 
 Un tick est un demi-cycle de l'horloge du cœur : **2,5 ns** pour le firmware
-de référence à 200 MHz, 3,33 ns à 150 MHz, 5 ns à 100 MHz. Le paquet SEND ne
+de référence à 200 MHz, 3,33 ns à 150 MHz, 5 ns à 100 MHz, 1,67 ns à 300 MHz.
+Le paquet SEND ne
 contient pas cette horloge : l'application la lit par INFO et refuse d'envoyer
 une trame calculée pour une autre horloge.
 Les autres bits de flags sont interdits. Aucun argument GPIO n’est transmis :

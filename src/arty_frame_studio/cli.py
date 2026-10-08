@@ -13,7 +13,15 @@ from pathlib import Path
 from typing import Any
 
 from .bitstream import read_bitstream
-from .firmware_config import FirmwareBuildConfig
+from .firmware_config import (
+    MAX_FRAME_CLOCK_HZ,
+    REFERENCE_CORE_HZ,
+    FirmwareBuildConfig,
+    FrameClockPlan,
+    format_hz,
+    frame_clock_neighbors,
+    plan_frame_clock,
+)
 from .local_tools import ensure_local_toolchain
 from .model import CONTINUOUS, FrameConfig, load_profile, save_profile, with_free_clock
 from .prebuilt import validate_programming_image, verify_prebuilt_firmware
@@ -121,13 +129,50 @@ def _parser() -> argparse.ArgumentParser:
         "firmware-config", help="Créer ou vérifier une configuration de firmware personnalisé"
     )
     settings.add_argument("--input", type=Path, help="Configuration JSON à compléter/vérifier")
-    settings.add_argument("--core-mhz", type=float, help="Horloge du cœur, ex. 150")
+    core = settings.add_mutually_exclusive_group()
+    core.add_argument("--core-mhz", type=float, help="Horloge du cœur, ex. 150")
+    core.add_argument(
+        "--clk-mhz",
+        type=float,
+        help="Fréquence CLK voulue : le cœur réalisable le plus proche est choisi",
+    )
+    settings.add_argument(
+        "--below", action="store_true", help="Avec --clk-mhz : ne jamais dépasser la demande"
+    )
     for pin in ("data", "clock", "latch", "tr"):
         settings.add_argument(f"--{pin}", help=f"Broche {pin.upper()} : JA1..JD10")
     settings.add_argument("--drive", type=int, choices=(4, 8, 12, 16))
     settings.add_argument("--slew", choices=("SLOW", "FAST"))
     settings.add_argument("--output", type=Path, help="Fichier JSON à écrire")
     settings.add_argument("--xdc", type=Path, help="Écrire aussi les contraintes générées")
+    plan = commands.add_parser(
+        "clock-plan",
+        help="Fréquence CLK réalisable la plus proche (PLL et N) et firmware nécessaire",
+        description=(
+            "Cherche, parmi toutes les horloges de cœur du PLL et tous les diviseurs N, "
+            "la fréquence CLK la plus proche de la demande ; "
+            f"limite absolue : {format_hz(MAX_FRAME_CLOCK_HZ)}."
+        ),
+    )
+    plan.add_argument("mhz", type=float, help="Fréquence CLK voulue en MHz, ex. 150")
+    plan.add_argument("--below", action="store_true", help="Ne jamais dépasser la demande")
+    plan.add_argument(
+        "--current-core-mhz",
+        type=float,
+        help="Cœur du firmware chargé : préféré à écart égal (aucune recompilation)",
+    )
+    plan.add_argument(
+        "--input", type=Path, help="Configuration firmware de départ (broches, courant)"
+    )
+    plan.add_argument(
+        "--output", type=Path, help="Écrire la configuration firmware de ce cœur (JSON)"
+    )
+    plan.add_argument(
+        "--profile",
+        type=Path,
+        help="Écrire aussi un profil de trame à cette fréquence (base : --base-profile)",
+    )
+    plan.add_argument("--base-profile", type=Path, help="Profil de trame à adapter")
     remote = commands.add_parser(
         "remote-build", help="Compiler un firmware sur GitHub Actions et le télécharger"
     )
@@ -236,6 +281,12 @@ def _firmware_settings(args: argparse.Namespace) -> FirmwareBuildConfig:
     changes: dict[str, Any] = {}
     if args.core_mhz is not None:
         changes["core_hz"] = round(args.core_mhz * 1e6)
+    if args.clk_mhz is not None:
+        plan = plan_frame_clock(_megahertz(args.clk_mhz), never_above=args.below)
+        print(plan.summary())
+        changes["core_hz"] = plan.core_hz
+    elif args.below:
+        raise ValueError("--below s'utilise avec --clk-mhz.")
     for option, field in (
         ("data", "data_pin"),
         ("clock", "clock_pin"),
@@ -249,6 +300,77 @@ def _firmware_settings(args: argparse.Namespace) -> FirmwareBuildConfig:
     if args.slew is not None:
         changes["slew"] = args.slew
     return replace(firmware, **changes)
+
+
+def _megahertz(value: float) -> str:
+    """MHz saisis → Hz décimaux exacts (150.1 → 150100000)."""
+    if not math.isfinite(value):
+        raise ValueError("Fréquence : nombre fini attendu.")
+    return f"{value!r}e6"
+
+
+def _plan_lines(plan: FrameClockPlan, current_core_hz: int | None) -> list[str]:
+    lines = [f"Demande : {format_hz(plan.requested_hz)}", f"Réalisable : {plan.summary()}"]
+    below, above = frame_clock_neighbors(plan.requested_hz)
+    neighbors = [
+        f"{label} {format_hz(item.achieved_hz)} (cœur {format_hz(item.setting.exact_hz)}, "
+        f"N={item.divider})"
+        for label, item in (("inférieure", below), ("supérieure", above))
+        if item is not None and item.achieved_hz != plan.achieved_hz
+    ]
+    if neighbors:
+        lines.append("Fréquences voisines : " + " ; ".join(neighbors))
+    if plan.core_hz == current_core_hz:
+        lines.append("Le firmware chargé convient : régler seulement N.")
+    elif plan.core_hz == REFERENCE_CORE_HZ:
+        lines.append("Le firmware de référence (fourni) convient : aucune compilation.")
+    else:
+        lines.append(
+            f"Nouveau firmware nécessaire : cœur {plan.core_hz} Hz ({plan.setting.describe()})."
+        )
+    return lines
+
+
+def _clock_plan(args: argparse.Namespace) -> int:
+    current = None if args.current_core_mhz is None else round(args.current_core_mhz * 1e6)
+    plan = plan_frame_clock(_megahertz(args.mhz), never_above=args.below, current_core_hz=current)
+    for line in _plan_lines(plan, current):
+        print(line)
+    if args.output:
+        base = FirmwareBuildConfig.load(args.input) if args.input else FirmwareBuildConfig()
+        firmware = replace(base, core_hz=plan.core_hz)
+        firmware.save(args.output)
+        print(f"Configuration firmware enregistrée : {args.output} ({firmware.summary()})")
+        for note in firmware.warnings():
+            print(f"Attention : {note}")
+        if not firmware.is_reference:
+            print(
+                "Compiler puis charger : arty-frame build --firmware-config "
+                f"{args.output} (local) ou arty-frame remote-build --firmware-config "
+                f"{args.output} (GitHub), puis arty-frame program ou jtag-program."
+            )
+    if args.profile:
+        frame = load_profile(args.base_profile) if args.base_profile else FrameConfig()
+        latch_ns = frame.latch_ticks * frame.tick_ns
+        gap_ns = frame.gap_ticks * frame.tick_ns
+        tick = plan.setting.tick_ns
+        frame = replace(
+            frame,
+            core_hz=plan.core_hz,
+            divider=plan.divider,
+            latch_ticks=max(1, min(65_535, round(latch_ns / tick))),
+            gap_ticks=max(0, min(65_535, round(gap_ns / tick))),
+        )
+        if frame.free_clock:
+            frame = with_free_clock(replace(frame, free_clock=False))
+        save_profile(frame, args.profile)
+        print(
+            f"Profil de trame enregistré : {args.profile} (CLK "
+            f"{format_hz(plan.achieved_hz)}, N={plan.divider}, LATCH "
+            f"{frame.latch_ticks * frame.tick_ns:.6g} ns, pause "
+            f"{frame.gap_ticks * frame.tick_ns:.6g} ns)"
+        )
+    return 0
 
 
 def _scope(args: argparse.Namespace) -> int:
@@ -449,6 +571,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
             finally:
                 board.close()
+        elif args.command == "clock-plan":
+            return _clock_plan(args)
         elif args.command == "firmware-config":
             firmware = _firmware_settings(args)
             print(f"Configuration : {firmware.summary()}")

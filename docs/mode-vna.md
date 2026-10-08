@@ -203,6 +203,6 @@ comparer avec le guide de programmation du PNA-X ou du P9374A, et lancer d'abord
 | « Délai dépassé » pendant un balayage | Augmenter « Délai max. par balayage » (balayage long, moyennage) et reconnecter. |
 | « valeur(s) reçue(s) pour N point(s) » | Le nombre de points a changé sur le VNA pendant la campagne : recommencer. |
 | « La simulation connectée est celle du mode SCPI » | Déconnecter, choisir « VNA Keysight », puis reconnecter. |
-| « Des états fixent la broche TR … » | Charger le firmware de révision 5 (onglet FPGA) ou retirer la colonne TR. |
+| « Des états fixent la broche TR … » | Charger le firmware de révision 5 ou plus (onglet FPGA) ou retirer la colonne TR. |
 | « Trame non confirmée » | La carte n'a pas compté la trame envoyée : reconnecter, vérifier le firmware et la liaison UART. |
 | Aucun VNA détecté | Voir la section 4 ; en dernier recours, saisir l'adresse à la main. |

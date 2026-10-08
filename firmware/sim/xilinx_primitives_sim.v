@@ -3,6 +3,12 @@
 // clock jitter, physical routing or all primitive modes. Never synthesize this.
 module IBUF(input wire I,output wire O); assign O=I; endmodule
 module BUFG(input wire I,output wire O); assign O=I; endmodule
+// Flip-flop with clock enable and synchronous reset (R before CE).
+module FDRE #(parameter [0:0] INIT=1'b0) (
+    input wire C,CE,R,D,output reg Q=INIT
+);
+    always @(posedge C) if(R) Q<=1'b0; else if(CE) Q<=D;
+endmodule
 module ODDR #(
     parameter DDR_CLK_EDGE="SAME_EDGE", parameter INIT=1'b0,
     parameter SRTYPE="ASYNC"
@@ -22,8 +28,9 @@ module ODDR #(
         $fatal(1,"Primitive model supports only SAME_EDGE ASYNC");
 endmodule
 // Same public parameter/port interface as Yosys' xc7 PLLE2_ADV declaration.
-// Only CLKIN1, INTERNAL, DIVCLK_DIVIDE=1 and DRP disabled are modeled, with
-// an integer CLKFBOUT_MULT/CLKOUT0_DIVIDE pair inside the -1 VCO range.
+// Only CLKIN1, INTERNAL and DRP disabled are modeled, with integer
+// DIVCLK_DIVIDE/CLKFBOUT_MULT/CLKOUT0_DIVIDE inside the -1 limits:
+// phase detector 19-450 MHz, VCO 800-1600 MHz.
 module PLLE2_ADV #(
     parameter BANDWIDTH="OPTIMIZED", parameter COMPENSATION="ZHOLD",
     parameter STARTUP_WAIT="FALSE",
@@ -68,13 +75,16 @@ module PLLE2_ADV #(
     assign DO=0;
     initial begin
         if(COMPENSATION!="INTERNAL" || CLKIN1_PERIOD<=0.0
-            || DIVCLK_DIVIDE!=1 || CLKOUT0_DIVIDE<1 || CLKOUT0_DIVIDE>128
-            || 1000.0*CLKFBOUT_MULT/CLKIN1_PERIOD<800.0
-            || 1000.0*CLKFBOUT_MULT/CLKIN1_PERIOD>1600.0
+            || DIVCLK_DIVIDE<1 || DIVCLK_DIVIDE>56
+            || CLKOUT0_DIVIDE<1 || CLKOUT0_DIVIDE>128
+            || 1000.0/(CLKIN1_PERIOD*DIVCLK_DIVIDE)<19.0
+            || 1000.0/(CLKIN1_PERIOD*DIVCLK_DIVIDE)>450.0
+            || 1000.0*CLKFBOUT_MULT/(CLKIN1_PERIOD*DIVCLK_DIVIDE)<800.0
+            || 1000.0*CLKFBOUT_MULT/(CLKIN1_PERIOD*DIVCLK_DIVIDE)>1600.0
             || CLKFBOUT_PHASE!=0.0 || CLKOUT0_PHASE!=0.0
             || CLKOUT0_DUTY_CYCLE!=0.5 || IS_CLKINSEL_INVERTED
             || IS_PWRDWN_INVERTED || IS_RST_INVERTED)
-            $fatal(1,"PLL model supports only INTERNAL mode with VCO 800-1600 MHz");
+            $fatal(1,"PLL model supports only INTERNAL mode, PFD 19-450 MHz, VCO 800-1600 MHz");
         #0;
         if(CLKINSEL!==1'b1 || CLKIN2!==1'b0 || DCLK!==1'b0
             || DEN!==1'b0 || DWE!==1'b0 || DI!==16'b0 || DADDR!==7'b0)

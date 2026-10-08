@@ -1,7 +1,13 @@
 `timescale 1ns/1ps
-module tb_protocol;
-    reg clk=0;
+module tb_protocol #(
+    // Core half period in ns. run_tests.py also runs a slow core (40 ns).
+    parameter real CORE_HALF_NS = 2.1
+);
+    // Control and core clocks are unrelated, as on the board: 200 MHz and
+    // about 238 MHz (or 12.5 MHz), so every engine command crosses engine_link.
+    reg clk=0, core_clk=0;
     always #2.5 clk=~clk;
+    always #(CORE_HALF_NS) core_clk=~core_clk;
     reg reset=1;
     reg [7:0] rx_data=0;
     reg rx_valid=0;
@@ -28,7 +34,8 @@ module tb_protocol;
     frame_controller #(
         .PACKET_TIMEOUT_CYCLES(60), .CORE_HZ(32'd150000000), .BUILD_ID(32'hA5C31E2D)
     ) dut (
-        .clk(clk), .reset(reset), .rx_data(rx_data), .rx_valid(rx_valid),
+        .clk(clk), .reset(reset), .core_clk(core_clk), .core_reset(reset),
+        .rx_data(rx_data), .rx_valid(rx_valid),
         .tx_data(tx_data), .tx_valid(tx_valid), .tx_ready(tx_ready),
         .busy(busy), .completed(completed), .data_rise(dr), .data_fall(df),
         .clock_rise(cr), .clock_fall(cf), .latch_rise(lr), .latch_fall(lf),
@@ -108,15 +115,24 @@ module tb_protocol;
                 $fatal(1,"Reply header/status incorrect at %0d (status %0d wanted %0d)",
                     start_index,captured[start_index+6],status_value);
             if(busy_value>=0 && captured[start_index+7]!==busy_value)
-                $fatal(1,"Reply busy incorrect");
+                $fatal(1,"Reply busy incorrect (sequence %0d)",seq_value);
             if(completed_value>=0 && {captured[start_index+9],captured[start_index+8]}!==completed_value)
-                $fatal(1,"Reply completed incorrect");
+                $fatal(1,"Reply completed incorrect (sequence %0d)",seq_value);
             crc=16'hffff;
             for(index=2;index<10;index=index+1)
                 crc=crc_byte(crc,captured[start_index+index]);
             if({captured[start_index+11],captured[start_index+10]}!==crc)
                 $fatal(1,"Response CRC incorrect");
             requests=requests+1;
+        end
+    endtask
+
+    // A command reaches the pins a few core cycles after its reply here: this
+    // bench sends replies at the control clock, not at 115200 bauds.
+    task settle_core;
+        begin
+            repeat(6) @(posedge core_clk);
+            #0.1;
         end
     endtask
 
@@ -135,7 +151,9 @@ module tb_protocol;
     endtask
 
     initial begin
+        // As the board's per-domain reset pipelines: four cycles of each clock.
         repeat(4) @(posedge clk);
+        repeat(4) @(posedge core_clk);
         @(negedge clk); reset=0;
         transaction(1,1,7,0,0,0,0,0);
         transaction(1,1,8,0,1,4,0,0);
@@ -157,6 +175,8 @@ module tb_protocol;
         transaction(1,4,16,0,0,0,1,0);
         transaction(1,1,17,0,0,0,1,0);
         transaction(1,3,18,0,0,0,0,0);
+        if(busy) $fatal(1,"STOP not reflected by the controller");
+        settle_core;
         if(busy || dr || df || cr || cf || !lr || !lf)
             $fatal(1,"STOP not reflected by engine");
         // Oversize drain must resynchronize, and an incomplete packet must time out.
@@ -184,6 +204,8 @@ module tb_protocol;
         if(!busy || completed==0) $fatal(1,"Continuous SEND ended by itself");
         transaction(1,2,61,14,0,3,1,-1);
         transaction(1,3,62,0,0,0,0,-1);
+        if(busy) $fatal(1,"STOP not reflected by the controller");
+        settle_core;
         if(busy || dr || df || cr || cf || lr || lf)
             $fatal(1,"STOP did not end continuous emission");
         stopped_completed=completed;
@@ -192,16 +214,21 @@ module tb_protocol;
         // LATCH and the pause until STOP. Frame: 1 bit, N=1, LATCH 1, gap 2.
         test_payload[87:72]=2; test_payload[111:104]=4;
         transaction(1,2,64,14,0,0,1,0);
+        settle_core;
         free_edges=0;
         repeat(200) @(posedge clk) if(cr !== cf) free_edges=free_edges+1;
         if(free_edges!=200) $fatal(1,"Free CLK paused: %0d toggling cycles of 200",free_edges);
         transaction(1,3,65,0,0,0,0,-1);
+        if(busy) $fatal(1,"STOP not reflected by the controller");
+        settle_core;
         if(busy || dr || df || cr || cf || lr || lf)
             $fatal(1,"STOP did not end free-CLK emission");
         test_payload[87:72]=3; test_payload[111:104]=0;
         // One-tick latch/gap zero and finite completion.
         test_payload[103:88]=2; test_payload[87:72]=0;
         transaction(1,2,27,14,0,0,1,0);
+        // Two 4-tick frames: done within a few core cycles of the reply.
+        repeat(4) settle_core;
         transaction(1,4,28,0,0,0,0,2);
         // LED: {manual, 3'b0, pattern}; reserved bits or a wrong length are
         // rejected without a write. Automatic mode is a write with bit 4 clear.
@@ -236,7 +263,7 @@ module tb_protocol;
         transaction(1,7,51,1,1,4,0,-1); // bad CRC: reported, no write
         if(tr_writes!=2) $fatal(1,"Corrupt TR command reached the pin");
         // INFO pages carry revision, CORE_HZ and BUILD_ID in the 16-bit field.
-        info_expected[0]=16'd5; info_expected[1]=16'hd180; info_expected[2]=16'h08f0;
+        info_expected[0]=16'd6; info_expected[1]=16'hd180; info_expected[2]=16'h08f0;
         info_expected[3]=16'h001f; info_expected[4]=16'h1e2d; info_expected[5]=16'ha5c3;
         for(page=0;page<6;page=page+1) begin
             test_payload[7:0]=page;
@@ -254,7 +281,8 @@ module tb_protocol;
         tx_ready=1;
         check_reply(captured_count,1,29,0,0,2);
         check_reply(captured_count,4,30,0,0,2);
-        $display("PASS tb_protocol: %0d request/response cases",requests);
+        $display("PASS tb_protocol: %0d request/response cases, core half period %0.1f ns",
+            requests, CORE_HALF_NS);
         $finish;
     end
     initial begin #1000000; $fatal(1,"Timeout"); end

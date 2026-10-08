@@ -58,11 +58,12 @@ class ToolchainConfig:
     # installation. Extend only the child process environment, never the PC.
     tool_dirs: tuple[Path, ...] = ()
     python_path: tuple[Path, ...] = ()
-    # Placement seeds tried in order. The core paths sit close to 5 ns and
-    # placement alone moves the routed Fmax by ~15 %: the sweep stops at the
-    # first seed with timing_margin above the requirement, otherwise keeps
-    # the passing seed with the highest Fmax.
-    nextpnr_seeds: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8)
+    # Placement seeds tried in order. Placement alone moves the routed Fmax of
+    # the frame engine by +-15 %: the sweep stops at the first seed with
+    # timing_margin above the requirement. After SETTLE_AFTER_SEEDS attempts
+    # it also stops at the first passing route and keeps the best one; the
+    # remaining seeds only serve requirements no earlier seed met.
+    nextpnr_seeds: tuple[int, ...] = tuple(range(1, 17))
     timing_margin: float = 0.03
 
     def __post_init__(self) -> None:
@@ -185,6 +186,12 @@ class ToolchainConfig:
 
 
 _TOOLS = ("yosys", "nextpnr_xilinx", "fasm2frames", "xc7frames2bit", "openfpgaloader")
+SETTLE_AFTER_SEEDS = 8
+# PLLE2_ADV features of the routed FASM: TILE.PLLE2_ADV.NAME[range] = Nb'bits.
+_PLL_FEATURE = re.compile(
+    r"^(?P<tile>[A-Za-z0-9_]+)\.PLLE2_ADV\.(?P<name>[A-Z0-9_]+)"
+    r"(?:\[\d+(?::\d+)?\])?(?:\s*=\s*\d+'b(?P<bits>[01]+))?$"
+)
 
 
 class Toolchain:
@@ -550,6 +557,45 @@ class Toolchain:
             )
 
     @staticmethod
+    def _fasm_pll(fasm: str) -> tuple[int, int, int]:
+        """(CLKFBOUT_MULT, DIVCLK_DIVIDE, CLKOUT0_DIVIDE) programmed by the FASM.
+
+        Each counter is HIGH_TIME + LOW_TIME (a 6-bit field of 0 stands for
+        64), EDGE marks an odd value and NO_COUNT a divide-by-one. Exactly one
+        PLLE2_ADV must be in use.
+        """
+        tiles: set[str] = set()
+        features: dict[str, int] = {}
+        for line in fasm.splitlines():
+            match = _PLL_FEATURE.match(line.strip())
+            if match:
+                tiles.add(match["tile"])
+                features[match["name"]] = int(match["bits"], 2) if match["bits"] else 1
+        if len(tiles) != 1 or features.get("IN_USE") != 1:
+            raise ToolchainError(
+                "PLL non confirmé : le FASM doit utiliser exactement un PLLE2_ADV. "
+                "Aucun bitstream n'est autorisé."
+            )
+
+        def counter(times: str, flags: str) -> int:
+            if features.get(f"{flags}_NO_COUNT"):
+                return 1
+            high = features.get(f"{times}_HIGH_TIME", 0) or 64
+            low = features.get(f"{times}_LOW_TIME", 0) or 64
+            if bool(features.get(f"{flags}_EDGE")) != (high != low):
+                raise ToolchainError(
+                    f"PLL incohérent dans le FASM ({times} : {high}+{low}, EDGE). "
+                    "Aucun bitstream n'est autorisé."
+                )
+            return high + low
+
+        return (
+            counter("CLKFBOUT_CLKOUT1", "CLKFBOUT_CLKOUT2"),
+            counter("DIVCLK_DIVCLK", "DIVCLK_DIVCLK"),
+            counter("CLKOUT0_CLKOUT1", "CLKOUT0_CLKOUT2"),
+        )
+
+    @staticmethod
     def _core_fmax(report: str) -> float:
         """Final routed Fmax of core_clock (the last report line for it)."""
         values = re.findall(r"Max frequency for clock ['\"]core_clock['\"]:\s*([0-9.]+)", report)
@@ -576,7 +622,8 @@ class Toolchain:
         a report that does not pass, moves to the next seed. Any other failure
         stops the build. A passing route below ``timing_margin`` is saved and
         the sweep goes on; the best saved route is restored if no seed reaches
-        the margin. The last timing error is reported when all seeds fail.
+        the margin, at the latest after ``SETTLE_AFTER_SEEDS`` attempts once a
+        route passes. The last timing error is reported when all seeds fail.
         ``outputs[0]`` is the FASM file; all outputs belong to the same route.
         """
         required = firmware.core_hz / 1e6
@@ -614,6 +661,8 @@ class Toolchain:
                     log,
                     journal,
                 )
+                if attempt >= SETTLE_AFTER_SEEDS and best is not None:
+                    break
                 continue
             if code != 0:
                 raise ToolchainError(f"{command[0]} a échoué (code {code}). Voir {journal.name}.")
@@ -633,10 +682,22 @@ class Toolchain:
                 log,
                 journal,
             )
+            if attempt >= SETTLE_AFTER_SEEDS:
+                break
         if best is None:
             if failure is None:
                 raise AssertionError("La liste des graines nextpnr ne peut pas être vide.")
-            raise failure
+            raise ToolchainError(
+                f"{failure} Aucune des {len(seeds)} graines de placement n'atteint "
+                f"{required:g} MHz : choisir une horloge de cœur plus basse."
+                + (
+                    " La configuration n'essaie que "
+                    f"{len(seeds)} graine(s) : retirer nextpnr_seeds de toolchain.json "
+                    "pour le balayage complet."
+                    if len(seeds) < SETTLE_AFTER_SEEDS
+                    else ""
+                )
+            ) from failure
         fmax, seed = best
         for path in outputs:
             os.replace(saved(path), path)
@@ -767,6 +828,16 @@ class Toolchain:
                     journal.flush()
                     if log:
                         log(verification)
+                # The bitstream must program the requested PLL counters.
+                pll = firmware.pll
+                programmed = self._fasm_pll(fasm.read_text(encoding="utf-8"))
+                expected = (pll.multiplier, pll.input_divider, pll.output_divider)
+                if programmed != expected:
+                    raise ToolchainError(
+                        "PLL du FASM ×{} / {} / {} différent de la configuration ×{} / {} / {}. "
+                        "Aucun bitstream n'est autorisé.".format(*programmed, *expected)
+                    )
+                self._note(f"[PLL] FASM vérifié : {pll.describe()}.", log, journal)
                 self._run(
                     [
                         *self._args("fasm2frames"),
@@ -818,6 +889,12 @@ class Toolchain:
                     "run_dir": str(run_dir),
                     "build_id": firmware.build_id,
                     "firmware_config": firmware.to_dict(),
+                    "pll": {
+                        "multiplier": firmware.pll.multiplier,
+                        "input_divider": firmware.pll.input_divider,
+                        "output_divider": firmware.pll.output_divider,
+                        "core_exact_hz": str(firmware.pll.exact_hz),
+                    },
                     "nextpnr_seed": seed,
                 }
                 temporary_receipt = run_dir / "successful-build.json"

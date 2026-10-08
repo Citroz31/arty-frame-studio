@@ -2,16 +2,25 @@
 
 from dataclasses import replace
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
 
 from arty_frame_studio.firmware_config import (
     BOARD_OSCILLATOR_HZ,
+    MAX_CORE_HZ,
+    MAX_FRAME_CLOCK_HZ,
+    MIN_CORE_HZ,
+    MIN_FRAME_CLOCK_HZ,
+    PFD_MIN_HZ,
     PMOD_PINS,
+    REFERENCE_CORE_HZ,
     VCO_MAX_HZ,
     VCO_MIN_HZ,
     FirmwareBuildConfig,
+    frame_clock_neighbors,
+    plan_frame_clock,
     pll_for,
     pll_settings,
 )
@@ -27,27 +36,77 @@ def test_default_configuration_is_the_committed_reference_xdc():
     assert config.yosys_parameters() == {
         "CORE_HZ": 200_000_000,
         "PLL_MULT": 10,
+        "PLL_IN_DIV": 1,
         "PLL_OUT_DIV": 5,
         "BUILD_ID": 0,
     }
 
 
-def test_every_pll_setting_is_exact_and_inside_the_vco_range():
+def test_every_pll_setting_is_exact_and_inside_the_pll_limits():
     settings = pll_settings()
-    assert settings[0].core_hz == 200_000_000
-    assert (settings[0].multiplier, settings[0].output_divider) == (10, 5)
+    # Every integer PLL setting of speed grade -1, once per exact frequency.
+    assert len(settings) > 6000
+    assert settings[0].core_hz == MAX_CORE_HZ and settings[-1].core_hz == MIN_CORE_HZ
     assert len({setting.core_hz for setting in settings}) == len(settings)
+    assert len({setting.exact_hz for setting in settings}) == len(settings)
     for setting in settings:
         assert VCO_MIN_HZ <= setting.vco_hz <= VCO_MAX_HZ
-        assert setting.core_hz * setting.output_divider == BOARD_OSCILLATOR_HZ * setting.multiplier
-        assert 50_000_000 <= setting.core_hz <= 200_000_000
+        assert setting.pfd_hz >= PFD_MIN_HZ and 1 <= setting.input_divider <= 5
+        assert 2 <= setting.multiplier <= 64 and 1 <= setting.output_divider <= 128
+        assert setting.exact_hz == Fraction(
+            BOARD_OSCILLATOR_HZ * setting.multiplier,
+            setting.input_divider * setting.output_divider,
+        )
+        assert abs(setting.exact_hz - setting.core_hz) <= Fraction(1, 2)
+        assert setting.period_ns == 1_000_000_000 / setting.exact_hz
+    # The reference keeps x10 / 1 / 5 and earlier D=1 choices are unchanged.
+    assert pll_for(REFERENCE_CORE_HZ).describe().startswith("100 MHz × 10 / (1 × 5)")
+    assert (pll_for(150_000_000).multiplier, pll_for(150_000_000).input_divider) == (9, 1)
     assert pll_for(150_000_000).tick_ns == pytest.approx(1e9 / 300e6)
+    # 100 MHz x 53 / (5 x 7): only a phase-detector divider reaches it.
+    assert pll_for(151_428_571).input_divider == 5
 
 
-@pytest.mark.parametrize("core_hz", [210_000_000, 133_333_333, 40_000_000, 200e6])
+@pytest.mark.parametrize("core_hz", [MAX_CORE_HZ + 1, 133_333_334, 6_000_000, 200e6])
 def test_unreachable_or_untimed_core_clock_is_rejected(core_hz):
     with pytest.raises(ValueError, match="cœur"):
         FirmwareBuildConfig(core_hz=core_hz)
+
+
+@pytest.mark.parametrize(
+    ("requested", "achieved", "core_hz", "divider"),
+    [
+        ("150e6", Fraction(150_000_000), 150_000_000, 1),
+        ("151e6", Fraction(1_060_000_000, 7), 151_428_571, 1),
+        ("120e6", Fraction(120_000_000), 240_000_000, 2),
+        ("122e6", Fraction(122_000_000), 244_000_000, 2),
+        ("10e6", Fraction(10_000_000), REFERENCE_CORE_HZ, 20),
+        ("3e3", Fraction(3_000), 195_000_000, 65_000),
+    ],
+)
+def test_frame_clock_plan_finds_the_nearest_frequency(requested, achieved, core_hz, divider):
+    plan = plan_frame_clock(requested)
+    assert (plan.achieved_hz, plan.core_hz, plan.divider) == (achieved, core_hz, divider)
+    assert plan.setting == pll_for(core_hz)
+
+
+def test_frame_clock_plan_rounding_preferences_and_limits():
+    below = plan_frame_clock("151e6", never_above=True)
+    assert below.achieved_hz == 150_000_000 and below.error_hz == -1e6
+    lower, upper = frame_clock_neighbors("151e6")
+    assert lower is not None and upper is not None
+    assert lower.achieved_hz == 150_000_000 and upper.achieved_hz == Fraction(1_060_000_000, 7)
+    # Equal frequency: the loaded firmware, then the reference, needs no build.
+    assert plan_frame_clock("50e6").core_hz == REFERENCE_CORE_HZ
+    assert plan_frame_clock("50e6", current_core_hz=150_000_000).core_hz == 150_000_000
+    assert plan_frame_clock(MAX_FRAME_CLOCK_HZ).divider == 1
+    with pytest.raises(ValueError, match="limite absolue"):
+        plan_frame_clock(MAX_FRAME_CLOCK_HZ + 1)
+    with pytest.raises(ValueError, match="trop lente"):
+        plan_frame_clock(MIN_FRAME_CLOCK_HZ / 2)
+    for bad in ("abc", "nan", "-5", 0, float("inf")):
+        with pytest.raises(ValueError):
+            plan_frame_clock(bad)
 
 
 def test_pin_table_matches_digilent_master_xdc_and_board_resources():
@@ -137,13 +196,14 @@ def test_build_identity_is_a_positive_31_bit_integer():
         assert FirmwareBuildConfig(clock_pin=pin).yosys_parameters()["BUILD_ID"] == build_id
 
 
-@pytest.mark.parametrize("setting", pll_settings(), ids=lambda setting: str(setting.core_hz))
-def test_period_rounding_never_relaxes_the_requested_clock(setting):
-    xdc = FirmwareBuildConfig(core_hz=setting.core_hz).xdc()
-    line = next(line for line in xdc.splitlines() if "-name core_clock " in line)
-    period = Decimal(line.split("-period ")[1].split()[0])
-    assert period * setting.core_hz <= Decimal(1_000_000_000)
-    assert Decimal(1_000_000_000) / period - setting.core_hz < Decimal("0.1")
+def test_period_rounding_never_relaxes_the_requested_clock():
+    for setting in pll_settings():
+        xdc = FirmwareBuildConfig(core_hz=setting.core_hz).xdc()
+        line = next(line for line in xdc.splitlines() if "-name core_clock " in line)
+        period = Fraction(Decimal(line.split("-period ")[1].split()[0]))
+        # Never weaker than the exact PLL frequency, at most 1 ppm stricter.
+        assert period * setting.exact_hz <= 1_000_000_000
+        assert 1_000_000_000 / period - setting.exact_hz < setting.exact_hz / 1_000_000
 
 
 def test_tr_pin_defaults_to_jb4_and_is_a_slow_static_output():

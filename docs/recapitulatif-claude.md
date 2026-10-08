@@ -15,7 +15,8 @@ fusions faites par le propriétaire du dépôt ne sont cités que pour le contex
 | --- | --- |
 | Correction critique | Broches UART RX/TX inversées dans le XDC : sans ce correctif, la carte ne pouvait pas répondre. |
 | Connectivité | Test des LED LD4–LD7 (commande LED) et identification du firmware (commande INFO). |
-| Firmware à la demande | Choix de l'horloge du cœur (32 valeurs, 50–200 MHz) et des broches DATA/CLK/LATCH, compilation locale ou sur GitHub Actions depuis l'interface. |
+| Firmware à la demande | Choix de l'horloge du cœur (6191 valeurs, 6,25–300 MHz) et des broches DATA/CLK/LATCH, compilation locale ou sur GitHub Actions depuis l'interface. |
+| Haute fréquence | Moteur de trame révision 6 jusqu'à 300 MHz, planificateur de fréquence (la plus proche ou sans dépasser), vérification du PLL dans le FASM. |
 | Émission continue | Répétition de la trame jusqu'à Arrêter (firmware révision 3). |
 | CLK libre | Horloge sans interruption pendant LATCH et la pause (firmware révision 4). |
 | Timing 200 MHz | Chemins critiques réenregistrés, balayage des graines de placement avec marge de 3 %. |
@@ -148,6 +149,19 @@ Fusionné dans `main` par la pull request [#2](https://github.com/Citroz31/arty-
 
 Voir [le mode mesure](mode-mesure.md) et [le mode VNA](mode-vna.md).
 
+## Haute fréquence : moteur révision 6 et planificateur (7-8 octobre)
+
+| Commit | Apport |
+| --- | --- |
+| à venir | Moteur de trame réécrit (étapes BIT/TAIL, décompteurs à bit de signe, cycle d'armement), deux domaines d'horloge (`engine_link`, `frame_plan`), PLL `DIVCLK_DIVIDE`, planificateur `plan_frame_clock` et `arty-frame clock-plan`, champs d'horloge en MHz et « Adopter cette horloge » dans Pilotage, vérification du PLL dans le FASM, balayage jusqu'à 16 graines, limite absolue de 300 MHz |
+
+La fréquence maximale atteignable est établie par 48 placements routés :
+la logique du moteur passe 300 MHz dans un placement sur trois (jusqu'à
+344 MHz), le réseau d'horloge BUFG en vitesse -1 en permettrait 464 ; la
+limite absolue appliquée est **300 MHz**. Voir
+[la fréquence maximale](hardware.md#fréquence-maximale-de-cette-carte) et
+[les mesures](verification.md#moteur-révision-6-et-fréquence-maximale).
+
 ## Revues des mises à jour de Codex
 
 | Commit Codex | Avis |
@@ -162,8 +176,9 @@ Voir [le mode mesure](mode-mesure.md) et [le mode VNA](mode-vna.md).
 2. **Actualiser `uv.lock`** (`uv lock`) pour PyVISA : PyPI n'était pas
    joignable depuis l'environnement de Claude. `pip` et `start-windows.cmd`
    ne sont pas concernés.
-3. **Rendre la marge à 200 MHz indépendante du placement** : seules 3 graines
-   sur 8 passent. Enregistrer un cycle plus tôt la décision de fin de trame.
+3. **Mesurer à l'oscilloscope la fréquence CLK réellement exploitable** sur
+   le Pmod JB : la logique va jusqu'à 300 MHz, la sortie LVCMOS33 et le
+   câblage bien moins. Monter progressivement depuis 10 MHz.
 4. **Arrêt propre en fin de trame**, **mise à jour du mot sans arrêter CLK**,
    **firmware en mémoire flash**.
 5. **Découper `app.py`** (≈ 1 900 lignes) en contrôleurs testables séparément.

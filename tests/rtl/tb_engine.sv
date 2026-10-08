@@ -60,6 +60,23 @@ module tb_engine;
         end
     endtask
 
+    // START arms the engine for START_LATENCY core cycles: busy, outputs
+    // idle with the new LATCH polarity. Tick 0 follows.
+    localparam integer START_LATENCY = 1;
+    task check_armed;
+        input [2:0] flags_value;
+        integer cycle;
+        begin
+            for (cycle=0; cycle<START_LATENCY; cycle=cycle+1) begin
+                @(posedge clk);
+                if (!busy || dr || df || cr || cf
+                    || lr !== flags_value[1] || lf !== flags_value[1])
+                    $fatal(1,"Outputs moved while the SEND was armed");
+                checks=checks+1;
+            end
+        end
+    endtask
+
     task run_case;
         input [31:0] word_value;
         input integer bit_value, divider_value, latch_value, gap_value, repeat_value;
@@ -73,6 +90,7 @@ module tb_engine;
             @(posedge clk); #0.1;
             if (!busy || completed != 0) $fatal(1,"SEND did not start/reset counter");
             @(negedge clk); start=0;
+            check_armed(flags_value);
             duration=2*divider_value*bit_value+divider_value+latch_value+gap_value;
             pairs=(duration*repeat_value+5)/2;
             for (pair_index=0; pair_index<pairs; pair_index=pair_index+1) begin
@@ -102,6 +120,7 @@ module tb_engine;
             @(posedge clk); #0.1;
             if (!busy || completed != 0) $fatal(1,"Continuous SEND did not start");
             @(negedge clk); start=0;
+            check_armed(flags_value);
             duration=2*divider_value*bit_value+divider_value+latch_value+gap_value;
             pairs=(duration*frames+stop_offset)/2;
             for (pair_index=0; pair_index<pairs; pair_index=pair_index+1) begin

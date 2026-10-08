@@ -122,7 +122,7 @@ jobs:
           assert " " in str(project)
           assert not config_path.is_relative_to(project)
           assert not chain.build_dir.is_relative_to(project)
-          assert config.nextpnr_seeds == (8,)
+          assert config.nextpnr_seeds == tuple(range(1, 17))
           assert config.timing_margin == 0.03
           firmware = FirmwareBuildConfig.load(os.environ["ARTY_FIRMWARE_CONFIG"])
           assert firmware == FirmwareBuildConfig(core_hz=150_000_000)

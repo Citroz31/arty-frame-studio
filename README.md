@@ -9,9 +9,14 @@ Vivado n’est pas utilisé par le projet.
 
 Le PC envoie les paramètres par UART ; le FPGA produit les fronts. Avec le
 firmware de référence, la fréquence réalisable est **200 MHz / N**, N entier
-de 1 à 65535, soit environ 3,052 kHz à 200 MHz. L’application retient la
-fréquence réalisable la plus élevée **sans dépasser** la demande (150 MHz
-donne 100 MHz) et affiche la valeur obtenue. Par défaut, CLK est émise en
+de 1 à 65535, soit environ 3,052 kHz à 200 MHz. Pour toute autre fréquence,
+le **planificateur d'horloge** parcourt les 6191 horloges de cœur du PLL
+(100 MHz × M / (D × O)) et tous les N, donne la **fréquence la plus proche**
+(150 MHz exacts, 151 MHz → 151,43 MHz, 122 MHz exacts) et prépare le firmware
+à charger. Un commutateur retient la plus proche **sans dépasser** la demande.
+**Limite absolue : CLK 300 MHz**, fixée par le timing routé du moteur de
+trame ([fréquence maximale](docs/hardware.md#fréquence-maximale-de-cette-carte)).
+Par défaut, CLK est émise en
 rafales, au repos bas ; les durées latch et pause sont quantifiées à **2,5 ns**.
 Avec **CLK libre entre les trames**, CLK reste périodique pendant toute la
 séquence et ces durées sont arrondies à des périodes entières de CLK.
@@ -59,10 +64,12 @@ Depuis **Pilotage → Préparer le firmware depuis Pilotage**, l'application
 conserve les paramètres de trame et réutilise un `.bit` compatible vérifié.
 Changer le mot, le diviseur de CLK, le latch ou les répétitions utilise UART :
 cela ne demande pas de recompilation. Pour changer l'**horloge du cœur**
-(32 valeurs de 50 à 200 MHz) ou les **broches DATA, CLK et LATCH** sur JA à JD,
-elle prépare une compilation locale. Par exemple, une CLK exacte de 150 MHz
-demande un cœur à 150 MHz ; le cœur de référence à 200 MHz réalise 100 MHz
-pour cette demande.
+(6191 valeurs de 6,25 à 300 MHz) ou les **broches DATA, CLK et LATCH** sur JA
+à JD, elle prépare une compilation locale. Par exemple, une CLK exacte de
+150 MHz demande un cœur à 150 MHz ; le cœur de référence à 200 MHz donne
+200 ou 100 MHz pour cette demande. **Adopter cette horloge**, sous la
+fréquence demandée, choisit le cœur du planificateur ;
+`arty-frame clock-plan 151 --output fw.json` fait de même en ligne de commande.
 
 Sous Windows x64, **Installer les outils Windows locaux** prépare Yosys,
 openXC7/nextpnr et Project X-Ray dans votre compte ; **Compiler sur ce PC**
@@ -271,7 +278,7 @@ arty-frame send --profile examples/horloge_seule_10mhz_continue.json --port COM7
 arty-frame ports
 arty-frame info --port COM7
 arty-frame led-test --port COM7
-arty-frame tr --port COM7 1        # broche TR à 3,3 V (0 : 0 V), firmware révision 5
+arty-frame tr --port COM7 1        # broche TR à 3,3 V (0 : 0 V), firmware révision 5 ou plus
 arty-frame vna-list                # VNA Keysight détectables (VISA, ce PC)
 arty-frame sweep --demo --profile examples/frame_26bits.json --states examples/etats_exemple.csv \
     --probe vna --vna-demo --width 12 --vna-dir exports/essai

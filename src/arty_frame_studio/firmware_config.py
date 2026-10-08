@@ -10,20 +10,34 @@ XDC Digilent Arty A7-100 (révisions D/E) ; aucune autre broche n'est acceptée.
 from __future__ import annotations
 
 import json
+import math
 import zlib
 from dataclasses import asdict, dataclass, fields
 from decimal import ROUND_FLOOR, Decimal
+from fractions import Fraction
 from functools import cache
 from pathlib import Path
 from typing import Any
 
 BOARD_OSCILLATOR_HZ = 100_000_000
 REFERENCE_CORE_HZ = 200_000_000
-MIN_CORE_HZ = 50_000_000
-# Le build révision 2 passe à 206 MHz ; au-delà, aucune marge n'est démontrée.
-MAX_CORE_HZ = 200_000_000
+# Limites du PLLE2_ADV du xc7a100tcsg324-1, vitesse -1 (DS181) : comparateur
+# de phase (PFD = 100 MHz / D) de 19 à 450 MHz, VCO de 800 à 1600 MHz, sortie
+# de 6,25 à 800 MHz. Le réseau d'horloge BUFG est limité à 464 MHz.
 VCO_MIN_HZ = 800_000_000
 VCO_MAX_HZ = 1_600_000_000
+PFD_MIN_HZ = 19_000_000
+PFD_MAX_HZ = 450_000_000
+PLL_OUTPUT_MAX_HZ = 800_000_000
+BUFG_MAX_HZ = 464_000_000
+MIN_CORE_HZ = VCO_MIN_HZ // 128
+# Limite absolue de ce firmware : l'horloge de cœur la plus élevée dont le
+# timing routé du moteur de trame est démontré par nextpnr-xilinx (environ un
+# placement sur trois passe à 300 MHz, le balayage essaie jusqu'à 16 graines ;
+# voir docs/hardware.md). Elle reste sous les limites du silicium ci-dessus.
+# CLK vaut le cœur / N : c'est aussi la fréquence CLK maximale (N = 1).
+MAX_CORE_HZ = 300_000_000
+MAX_DIVIDER = 65_535
 DRIVES_MA = (4, 8, 12, 16)
 SLEWS = ("SLOW", "FAST")
 SCHEMA_VERSION = 1
@@ -32,57 +46,281 @@ DEFAULT_TR_PIN = "JB4"
 
 @dataclass(frozen=True)
 class PllSetting:
-    """VCO = 100 MHz × multiplier ; cœur = VCO / output_divider (DIVCLK = 1)."""
+    """Cœur = 100 MHz × multiplier / (input_divider × output_divider).
+
+    ``core_hz`` est la fréquence exacte arrondie au hertz : c'est la valeur
+    annoncée par INFO et paramètre ``CORE_HZ`` du firmware.
+    """
 
     core_hz: int
     multiplier: int
     output_divider: int
+    input_divider: int = 1
 
     @property
-    def vco_hz(self) -> int:
-        return BOARD_OSCILLATOR_HZ * self.multiplier
+    def exact_hz(self) -> Fraction:
+        return Fraction(
+            BOARD_OSCILLATOR_HZ * self.multiplier, self.input_divider * self.output_divider
+        )
+
+    @property
+    def vco_hz(self) -> Fraction:
+        return Fraction(BOARD_OSCILLATOR_HZ * self.multiplier, self.input_divider)
+
+    @property
+    def pfd_hz(self) -> Fraction:
+        return Fraction(BOARD_OSCILLATOR_HZ, self.input_divider)
+
+    @property
+    def period_ns(self) -> Fraction:
+        """Période exacte du cœur : 10 ns × D × O / M."""
+        return Fraction(10 * self.input_divider * self.output_divider, self.multiplier)
 
     @property
     def tick_ns(self) -> float:
-        return 1e9 / (2 * self.core_hz)
+        return float(self.period_ns / 2)
+
+    def describe(self) -> str:
+        return (
+            f"100 MHz × {self.multiplier} / ({self.input_divider} × {self.output_divider}) = "
+            f"{format_hz(self.exact_hz)}"
+        )
+
+
+def format_hz(value: float | Fraction, digits: int = 9) -> str:
+    """Fréquence lisible : ``151.428571 MHz``, ``3.05180 kHz``."""
+    number = float(value)
+    for scale, unit in ((1e6, "MHz"), (1e3, "kHz"), (1.0, "Hz")):
+        if abs(number) >= scale or unit == "Hz":
+            return f"{number / scale:.{digits}g} {unit}"
+    raise AssertionError("unreachable")
+
+
+def _valid_vco(multiplier: int, input_divider: int) -> bool:
+    pfd = Fraction(BOARD_OSCILLATOR_HZ, input_divider)
+    return (
+        2 <= multiplier <= 64
+        and 1 <= input_divider <= 56
+        and PFD_MIN_HZ <= pfd <= PFD_MAX_HZ
+        and VCO_MIN_HZ <= pfd * multiplier <= VCO_MAX_HZ
+    )
+
+
+def _valid_pll(multiplier: int, input_divider: int, output_divider: int) -> bool:
+    return (
+        _valid_vco(multiplier, input_divider)
+        and 1 <= output_divider <= 128
+        and Fraction(BOARD_OSCILLATOR_HZ * multiplier, input_divider * output_divider)
+        <= PLL_OUTPUT_MAX_HZ
+    )
 
 
 @cache
 def pll_settings() -> tuple[PllSetting, ...]:
-    """Fréquences de cœur entières réalisables, de la plus haute à la plus basse.
+    """Toutes les horloges de cœur réalisables, de la plus haute à la plus basse.
 
-    Pour chaque fréquence, le VCO le plus proche de 1 GHz est retenu ; 200 MHz
-    donne donc ×10 / 5, la configuration du firmware de référence.
+    Chaque fréquence exacte 100 MHz × M / (D × O) entre ``MIN_CORE_HZ`` et
+    ``MAX_CORE_HZ`` apparaît une fois. Parmi les réglages qui la donnent, le
+    plus petit D (comparateur de phase le plus rapide), puis le VCO le plus
+    proche de 1 GHz : 200 MHz donne ×10 / 1 / 5, la configuration du firmware
+    de référence, et les réglages D = 1 des versions précédentes sont conservés.
+    Deux fréquences exactes distinctes diffèrent d'au moins 100 MHz / 640²,
+    soit 244 Hz : l'arrondi au hertz les identifie sans ambiguïté.
     """
-    best: dict[int, PllSetting] = {}
-    for multiplier in range(8, 17):
-        vco = BOARD_OSCILLATOR_HZ * multiplier
-        if not VCO_MIN_HZ <= vco <= VCO_MAX_HZ:
-            continue
-        for divider in range(1, 129):
-            if vco % divider:
+    best: dict[Fraction, tuple[tuple[object, ...], PllSetting]] = {}
+    # PFD >= 19 MHz : D <= 5. Les bornes du VCO fixent M pour chaque D.
+    for input_divider in range(1, BOARD_OSCILLATOR_HZ // PFD_MIN_HZ + 1):
+        for multiplier in range(2, 65):
+            if not _valid_vco(multiplier, input_divider):
                 continue
-            core = vco // divider
-            if not MIN_CORE_HZ <= core <= MAX_CORE_HZ:
-                continue
-            setting = PllSetting(core, multiplier, divider)
-            current = best.get(core)
-            if current is None or (abs(vco - 1_000_000_000), multiplier) < (
-                abs(current.vco_hz - 1_000_000_000),
-                current.multiplier,
-            ):
-                best[core] = setting
-    return tuple(sorted(best.values(), key=lambda setting: -setting.core_hz))
+            for output_divider in range(1, 129):
+                exact = Fraction(BOARD_OSCILLATOR_HZ * multiplier, input_divider * output_divider)
+                if not MIN_CORE_HZ <= exact <= min(MAX_CORE_HZ, PLL_OUTPUT_MAX_HZ):
+                    continue
+                setting = PllSetting(round(exact), multiplier, output_divider, input_divider)
+                rank = (input_divider, abs(setting.vco_hz - 1_000_000_000), multiplier)
+                current = best.get(exact)
+                if current is None or rank < current[0]:
+                    best[exact] = (rank, setting)
+    return tuple(sorted((item[1] for item in best.values()), key=lambda item: -item.exact_hz))
+
+
+@cache
+def _pll_index() -> dict[int, PllSetting]:
+    return {setting.core_hz: setting for setting in pll_settings()}
 
 
 def pll_for(core_hz: int) -> PllSetting:
+    setting = _pll_index().get(core_hz) if type(core_hz) is int else None
+    if setting is None:
+        raise ValueError(
+            f"Horloge de cœur {core_hz} Hz non réalisable : choisir une fréquence "
+            f"100 MHz × M / (D × O) arrondie au hertz, entre {format_hz(MIN_CORE_HZ)} "
+            f"et {format_hz(MAX_CORE_HZ)} (planificateur : plan_frame_clock)."
+        )
+    return setting
+
+
+MAX_FRAME_CLOCK_HZ = MAX_CORE_HZ
+MIN_FRAME_CLOCK_HZ = Fraction(MIN_CORE_HZ, MAX_DIVIDER)
+
+
+@dataclass(frozen=True)
+class FrameClockPlan:
+    """CLK réalisable : horloge de cœur (réglage PLL) divisée par N."""
+
+    requested_hz: Fraction
+    setting: PllSetting
+    divider: int
+
+    @property
+    def core_hz(self) -> int:
+        return self.setting.core_hz
+
+    @property
+    def achieved_hz(self) -> Fraction:
+        return self.setting.exact_hz / self.divider
+
+    @property
+    def error_hz(self) -> float:
+        return float(self.achieved_hz - self.requested_hz)
+
+    @property
+    def error_ppm(self) -> float:
+        return float((self.achieved_hz - self.requested_hz) / self.requested_hz * 1_000_000)
+
+    @property
+    def exact(self) -> bool:
+        return self.achieved_hz == self.requested_hz
+
+    def summary(self) -> str:
+        if self.exact:
+            gap = "exacte"
+        else:
+            sign = "+" if self.error_hz > 0 else "-"
+            gap = f"écart {sign}{format_hz(abs(self.error_hz), 6)}, {self.error_ppm:+.4g} ppm"
+        return (
+            f"CLK {format_hz(self.achieved_hz)} ({gap}) = cœur "
+            f"{format_hz(self.setting.exact_hz)} / N={self.divider} ; "
+            f"PLL ×{self.setting.multiplier} /{self.setting.input_divider} "
+            f"/{self.setting.output_divider}, pas des durées "
+            f"{self.setting.tick_ns:.6g} ns"
+        )
+
+
+def requested_frequency(value: float | int | str | Fraction | Decimal) -> Fraction:
+    """Fréquence saisie (Hz) en valeur exacte ; ``"150e6"`` ou ``150e6``."""
+    try:
+        if isinstance(value, Fraction):
+            exact = value
+        elif isinstance(value, str):
+            exact = Fraction(Decimal(value.strip().replace(",", ".")))
+        elif isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError
+            exact = Fraction(Decimal(repr(value)))
+        else:
+            exact = Fraction(value)
+    except (ArithmeticError, ValueError, TypeError) as exc:
+        raise ValueError("Fréquence : nombre fini attendu, en hertz.") from exc
+    if exact <= 0:
+        raise ValueError("La fréquence doit être strictement positive.")
+    return exact
+
+
+def plan_frame_clock(
+    requested: float | int | str | Fraction | Decimal,
+    *,
+    never_above: bool = False,
+    current_core_hz: int | None = None,
+) -> FrameClockPlan:
+    """Fréquence CLK réalisable la plus proche de la demande.
+
+    Toutes les horloges de cœur ``pll_settings()`` et tous les diviseurs N de
+    1 à 65535 sont considérés. ``never_above`` exclut les fréquences
+    supérieures à la demande (récepteur jamais surcadencé). À écart égal :
+    la fréquence inférieure, puis l'horloge du firmware chargé
+    (``current_core_hz``, aucune recompilation), puis celle du firmware de
+    référence, puis le cœur le plus proche de 200 MHz. Au-delà de
+    ``MAX_FRAME_CLOCK_HZ``, la limite absolue, la demande est refusée.
+    """
+    target = requested_frequency(requested)
+    if target > MAX_FRAME_CLOCK_HZ:
+        raise ValueError(
+            f"{format_hz(target)} dépasse la limite absolue de ce FPGA : CLK "
+            f"{format_hz(MAX_FRAME_CLOCK_HZ)} au plus (cœur maximal validé, N = 1)."
+        )
+    if target < MIN_FRAME_CLOCK_HZ:
+        raise ValueError(
+            f"{format_hz(target)} est trop lente : CLK {format_hz(MIN_FRAME_CLOCK_HZ)} "
+            f"au moins (cœur {format_hz(MIN_CORE_HZ)}, N = {MAX_DIVIDER})."
+        )
+    # Écart en flottant pour tous les candidats, puis classement exact des
+    # quelques candidats à égalité numérique.
+    candidates: list[tuple[float, PllSetting, int]] = []
+    goal = float(target)
     for setting in pll_settings():
-        if setting.core_hz == core_hz:
-            return setting
-    raise ValueError(
-        f"Horloge de cœur {core_hz} Hz non réalisable : choisir une valeur entière "
-        f"de 100 MHz × M / O entre {MIN_CORE_HZ // 10**6} et {MAX_CORE_HZ // 10**6} MHz."
-    )
+        core = float(setting.exact_hz)
+        lower = max(1, min(MAX_DIVIDER, int(core // goal)))
+        for divider in {lower, min(MAX_DIVIDER, lower + 1)}:
+            achieved = core / divider
+            if never_above and achieved > goal * (1 + 1e-12):
+                continue
+            candidates.append((abs(achieved - goal), setting, divider))
+    if not candidates:
+        raise ValueError(f"Aucune fréquence CLK réalisable sous {format_hz(target)}.")
+    closest = min(error for error, _, _ in candidates)
+    best: tuple[tuple[object, ...], FrameClockPlan] | None = None
+    for error, setting, divider in candidates:
+        if error > closest + goal * 1e-9:
+            continue
+        exact_core = setting.exact_hz
+        exact = exact_core / divider
+        if never_above and exact > target:
+            continue
+        preference = (
+            0
+            if setting.core_hz == current_core_hz
+            else 1
+            if setting.core_hz == REFERENCE_CORE_HZ
+            else 2
+        )
+        rank = (
+            abs(exact - target),
+            exact > target,
+            preference,
+            abs(exact_core - REFERENCE_CORE_HZ),
+            -exact_core,
+        )
+        if best is None or rank < best[0]:
+            best = (rank, FrameClockPlan(target, setting, divider))
+    if best is None:
+        raise ValueError(f"Aucune fréquence CLK réalisable sous {format_hz(target)}.")
+    return best[1]
+
+
+def frame_clock_neighbors(
+    requested: float | int | str | Fraction | Decimal,
+) -> tuple[FrameClockPlan | None, FrameClockPlan | None]:
+    """Fréquences CLK réalisables encadrant la demande : (inférieure ou égale, supérieure)."""
+    target = requested_frequency(requested)
+    below = above = None
+    if target >= MIN_FRAME_CLOCK_HZ:
+        below = plan_frame_clock(min(target, Fraction(MAX_FRAME_CLOCK_HZ)), never_above=True)
+    if target < MAX_FRAME_CLOCK_HZ:
+        best: FrameClockPlan | None = None
+        for setting in pll_settings():
+            core = setting.exact_hz
+            divider = min(MAX_DIVIDER, max(1, math.ceil(core / target) - 1))
+            while divider > 1 and core / divider <= target:
+                divider -= 1
+            achieved = core / divider
+            if achieved <= target:
+                continue
+            if best is None or achieved < best.achieved_hz:
+                best = FrameClockPlan(target, setting, divider)
+        above = best
+    return below, above
 
 
 @dataclass(frozen=True)
@@ -223,6 +461,7 @@ class FirmwareBuildConfig:
         return {
             "CORE_HZ": self.core_hz,
             "PLL_MULT": self.pll.multiplier,
+            "PLL_IN_DIV": self.pll.input_divider,
             "PLL_OUT_DIV": self.pll.output_divider,
             "BUILD_ID": self.build_id,
         }
@@ -231,9 +470,11 @@ class FirmwareBuildConfig:
         """Contraintes complètes ; la configuration par défaut donne le XDC du dépôt."""
         mhz = f"{self.core_hz / 1e6:g}"
         # A 3-decimal period weakens 150 MHz to 149.9925 MHz (6.667 ns).
-        # Truncate with greater precision so the custom constraint is never
-        # weaker than the selected clock. Keep the committed reference XDC.
-        period = (Decimal(1_000_000_000) / Decimal(self.core_hz)).quantize(
+        # Truncate the exact PLL period (10 ns x D x O / M) with greater
+        # precision so the custom constraint is never weaker than the PLL
+        # clock. Keep the committed reference XDC.
+        exact = self.pll.period_ns
+        period = (Decimal(exact.numerator) / Decimal(exact.denominator)).quantize(
             Decimal("0.000000001"), rounding=ROUND_FLOOR
         )
         period_text = "5.000" if self.core_hz == REFERENCE_CORE_HZ else str(period)

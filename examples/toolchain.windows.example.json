@@ -19,6 +19,5 @@
   "prjxray_db": "tools/openxc7/share/nextpnr/external/prjxray-db/artix7",
   "part": "xc7a100tcsg324-1",
   "build_dir": "build",
-  "nextpnr_seeds": [8],
   "timing_margin": 0.03
 }

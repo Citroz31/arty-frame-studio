@@ -24,15 +24,17 @@ module tb_top;
     integer reset_checks=0;
     reg [2:0] expected;
 
-    // A 2 ms LED hold keeps the pattern visible past one 12-byte UART reply.
-    arty_top #(.LED_HOLD_CYCLES(400000)) board(.clk100(clk100),.reset_n(reset_n),.uart_rx(host_serial),
+    // A 2 ms LED hold (100 MHz control clock) keeps the pattern visible past
+    // one 12-byte UART reply.
+    arty_top #(.LED_HOLD_CYCLES(200000)) board(.clk100(clk100),.reset_n(reset_n),.uart_rx(host_serial),
         .uart_tx(board_serial),.data_out(data_pin),.frame_clk(clock_pin),
         .latch_enable(latch_pin),.tr_out(tr_pin),.led(led));
     always @(posedge board.core_clock or negedge board.core_clock)
         core_edges=core_edges+1;
-    uart_tx host_tx(.clk(host_clock),.reset(!reset_n),.data(host_data),
+    // The host side runs its own 200 MHz clock, unrelated to the board's.
+    uart_tx #(.CLOCK_HZ(200000000)) host_tx(.clk(host_clock),.reset(!reset_n),.data(host_data),
         .valid(host_valid),.ready(host_ready),.tx(host_serial));
-    uart_rx host_rx(.clk(host_clock),.reset(!reset_n),.rx(board_serial),
+    uart_rx #(.CLOCK_HZ(200000000)) host_rx(.clk(host_clock),.reset(!reset_n),.rx(board_serial),
         .data(returned_data),.valid(returned_valid));
     always @(posedge host_clock) if(returned_valid) begin
         captured[captured_count]=returned_data;

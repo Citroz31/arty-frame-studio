@@ -43,8 +43,13 @@ if name == "yosys":
                             "R": [42], "S": ["0"], "Q": [100 + index]},
         }
     cells["reset_flop"] = {"type": "FDCE", "connections": {"CLR": [43]}}
+    # Remember the chparam values, as the real PLL instance would carry them.
+    words = args[-1].replace(";", " ; ").split()
+    params = {words[i + 2]: words[i + 3] for i, word in enumerate(words)
+              if word == "chparam" and words[i + 1] == "-set"}
     netlist = {"creator": "fake-yosys", "modules": {"arty_top": {
-        "cells": cells, "netnames": {"reset": {"bits": [42]}}}}}
+        "cells": cells, "netnames": {"reset": {"bits": [42]}},
+        "attributes": {"fake_params": params}}}}
     Path(path).write_text(os.environ.get("FAKE_NETLIST", json.dumps(netlist)))
 elif name == "nextpnr-xilinx":
     fasm = (args[args.index("--fasm") + 1] if "--fasm" in args
@@ -53,7 +58,25 @@ elif name == "nextpnr-xilinx":
     skipped = (os.environ.get("FAKE_SKIP_ROUTE_KIND")
                if os.environ.get("FAKE_SKIP_ROUTE_SEED") == seed else None)
     if skipped != "fasm":
-        Path(fasm).write_text(f"CLBLL_L_X1Y1.SLICEL_X0.A5LUT.INIT[0] = 1\n# seed {seed}\n")
+        source = json.loads(Path(args[args.index("--json") + 1]).read_text())
+        params = source["modules"]["arty_top"].get("attributes", {}).get("fake_params", {})
+        pll = [int(params.get(name, default)) for name, default in
+               (("PLL_MULT", 10), ("PLL_IN_DIV", 1), ("PLL_OUT_DIV", 5))]
+        if os.environ.get("FAKE_PLL"):
+            pll = [int(value) for value in os.environ["FAKE_PLL"].split(",")]
+        tile = "CMT_TOP_L_UPPER_T_X139Y148.PLLE2_ADV."
+        lines = ["CLBLL_L_X1Y1.SLICEL_X0.A5LUT.INIT[0] = 1", f"# seed {seed}", tile + "IN_USE"]
+        for (times, flags), value in zip(
+            (("CLKFBOUT_CLKOUT1", "CLKFBOUT_CLKOUT2"), ("DIVCLK_DIVCLK", "DIVCLK_DIVCLK"),
+             ("CLKOUT0_CLKOUT1", "CLKOUT0_CLKOUT2")), pll):
+            high, low = (1, 1) if value == 1 else (value // 2, value - value // 2)
+            lines += [f"{tile}{times}_HIGH_TIME[5:0] = 6'b{high % 64:06b}",
+                      f"{tile}{times}_LOW_TIME[5:0] = 6'b{low % 64:06b}"]
+            if value == 1:
+                lines.append(f"{tile}{flags}_NO_COUNT[0]")
+            elif high != low:
+                lines.append(f"{tile}{flags}_EDGE[0]")
+        Path(fasm).write_text("\n".join(lines) + "\n")
     if "--report" in args and skipped != "timing":
         Path(args[args.index("--report") + 1]).write_text(json.dumps({"fmax": {}, "seed": seed}))
     if "--write" in args and skipped != "routed":
@@ -926,3 +949,94 @@ def test_missing_toolchain_file_explains_the_windows_route(tmp_path: Path) -> No
     message = str(error.value)
     assert "non configurée" in message and "toolchain.json" in message
     assert "Compiler sur GitHub" in message and "Charger le .bit sous Windows" in message
+
+
+def test_late_seeds_only_serve_a_requirement_no_early_seed_met(
+    toolchain: Toolchain, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    failing = "ERROR: Max frequency for clock 'core_clock': 192.09 MHz (FAIL at 200.00 MHz)"
+    monkeypatch.setenv("FAKE_TIMING", failing)
+    monkeypatch.setenv("FAKE_TIMING_EXIT", "1")
+    monkeypatch.setenv(
+        "FAKE_TIMING_SEED_11",
+        "Info: Max frequency for clock 'core_clock': 201.00 MHz (PASS at 200.00 MHz)",
+    )
+    toolchain.build()
+    seeds = [call[call.index("--seed") + 1] for call in history() if call[0] == "nextpnr-xilinx"]
+    # Nothing passed in the first eight: continue, then keep the first pass.
+    assert seeds == [str(seed) for seed in range(1, 12)]
+    assert json.loads(toolchain.receipt.read_text())["nextpnr_seed"] == 11
+
+
+def test_no_passing_seed_names_the_sweep_and_suggests_a_lower_clock(
+    toolchain: Toolchain, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "FAKE_TIMING",
+        "ERROR: Max frequency for clock 'core_clock': 192.09 MHz (FAIL at 200.00 MHz)",
+    )
+    monkeypatch.setenv("FAKE_TIMING_EXIT", "1")
+    with pytest.raises(ToolchainError, match="Aucune des 16 graines.*plus basse"):
+        toolchain.build()
+    assert not toolchain.receipt.exists()
+    toolchain.config = replace(toolchain.config, nextpnr_seeds=(8,))
+    with pytest.raises(ToolchainError, match="retirer nextpnr_seeds"):
+        toolchain.build()
+
+
+def test_fasm_pll_must_match_the_requested_counters(
+    toolchain: Toolchain, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    firmware = FirmwareBuildConfig(core_hz=151_428_571)
+    logs: list[str] = []
+    toolchain.build(log=logs.append, firmware=firmware)
+    receipt = json.loads(toolchain.receipt.read_text())
+    assert receipt["pll"] == {
+        "multiplier": 53,
+        "input_divider": 5,
+        "output_divider": 7,
+        "core_exact_hz": "1060000000/7",
+    }
+    assert any("[PLL] FASM vérifié : 100 MHz × 53 / (5 × 7)" in line for line in logs)
+    yosys = next(call for call in history() if call[0] == "yosys")
+    assert "chparam -set PLL_IN_DIV 5 arty_top" in yosys[-1]
+    monkeypatch.setenv("FAKE_PLL", "53,5,6")
+    with pytest.raises(ToolchainError, match="PLL du FASM ×53 / 5 / 6"):
+        toolchain.build(firmware=firmware)
+    assert not toolchain.receipt.exists()
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        ("", "exactement un PLLE2_ADV"),
+        ("X.PLLE2_ADV.IN_USE\nY.PLLE2_ADV.IN_USE", "exactement un PLLE2_ADV"),
+        (
+            "X.PLLE2_ADV.IN_USE\nX.PLLE2_ADV.CLKOUT0_CLKOUT1_HIGH_TIME[5:0] = 6'b000010\n"
+            "X.PLLE2_ADV.CLKOUT0_CLKOUT1_LOW_TIME[5:0] = 6'b000011",
+            "incohérent",
+        ),
+    ],
+)
+def test_fasm_pll_decoder_rejects_ambiguous_programming(line: str, message: str) -> None:
+    with pytest.raises(ToolchainError, match=message):
+        Toolchain._fasm_pll(line)
+
+
+def test_fasm_pll_decoder_reads_routed_counters() -> None:
+    tile = "CMT_TOP_L_UPPER_T_X139Y148.PLLE2_ADV."
+    fasm = "\n".join(
+        [
+            tile + "IN_USE",
+            tile + "DIVCLK_DIVCLK_HIGH_TIME[5:0] = 6'b000001",
+            tile + "DIVCLK_DIVCLK_LOW_TIME[5:0] = 6'b000001",
+            tile + "CLKFBOUT_CLKOUT1_HIGH_TIME[5:0] = 6'b001110",
+            tile + "CLKFBOUT_CLKOUT1_LOW_TIME[5:0] = 6'b001111",
+            tile + "CLKFBOUT_CLKOUT2_EDGE[0]",
+            tile + "CLKOUT0_CLKOUT1_HIGH_TIME[5:0] = 6'b000000",
+            tile + "CLKOUT0_CLKOUT1_LOW_TIME[5:0] = 6'b000000",
+            tile + "COMPENSATION.Z_ZHOLD_OR_CLKIN_BUF",
+        ]
+    )
+    # nextpnr's own encoding of x29 / 2 / 128 (64 is written as 0).
+    assert Toolchain._fasm_pll(fasm) == (29, 2, 128)
