@@ -107,8 +107,10 @@ multiplexeur de rechargement dans une seule LUT devant la chaîne de retenue.
 Mesures nextpnr-xilinx (48 placements, six réglages PLL de 250 à 300 MHz,
 graines 1 à 8) : Fmax routée de 221 à 344 MHz selon le placement, environ un
 placement sur trois au-dessus de 300 MHz, deux sur trois au-dessus de 275 MHz.
-La compilation essaie jusqu'à 16 graines. Ces rapports couvrent les chemins
-entre registres ; ni la sortie DDR ni la liaison externe ne sont certifiées.
+La compilation essaie jusqu'à 16 graines. Le firmware de référence, cœur à
+200 MHz, atteint 288,93 MHz routés dès la graine 1. Ces rapports couvrent les
+chemins entre registres ; ni la sortie DDR ni la liaison externe ne sont
+certifiées.
 
 À 300 MHz, CLK change toutes les 1,67 ns. Une sortie LVCMOS33 de 3,3 V à
 travers un connecteur Pmod et des fils ne restitue plus un signal carré

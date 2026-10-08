@@ -17,8 +17,9 @@ et des astérisques reçus peuvent venir d'une démonstration déjà présente s
 la carte. Ce ne sont pas des réponses au protocole Arty Frame Studio.
 
 Le [firmware précompilé](../firmware/prebuilt/arty_frame.bit) est fourni
-dans `firmware/prebuilt/`. Sa synthèse et son routage ont réussi avec une
-**Fmax de 210,79 MHz pour une contrainte de 200 MHz**. Un chargement SRAM
+dans `firmware/prebuilt/` (révision 6). Sa synthèse et son routage ont
+réussi avec une **Fmax de 288,93 MHz pour une contrainte de 200 MHz**. Un
+chargement SRAM
 réussi a été rapporté par l'utilisateur ; son retour récent contient encore
 des délais PING/INFO. Le dialogue courant et les sorties restent à confirmer
 par les essais du [diagnostic local](rapport-diagnostic-local.md).

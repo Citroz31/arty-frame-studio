@@ -13,8 +13,9 @@ Vivado ni droits administrateur. GitHub Actions reste disponible.
 
 Le [firmware précompilé](../firmware/prebuilt/arty_frame.bit) a été produit
 avec cette chaîne : synthèse, placement/routage et contrôle de timing réussis
-à **200 MHz**, avec une Fmax après routage de **210,79 MHz** (graine 8). Les sorties
-physiques et le chargement de ce firmware n'ont pas encore été testés sur carte.
+à **200 MHz**, avec une Fmax après routage de **288,93 MHz** (graine 1). Les
+sorties physiques et le chargement de ce firmware (révision 6) n'ont pas
+encore été testés sur carte.
 
 ## Outils épinglés et provenance
 
@@ -105,26 +106,29 @@ Le fichier publié dans `firmware/prebuilt/` est accompagné de :
 | [build.log](../firmware/prebuilt/build.log) | Commandes et résultats, dont le rapport de fréquence après routage |
 | [timing.json](../firmware/prebuilt/timing.json) | Rapport de timing nextpnr |
 
-Le build de référence utilise **ABC9**, la graine nextpnr **8** (seule des
-graines 1 à 8 à dépasser 206 MHz) et la cible `xc7a100tcsg324-1`. Le
-rapport final indique **210,79258728027344 MHz** sur `core_clock`, avec
-**PASS at 200.00 MHz**. Le `.bit` contient un IDCODE
-`0x03631093`, compatible avec l'IDCODE `0x13631093` rapporté sur la carte
-(révision différente). Les trois resets ODDR R→SR ont été vérifiés dans le
-netlist routé. Le fichier mesure **3 825 995 octets** et son SHA256 est :
+Le build de référence utilise **ABC9**, la graine nextpnr **1** (la première
+essayée dépasse déjà 200 MHz avec 3 % de marge) et la cible
+`xc7a100tcsg324-1`. Le rapport final indique **288,933837890625 MHz** sur
+`core_clock`, avec **PASS at 200.00 MHz**, et 149,43 MHz sur `ctrl_clock`
+(**PASS at 100.00 MHz**). Le `.bit` contient un IDCODE `0x03631093`,
+compatible avec l'IDCODE `0x13631093` rapporté sur la carte (révision
+différente). Les trois resets ODDR R→SR ont été vérifiés dans le netlist
+routé et les compteurs du PLL relus dans le FASM redonnent ×10 / 1 / 5. Le
+fichier mesure **3 825 995 octets** et son SHA256 est :
 
 ```text
-02c208aa8cbe79599f605e2f14d667a8f4a77361e56637832449e359f2edb57e
+8825690698d6848433a4f60f2bec8ba6ca19e5f873f0cae1c06dd2ca90ebe701
 ```
 
 ## Reproduire un build dans un environnement de développement
 
-Le firmware distribué provient du commit `dbe6803` et du
-[run GitHub Actions 37210822783](https://github.com/Citroz31/arty-frame-studio/actions/runs/37210822783),
+Le firmware distribué provient du commit `7ab7829` et du
+[run GitHub Actions 37723093682](https://github.com/Citroz31/arty-frame-studio/actions/runs/37723093682),
 publié par son job `publish`. Il ajoute au brochage UART corrigé, aux
 entrées ODDR enregistrées et aux commandes LED et INFO l'émission continue
-jusqu'à STOP (révision 3), la CLK libre pendant LATCH et pause (révision 4) et la
-broche TR statique, 3,3 V ou 0 V (révision 5).
+jusqu'à STOP (révision 3), la CLK libre pendant LATCH et pause (révision 4), la
+broche TR statique, 3,3 V ou 0 V (révision 5), et le moteur haute fréquence à
+deux domaines d'horloge (révision 6).
 `arty-frame firmware-check` contrôle le fichier, les sources et le rapport
 de timing avant son utilisation, sans outil FPGA ni matériel raccordé.
 

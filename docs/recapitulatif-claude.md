@@ -1,6 +1,6 @@
 # Récapitulatif des apports de Claude
 
-Ce document résume tout ce que Claude a apporté au projet du 3 au 4 octobre
+Ce document résume tout ce que Claude a apporté au projet du 3 au 8 octobre
 2026, avec le lien vers chaque commit sur GitHub. Les commits de Codex et les
 fusions faites par le propriétaire du dépôt ne sont cités que pour le contexte.
 
@@ -98,9 +98,14 @@ Fusionné dans `main` par la pull request [#2](https://github.com/Citroz31/arty-
 - **Révision 4** : bit 2 des flags pour la CLK libre. Le générateur
   d'horloge suit la même période que la CLK de trame, les deux étant en
   phase pendant les bits.
+- **Révision 5** : broche TR statique (3,3 V ou 0 V, JB4 par défaut).
+- **Révision 6** : deux domaines d'horloge (UART, paquets, LED et TR à
+  100 MHz ; moteur et sorties DDR sur l'horloge du PLL), moteur de trame
+  réécrit pour 300 MHz, diviseur d'entrée `DIVCLK_DIVIDE` du PLL.
 - **Timing** : quatre chemins critiques enregistrés (entrées ODDR, commande
-  LED, place libre de la file de réponses, dernière trame). Fmax routée
-  actuelle : 211,82 MHz pour 200 MHz exigés (révision 5, graine 1).
+  LED, place libre de la file de réponses, dernière trame), puis le moteur de
+  la révision 6. Fmax routée actuelle : 288,93 MHz pour 200 MHz exigés
+  (révision 6, graine 1), contre 211,82 MHz pour la révision 5.
 
 ### Application (Python)
 
@@ -126,12 +131,12 @@ Fusionné dans `main` par la pull request [#2](https://github.com/Citroz31/arty-
 
 ## Vérification
 
-| Niveau | Résultat sur le dernier commit de code (`d54f494`) |
+| Niveau | Résultat sur le dernier commit de code (`7ab7829`) |
 | --- | --- |
-| Tests Python | 1 026 tests (CI Linux et Windows natif, job de publication) ; Ruff et mypy |
-| Bancs RTL | 6 bancs Icarus : moteur (≈ 2 millions de contrôles par demi-tick), ODDR, protocole, SIPO, carte complète par l'UART, UART à 200 MHz |
-| Compilation réelle | Firmware révision 5 (broche TR) : 211,82 MHz routés pour 200 MHz exigés |
-| Carte réelle | Retour utilisateur (révision 4) : chargement SRAM sous Windows, test LED et DATA à 10 MHz sur JB1 observée au DSOX1202A. Révision 5 et TR : à essayer |
+| Tests Python | 1 014 tests (CI Linux et Windows natif, job de publication) ; Ruff et mypy |
+| Bancs RTL | 6 bancs Icarus : moteur (≈ 2 millions de contrôles par demi-tick), ODDR, protocole avec un cœur plus rapide puis plus lent que le contrôle, SIPO, carte complète par l'UART, UART à 100 MHz |
+| Compilation réelle | Firmware révision 6 : 288,93 MHz routés pour 200 MHz exigés ; 48 placements entre 250 et 300 MHz : 221 à 344 MHz |
+| Carte réelle | Retour utilisateur (révision 4) : chargement SRAM sous Windows, test LED et DATA à 10 MHz sur JB1 observée au DSOX1202A. Révisions 5 (TR) et 6 (haute fréquence) : à essayer |
 | VNA | Pilote PNA, liste d'états et Touchstone vérifiés contre un VNA simulé ; **à essayer sur le N5245B et le P9374A** |
 | Oscilloscope | Pilote validé avec l'oscilloscope simulé et des liaisons LAN/VISA simulées ; **à essayer sur le DSOX1202A** |
 
@@ -153,7 +158,8 @@ Voir [le mode mesure](mode-mesure.md) et [le mode VNA](mode-vna.md).
 
 | Commit | Apport |
 | --- | --- |
-| à venir | Moteur de trame réécrit (étapes BIT/TAIL, décompteurs à bit de signe, cycle d'armement), deux domaines d'horloge (`engine_link`, `frame_plan`), PLL `DIVCLK_DIVIDE`, planificateur `plan_frame_clock` et `arty-frame clock-plan`, champs d'horloge en MHz et « Adopter cette horloge » dans Pilotage, vérification du PLL dans le FASM, balayage jusqu'à 16 graines, limite absolue de 300 MHz |
+| [`7ab7829`](https://github.com/Citroz31/arty-frame-studio/commit/7ab78292b1992332e19daf59aeb89d312ca0ce91) | Moteur de trame réécrit (étapes BIT/TAIL, décompteurs à bit de signe, cycle d'armement), deux domaines d'horloge (`engine_link`, `frame_plan`), PLL `DIVCLK_DIVIDE`, planificateur `plan_frame_clock` et `arty-frame clock-plan`, champs d'horloge en MHz et « Adopter cette horloge » dans Pilotage, vérification du PLL dans le FASM, balayage jusqu'à 16 graines, limite absolue de 300 MHz |
+| [`6ef6bab`](https://github.com/Citroz31/arty-frame-studio/commit/6ef6bab9acea72633e7dd32c9bfd1aaee801568b) | Firmware de référence révision 6 republié par le workflow (288,93 MHz pour 200 MHz exigés) |
 
 La fréquence maximale atteignable est établie par 48 placements routés :
 la logique du moteur passe 300 MHz dans un placement sur trois (jusqu'à

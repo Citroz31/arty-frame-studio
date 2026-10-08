@@ -1,18 +1,23 @@
 # Vérifications réalisées et limites
 
-Le firmware précompilé, révision 5 du protocole (LED, INFO, émission
-continue, CLK libre et broche TR), a passé la synthèse, le placement/routage
-et le contrôle strict à 200 MHz : **Fmax après routage 211,82 MHz** avec la
-graine de placement 1, soit environ 6 % de marge. Les valeurs exactes de
-chaque publication sont dans [le manifeste](../firmware/prebuilt/firmware-manifest.json).
-Le compte rendu utilisateur décrit un chargement réussi et DATA observée à
-10 MHz ; les sorties à 200 MHz et la qualification complète restent à tester.
+Le firmware précompilé, révision 6 du protocole (LED, INFO, émission
+continue, CLK libre, broche TR et moteur haute fréquence à deux domaines
+d'horloge), a passé la synthèse, le placement/routage et le contrôle strict
+à 200 MHz : **Fmax après routage 288,93 MHz** avec la graine de placement 1,
+soit environ 44 % de marge, et 149,43 MHz pour le domaine de contrôle à
+100 MHz. Les valeurs exactes de chaque publication sont dans
+[le manifeste](../firmware/prebuilt/firmware-manifest.json). Le compte rendu
+utilisateur (révision 4) décrit un chargement réussi et DATA observée à
+10 MHz ; les sorties à fréquence élevée et la qualification complète restent
+à tester.
 
 ## Logiciel et simulation
 
-Les **1 026 tests Python passent** (CI Linux, Windows natif et job de publication
+Les **1 014 tests Python passent** (CI Linux, Windows natif et job de publication
 du firmware) : paramètres et profils, chronogrammes, protocole UART, transport,
-interface, CLI, protections du flux FPGA, mode mesure (balayage de mots,
+interface, CLI, planificateur d'horloge (les 6191 réglages PLL, fréquence la
+plus proche ou sans dépasser, compteurs PLL relus dans le FASM), protections
+du flux FPGA, mode mesure (balayage de mots,
 oscilloscope, instrument SCPI), mode VNA (liste d'états, pilote PNA simulé,
 fichiers Touchstone, détection) et commande TR. Ruff, formatage et mypy
 vérifient le code Python.
@@ -160,15 +165,15 @@ Le flux vérifie aussi le maintien du reset asynchrone R des trois ODDR dans
 le netlist routé après normalisation des seules entrées S inactives.
 Voir [les adaptations et le contrôle de timing](toolchain.md).
 
-Le build réel de la révision 5 a terminé avec un code de sortie **0** et le
+Le build réel de la révision 6 a terminé avec un code de sortie **0** et le
 mapping **ABC9**. Le balayage des graines s'arrête à la première qui dépasse
-l'exigence avec la marge de 3 % : la graine **1** donne
-**211,82 MHz**, **PASS at 200.00 MHz** sur `core_clock`, soit environ 6 % de
-marge, sans essayer les autres. La révision 4 avait au contraire besoin de la
-graine 8 (210,79 MHz ; les graines 1, 2, 3, 5 et 7 échouaient entre 182 et
-198 MHz). Les chemins limitants sont ceux du moteur de trame, où le routage
-représente 75 à 85 % du délai : le placement fait varier la Fmax de 182 à
-211 MHz pour le même RTL, d'où le balayage avec marge (voir
+l'exigence avec la marge de 3 % : la graine **1** donne **288,93 MHz**,
+**PASS at 200.00 MHz** sur `core_clock` (environ 44 % de marge), et
+149,43 MHz, **PASS at 100.00 MHz** sur `ctrl_clock`, sans essayer les autres.
+Les compteurs du PLL relus dans le FASM redonnent ×10 / 1 / 5. Le moteur de
+la révision 5 plafonnait à 211,82 MHz avec la même graine, et la révision 4
+avait besoin de la graine 8 (210,79 MHz) : le placement faisait varier leur
+Fmax de 182 à 211 MHz, d'où le balayage avec marge (voir
 [toolchain](toolchain.md)). La sortie TR est un registre statique qui n'ajoute
 aucun chemin critique.
 
@@ -182,7 +187,7 @@ Le parser du projet accepte le `.bit` de **3 825 995 octets**, dont
 **3 825 788 octets** de configuration, et son IDCODE **`0x03631093`**. SHA256 :
 
 ```text
-8225942623b4e49bc8593195d44ece3323c724bbb8a2b93e651b5244c99aac52
+8825690698d6848433a4f60f2bec8ba6ca19e5f873f0cae1c06dd2ca90ebe701
 ```
 
 Voir [firmware-manifest.json](../firmware/prebuilt/firmware-manifest.json),
@@ -191,8 +196,8 @@ Voir [firmware-manifest.json](../firmware/prebuilt/firmware-manifest.json),
 et refuse tout résultat final absent ou en échec.
 
 Ce fichier a été publié par le job `publish` du
-[run 37473638607](https://github.com/Citroz31/arty-frame-studio/actions/runs/37473638607),
-à partir du commit `d0b3c13`, après exécution de toute la suite Python sur le
+[run 37723093682](https://github.com/Citroz31/arty-frame-studio/actions/runs/37723093682),
+à partir du commit `7ab7829`, après exécution de toute la suite Python sur le
 nouveau contenu ([python-tests.log](../firmware/prebuilt/python-tests.log)).
 Les fichiers RTL/XDC/modèle de primitives correspondent exactement au
 manifeste. Les broches UART sont RX=A9, TX=D10. Les fins de lignes LF des `.v`/`.xdc` sont imposées par
