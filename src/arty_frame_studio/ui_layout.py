@@ -147,7 +147,7 @@ def build_layout(s: Studio) -> ft.Control:
         s.frequency_actual,
         s.clock_below,
         s.clock_plan_note,
-        ft.Row([s.clock_adopt_button], wrap=True),
+        ft.Row([s.clock_adopt_button, s.clock_build_button], wrap=True),
         _grid((s.latch_ns, 6), (s.gap_ns, 6), (s.repeat, 6)),
         ft.Column([s.continuous, s.free_clock], spacing=4),
         s.emission_note,

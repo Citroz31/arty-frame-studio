@@ -69,8 +69,10 @@ fixes) du moteur de trame, seul cadencé par le cœur.
 Dans **Pilotage**, la fréquence demandée est comparée à toutes les
 combinaisons PLL × N. La ligne « Plus proche réalisable » donne la fréquence
 obtenue, l'écart, le cœur et le réglage PLL. Si le firmware chargé y parvient,
-seul N change ; sinon **Adopter cette horloge** choisit ce cœur pour le
-prochain firmware, à préparer (compilation locale ou GitHub) puis à charger.
+seul N change ; sinon **Générer le bitstream** adopte ce cœur et produit son
+`.bit` sur ce PC, même carte connectée, puis le sélectionne pour le
+chargement. **Adopter cette horloge** choisit seulement le cœur du prochain
+firmware, par exemple pour une compilation sur GitHub.
 **Ne jamais dépasser la fréquence demandée** retient la plus proche par valeur
 inférieure, pour un récepteur qui ne tolère aucun dépassement.
 

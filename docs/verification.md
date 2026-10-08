@@ -13,11 +13,12 @@ utilisateur (révision 4) décrit un chargement réussi et DATA observée à
 
 ## Logiciel et simulation
 
-Les **1 014 tests Python passent** (CI Linux, Windows natif et job de publication
-du firmware) : paramètres et profils, chronogrammes, protocole UART, transport,
-interface, CLI, planificateur d'horloge (les 6191 réglages PLL, fréquence la
-plus proche ou sans dépasser, compteurs PLL relus dans le FASM), protections
-du flux FPGA, mode mesure (balayage de mots,
+Les **1 018 tests Python passent** (CI Linux et Windows natif ; le job de
+publication du firmware actuel en a exécuté 1 014) : paramètres et profils,
+chronogrammes, protocole UART, transport, interface, CLI, planificateur
+d'horloge (les 6191 réglages PLL, fréquence la plus proche ou sans dépasser,
+génération du bitstream en un clic, carte connectée ou non, compteurs PLL
+relus dans le FASM), protections du flux FPGA, mode mesure (balayage de mots,
 oscilloscope, instrument SCPI), mode VNA (liste d'états, pilote PNA simulé,
 fichiers Touchstone, détection) et commande TR. Ruff, formatage et mypy
 vérifient le code Python.

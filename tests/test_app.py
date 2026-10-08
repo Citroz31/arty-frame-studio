@@ -1463,6 +1463,122 @@ def test_clock_planner_finds_the_nearest_frequency_and_adopts_its_core(tmp_path)
     assert studio.clock_adopt_button.disabled
 
 
+def _fake_preparation(calls):
+    from arty_frame_studio.model import save_profile
+
+    def prepare(root, frame, firmware, tools, *, log=None):
+        calls.append((frame.core_hz, frame.divider, firmware.core_hz))
+        profile = root / "profiles" / "pilotage-frame.json"
+        profile.parent.mkdir(parents=True, exist_ok=True)
+        save_profile(frame, profile)
+        return SimpleNamespace(
+            bitstream=root / f"core-{firmware.core_hz}.bit",
+            firmware=firmware,
+            frame_profile=profile,
+            reused=firmware.is_reference,
+        )
+
+    return prepare
+
+
+def test_generate_bitstream_builds_the_planned_core_without_a_board(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app, "prepare_firmware", _fake_preparation(calls))
+    monkeypatch.setattr(app, "program_arty", lambda *_args, **_kw: pytest.fail("JTAG"))
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.toolchain_path.value = str(tmp_path / "toolchain.json")
+        (tmp_path / "toolchain.json").write_text("{}")
+        studio.frequency.value = "165"
+        studio._frequency_changed(None)
+        assert not studio.clock_build_button.disabled
+        await studio._generate_clock_plan()
+        # 165 MHz exact: 100 MHz x 33 / (4 x 5), N = 1, adopted by the frame.
+        assert calls == [(165_000_000, 1, 165_000_000)]
+        assert studio.core_hz == 165_000_000 and studio.fw_core.value == "165"
+        assert studio.windows_bitstream_path.value == str(tmp_path / "core-165000000.bit")
+        assert "compilé en local" in studio.preparation_note.value
+        # A frequency the reference firmware reaches reuses the supplied .bit.
+        studio.frequency.value = "10"
+        studio._frequency_changed(None)
+        await studio._generate_clock_plan()
+        assert calls[-1] == (200_000_000, 20, 200_000_000)
+        assert "réutilisé" in studio.preparation_note.value
+        assert studio.last_sent is None and not studio.page.messages
+
+    run_async(exercise())
+
+
+def test_generate_bitstream_with_a_board_connected_targets_the_adopted_clock(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app, "prepare_firmware", _fake_preparation(calls))
+    monkeypatch.setattr(app, "program_arty", lambda *_args, **_kw: pytest.fail("JTAG"))
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.toolchain_path.value = str(tmp_path / "toolchain.json")
+        (tmp_path / "toolchain.json").write_text("{}")
+        studio.device = DemoDevice()
+        studio.device.connect()
+        studio.frequency.value = "270"
+        studio._frequency_changed(None)
+        assert "Nouveau firmware nécessaire (cœur 270 MHz)" in studio.clock_plan_note.value
+        # Adopting then preparing separately must not fall back to the
+        # loaded firmware's 200 MHz core.
+        studio._adopt_clock_plan()
+        await studio._prepare_from_pilotage()
+        assert calls == [(270_000_000, 1, 270_000_000)]
+        assert studio.fw_core.value == "270"
+        # The connected board keeps its own time base for Envoyer.
+        assert studio.core_hz == 200_000_000
+        assert studio.current_config.core_hz == 200_000_000
+        await studio._generate_clock_plan()
+        assert calls[-1] == (270_000_000, 1, 270_000_000)
+        assert studio.windows_bitstream_path.value == str(tmp_path / "core-270000000.bit")
+        assert studio.last_sent is None
+
+    run_async(exercise())
+
+
+def test_preparation_without_adoption_keeps_the_connected_board_core(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app, "prepare_firmware", _fake_preparation(calls))
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.toolchain_path.value = str(tmp_path / "toolchain.json")
+        (tmp_path / "toolchain.json").write_text("{}")
+        studio.device = DemoDevice()
+        studio.device.connect()
+        # INFO announced a custom 270 MHz core; the FPGA tab still shows 200 MHz.
+        studio._apply_core(270_000_000)
+        studio.frequency.value = "135"
+        studio._frequency_changed(None)
+        assert studio.fw_core.value == "200"
+        await studio._prepare_from_pilotage()
+        assert calls == [(270_000_000, 2, 270_000_000)]
+        assert studio.fw_core.value == "270"
+
+    run_async(exercise())
+
+
+def test_generate_bitstream_refuses_a_frequency_beyond_the_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        app, "prepare_firmware", lambda *_a, **_kw: pytest.fail("no build beyond 300 MHz")
+    )
+
+    async def exercise():
+        studio = make_studio(tmp_path)
+        studio.frequency.value = "400"
+        studio._frequency_changed(None)
+        assert studio.clock_build_button.disabled
+        await studio._generate_clock_plan()
+        assert any("limite absolue" in line for line in studio.log_lines)
+
+    run_async(exercise())
+
+
 def test_core_clock_fields_accept_typed_mhz_at_their_precision(tmp_path):
     assert app.core_from_mhz("151.43") == 151_428_571
     assert app.core_from_mhz("151.4") == 151_428_571

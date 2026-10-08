@@ -67,9 +67,12 @@ cela ne demande pas de recompilation. Pour changer l'**horloge du cœur**
 (6191 valeurs de 6,25 à 300 MHz) ou les **broches DATA, CLK et LATCH** sur JA
 à JD, elle prépare une compilation locale. Par exemple, une CLK exacte de
 150 MHz demande un cœur à 150 MHz ; le cœur de référence à 200 MHz donne
-200 ou 100 MHz pour cette demande. **Adopter cette horloge**, sous la
-fréquence demandée, choisit le cœur du planificateur ;
-`arty-frame clock-plan 151 --output fw.json` fait de même en ligne de commande.
+200 ou 100 MHz pour cette demande. **Générer le bitstream**, sous la
+fréquence demandée, adopte le cœur du planificateur et prépare son `.bit` en
+un clic : réutilisé s'il existe déjà, sinon compilé sur ce PC, puis
+sélectionné pour le chargement. **Adopter cette horloge** choisit seulement ce
+cœur, par exemple pour **Compiler sur GitHub** ;
+`arty-frame clock-plan 151 --output fw.json` le fait en ligne de commande.
 
 Sous Windows x64, **Installer les outils Windows locaux** prépare Yosys,
 openXC7/nextpnr et Project X-Ray dans votre compte ; **Compiler sur ce PC**

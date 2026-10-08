@@ -131,9 +131,9 @@ Fusionné dans `main` par la pull request [#2](https://github.com/Citroz31/arty-
 
 ## Vérification
 
-| Niveau | Résultat sur le dernier commit de code (`7ab7829`) |
+| Niveau | Résultat sur la branche (8 octobre) |
 | --- | --- |
-| Tests Python | 1 014 tests (CI Linux et Windows natif, job de publication) ; Ruff et mypy |
+| Tests Python | 1 018 tests (CI Linux et Windows natif ; 1 014 dans le job de publication) ; Ruff et mypy |
 | Bancs RTL | 6 bancs Icarus : moteur (≈ 2 millions de contrôles par demi-tick), ODDR, protocole avec un cœur plus rapide puis plus lent que le contrôle, SIPO, carte complète par l'UART, UART à 100 MHz |
 | Compilation réelle | Firmware révision 6 : 288,93 MHz routés pour 200 MHz exigés ; 48 placements entre 250 et 300 MHz : 221 à 344 MHz |
 | Carte réelle | Retour utilisateur (révision 4) : chargement SRAM sous Windows, test LED et DATA à 10 MHz sur JB1 observée au DSOX1202A. Révisions 5 (TR) et 6 (haute fréquence) : à essayer |

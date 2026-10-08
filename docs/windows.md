@@ -105,8 +105,11 @@ du cœur, les broches DATA/CLK/LATCH, le courant de sortie ou le slew.
    le projet ; les builds et leurs reçus vont sous
    `%LOCALAPPDATA%\ArtyFrameStudio\builds`, dans un sous-dossier propre au projet.
    Ces caches évitent les chemins OneDrive et réduisent la longueur des chemins.
-3. Cliquer sur **Vérifier les outils**. Choisir ensuite les broches et l'horloge
-   du cœur dans **Pilotage** puis **Préparer le firmware depuis Pilotage**, ou
+3. Cliquer sur **Vérifier les outils**. Pour une fréquence CLK quelconque, la
+   saisir dans **Pilotage** puis cliquer sur **Générer le bitstream** :
+   l'application retient la fréquence réalisable la plus proche et compile le
+   `.bit` de son horloge de cœur. Sinon, choisir les broches et l'horloge du
+   cœur dans **Pilotage** puis **Préparer le firmware depuis Pilotage**, ou
    utiliser **FPGA → Personnaliser le firmware → Compiler sur ce PC**.
    Une préparation compatible avec le `.bit` fourni ne télécharge aucun outil.
 4. Attendre le résultat de synthèse et routage. Le timing final doit atteindre

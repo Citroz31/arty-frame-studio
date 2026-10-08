@@ -560,6 +560,9 @@ class Studio:
         self.frequency_actual = ft.Text(size=19, color=AMBER, weight=ft.FontWeight.W_600)
         # Planificateur : fréquence CLK la plus proche, tous firmwares confondus.
         self.clock_plan: FrameClockPlan | None = None
+        # Core chosen by "Adopter cette horloge" for the next firmware; with a
+        # board connected, it differs from the loaded firmware's core.
+        self.adopted_core_hz: int | None = None
         self.clock_below = ft.Switch(
             label="Ne jamais dépasser la fréquence demandée",
             value=False,
@@ -573,6 +576,15 @@ class Studio:
             on_click=self._adopt_clock_plan,
             disabled=True,
             tooltip="Choisit le cœur de ce plan pour le prochain firmware et règle N",
+        )
+        self.clock_build_button = ft.ElevatedButton(
+            "Générer le bitstream",
+            icon=ft.Icons.BUILD,
+            on_click=self._generate_clock_plan,
+            tooltip=(
+                "Adopte l'horloge de ce plan, puis réutilise le .bit compatible ou le "
+                "compile sur ce PC ; ni chargement ni envoi"
+            ),
         )
         self.timing_summary = ft.Text(color=MUTED, size=12)
         self.quantization_note = ft.Text(size=12, color=MUTED)
@@ -889,13 +901,16 @@ class Studio:
         bits = int(self.bit_count.value or "")
         return parse_word(self.word.value or "", base, bits), bits
 
-    def _config(self) -> FrameConfig:
+    def _config(self, core_hz: int | None = None) -> FrameConfig:
+        """Trame des champs de Pilotage, ou la même demande pour le cœur ``core_hz``."""
+        core = self.core_hz if core_hz is None else core_hz
         word, bits = self._frame_value()
         # The divider is authoritative, while the requested frequency must also
-        # remain valid after edits to another field.
+        # remain valid after edits to another field. Another firmware's core
+        # takes the divider of the requested frequency.
         requested_hz = float((self.frequency.value or "").replace(",", ".")) * 1e6
-        divider_for_frequency(requested_hz, self.core_hz, nearest=not self.clock_below.value)
-        divider = int(self.divider.value or "")
+        planned = divider_for_frequency(requested_hz, core, nearest=not self.clock_below.value)
+        divider = int(self.divider.value or "") if core == self.core_hz else planned
         repeat_count = CONTINUOUS if self.continuous.value else int(self.repeat.value or "")
         if not self.continuous.value and not 1 <= repeat_count <= MAX_COUNTER:
             raise ValueError(
@@ -907,13 +922,11 @@ class Studio:
                 float((self.latch_ns.value or "").replace(",", ".")),
                 float((self.gap_ns.value or "").replace(",", ".")),
                 divider,
-                self.core_hz,
+                core,
             )
         else:
-            latch_ticks = ticks_from_ns(self.latch_ns.value or "", core_hz=self.core_hz)
-            gap_ticks = ticks_from_ns(
-                self.gap_ns.value or "", allow_zero=True, core_hz=self.core_hz
-            )
+            latch_ticks = ticks_from_ns(self.latch_ns.value or "", core_hz=core)
+            gap_ticks = ticks_from_ns(self.gap_ns.value or "", allow_zero=True, core_hz=core)
         return FrameConfig(
             word=word,
             bit_count=bits,
@@ -923,7 +936,7 @@ class Studio:
             repeat_count=repeat_count,
             lsb_first=bool(self.lsb.value),
             latch_active_low=bool(self.latch_low.value),
-            core_hz=self.core_hz,
+            core_hz=core,
             free_clock=bool(self.free_clock.value),
         )
 
@@ -1084,12 +1097,14 @@ class Studio:
             return
         self.fw_core.value = mhz_text(plan.core_hz)
         self.fw_core.helper_text = plan.setting.describe()
+        self.adopted_core_hz = plan.core_hz
         connected = self.device is not None and self.device.connected
         if connected and plan.core_hz != self.core_hz:
             self._log(
                 f"Prochain firmware : cœur {format_hz(plan.setting.exact_hz)} pour CLK "
                 f"{format_hz(plan.achieved_hz)}. La carte connectée garde son cœur à "
-                f"{format_hz(self.core_hz)} : compiler, charger le .bit puis reconnecter.",
+                f"{format_hz(self.core_hz)} : générer le bitstream, le charger puis "
+                "reconnecter.",
                 AMBER,
             )
         else:
@@ -1108,6 +1123,17 @@ class Studio:
         self._refresh_firmware_summary()
         self._refresh_clock_plan()
         self._changed()
+
+    async def _generate_clock_plan(self, _: Any = None) -> None:
+        """Fréquence demandée → horloge réalisable → .bit de ce cœur, sans chargement."""
+        if self.tool_pending:
+            return
+        self._refresh_clock_plan()
+        if self.clock_plan is None:
+            self._error("Générer le bitstream", ValueError(self.clock_plan_note.value))
+            return
+        self._adopt_clock_plan()
+        await self._prepare_from_pilotage()
 
     def _divider_changed(self, _: Any) -> None:
         try:
@@ -1312,6 +1338,7 @@ class Studio:
         self.prepare_local_button.disabled = (
             self.tool_pending or self.current_config is None or not hardware_valid
         )
+        self.clock_build_button.disabled = self.prepare_local_button.disabled
         self.local_install_button.disabled = self.tool_pending or not self.is_windows
         self.program_button.visible = not self.is_windows
         for control in self.pilotage_pins.values():
@@ -2268,7 +2295,12 @@ class Studio:
             return
         try:
             frame = self._config()
-            firmware = replace(self._firmware_settings(), core_hz=frame.core_hz)
+            settings = self._firmware_settings()
+            # Pilotage shows the loaded firmware's core; a clock adopted with a
+            # board connected targets the next firmware instead.
+            if settings.core_hz == self.adopted_core_hz != frame.core_hz:
+                frame = self._config(core_hz=settings.core_hz)
+            firmware = replace(settings, core_hz=frame.core_hz)
             configuration = self._path(self.toolchain_path.value)
             self._set_firmware(firmware)
         except ValueError as exc:
